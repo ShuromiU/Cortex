@@ -7,7 +7,7 @@ export { CortexStore, type SessionRow, type EventRow, type ParsedEvent, type Not
 // Capture
 export { handleReadEvent, handleEditEvent, handleWriteEvent, handleCmdEvent, handleAgentEvent } from './capture/hooks.js';
 export { redactCommand, classifyCommand, extractTouchedFiles } from './capture/redact.js';
-export { consolidateLevel1, renderCompressed, type CompressedEvent } from './capture/consolidate.js';
+export { consolidateLevel1, renderCompressed, getPendingConsolidation, writeSessionSummary, promoteSubagentNotes, mergeProjectState, type CompressedEvent } from './capture/consolidate.js';
 // Query
 export { buildHeader, buildFullState } from './query/state.js';
 export { recall } from './query/recall.js';

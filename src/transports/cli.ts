@@ -11,7 +11,7 @@ import {
   handleCmdEvent,
   handleAgentEvent,
 } from '../capture/hooks.js';
-import { consolidateLevel1, renderCompressed } from '../capture/consolidate.js';
+import { consolidateLevel1, renderCompressed, mergeProjectState } from '../capture/consolidate.js';
 import { buildHeader, formatTokens } from '../query/state.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -131,6 +131,9 @@ export function createProgram(): Command {
           });
         }
       }
+
+      // Level 3: merge older session states into project state if threshold exceeded
+      mergeProjectState(store);
 
       // End any currently active session
       const current = store.getCurrentSession();
