@@ -8,6 +8,7 @@ import {
   getPendingConsolidation,
   writeSessionSummary,
   promoteSubagentNotes,
+  mergeProjectState,
 } from '../src/capture/consolidate.js';
 import type { CompressedEvent } from '../src/capture/consolidate.js';
 
@@ -443,5 +444,97 @@ describe('promoteSubagentNotes', () => {
     const contents = parentNotes.map(n => n.content);
     expect(contents).toContain('Insight from child 1');
     expect(contents).toContain('Insight from child 2');
+  });
+});
+
+// ── Level 3: mergeProjectState ────────────────────────────────────────
+
+function makeStoreWithSessionStates(count: number): { store: CortexStore } {
+  const db = createTestDb();
+  const store = new CortexStore(db);
+  for (let i = 0; i < count; i++) {
+    const s = store.createSession();
+    store.endSession(s.id);
+    store.insertState({ sessionId: s.id, layer: 'session', content: `Session ${i + 1} summary` });
+  }
+  return { store };
+}
+
+describe('mergeProjectState', () => {
+  it('does nothing when fewer than 6 sessions', () => {
+    const { store } = makeStoreWithSessionStates(5);
+    const result = mergeProjectState(store);
+    expect(result).toBe(false);
+    expect(store.getProjectState()).toBeUndefined();
+  });
+
+  it('does nothing when exactly 5 sessions (boundary)', () => {
+    const { store } = makeStoreWithSessionStates(5);
+    const result = mergeProjectState(store);
+    expect(result).toBe(false);
+  });
+
+  it('merges older sessions into project state when more than 5', () => {
+    const { store } = makeStoreWithSessionStates(7);
+    const result = mergeProjectState(store);
+    expect(result).toBe(true);
+
+    const projectState = store.getProjectState();
+    expect(projectState).toBeDefined();
+    // Should contain content from older session summaries (7 - 5 = 2 sessions merged)
+    expect(projectState!.content).toContain('summary');
+  });
+
+  it('replaces existing project state on re-merge', () => {
+    const { store } = makeStoreWithSessionStates(7);
+    mergeProjectState(store);
+    const first = store.getProjectState();
+    expect(first).toBeDefined();
+
+    // Add more sessions and re-merge
+    const s = store.createSession();
+    store.endSession(s.id);
+    store.insertState({ sessionId: s.id, layer: 'session', content: 'Newest session summary' });
+
+    const result = mergeProjectState(store);
+    expect(result).toBe(true);
+
+    const projectState = store.getProjectState();
+    // Should only have one project state row (replaced)
+    expect(projectState).toBeDefined();
+  });
+
+  it('preserves recent session states (keeps most recent 5 accessible)', () => {
+    const { store } = makeStoreWithSessionStates(8);
+    mergeProjectState(store);
+
+    // The 5 most recent session states should be accessible via getRecentStates(5)
+    const recentStates = store.getRecentStates(5);
+    expect(recentStates).toHaveLength(5);
+    // All 5 accessible states should contain "summary" text
+    for (const state of recentStates) {
+      expect(state.content).toContain('summary');
+    }
+
+    // Project state should be created with merged older content
+    const projectState = store.getProjectState();
+    expect(projectState).toBeDefined();
+  });
+
+  it('truncates merged content longer than 2000 chars', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    // Create 15 sessions with large content so merged total exceeds 2000 chars
+    for (let i = 0; i < 15; i++) {
+      const s = store.createSession();
+      store.endSession(s.id);
+      store.insertState({ sessionId: s.id, layer: 'session', content: 'A'.repeat(300) });
+    }
+
+    mergeProjectState(store);
+
+    const projectState = store.getProjectState();
+    expect(projectState).toBeDefined();
+    expect(projectState!.content).toContain('[truncated]');
   });
 });

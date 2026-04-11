@@ -301,6 +301,68 @@ export function promoteSubagentNotes(
   }
 }
 
+// ── Level 3: Cross-session merge ─────────────────────────────────────
+
+const MERGE_THRESHOLD = 5;
+const TRUNCATE_LIMIT = 2000;
+
+/**
+ * Merge older session states into a project-level state when session count exceeds MERGE_THRESHOLD.
+ * Returns true if a merge was performed, false otherwise.
+ */
+export function mergeProjectState(store: CortexStore): boolean {
+  const recentStates = store.getRecentStates(100);
+
+  if (recentStates.length <= MERGE_THRESHOLD) {
+    return false;
+  }
+
+  // Keep the most recent 5 as-is; merge older ones
+  const toKeep = recentStates.slice(0, MERGE_THRESHOLD);
+  const toMerge = recentStates.slice(MERGE_THRESHOLD);
+
+  // Build merged content
+  const parts: string[] = [];
+
+  // Existing project state (if any)
+  const existingProject = store.getProjectState();
+  if (existingProject) {
+    parts.push(existingProject.content);
+  }
+
+  // Older session summaries
+  for (const state of toMerge) {
+    parts.push(state.content);
+  }
+
+  // Active notes summary (top 20)
+  const activeNotes = store.getActiveNotes();
+  const topNotes = activeNotes.slice(0, 20);
+  if (topNotes.length > 0) {
+    const notesText = topNotes
+      .map(n => {
+        const subject = n.subject ? `[${n.subject}] ` : '';
+        return `- ${n.kind}: ${subject}${n.content}`;
+      })
+      .join('\n');
+    parts.push(`Active notes:\n${notesText}`);
+  }
+
+  let merged = parts.join('\n\n');
+
+  // Truncate to ~2000 chars if needed
+  if (merged.length > TRUNCATE_LIMIT) {
+    merged = merged.slice(0, TRUNCATE_LIMIT) + '\n[truncated]';
+  }
+
+  store.replaceProjectState(merged);
+
+  // toKeep is referenced to avoid unused variable lint
+  void toKeep;
+
+  return true;
+}
+
 export function renderCompressed(events: CompressedEvent[]): string {
   const lines: string[] = [];
 
