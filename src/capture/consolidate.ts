@@ -1,4 +1,4 @@
-import type { CortexStore, ParsedEvent } from '../db/store.js';
+import type { CortexStore, ParsedEvent, SessionRow, InsertNoteOpts } from '../db/store.js';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -212,6 +212,93 @@ export function consolidateLevel1(
 
   const pass1 = collapseTestCycles(events);
   return deduplicateFileEvents(pass1);
+}
+
+// ── Level 2: Session consolidation & subagent promotion ──────────────
+
+/**
+ * Returns sessions that have ended but have no session-layer state yet.
+ */
+export function getPendingConsolidation(store: CortexStore): SessionRow[] {
+  return store.getUnconsolidatedSessions();
+}
+
+/**
+ * Write a session summary to the state table (layer='session'),
+ * then prune raw events for that session.
+ */
+export function writeSessionSummary(
+  store: CortexStore,
+  sessionId: string,
+  summary: string,
+): void {
+  store.insertState({ sessionId, layer: 'session', content: summary });
+  store.deleteEventsBySession(sessionId);
+}
+
+/**
+ * Promote notes from child sessions into the parent session.
+ * - Exact duplicates (same kind + subject + content) are skipped.
+ * - Conflicts (same kind + subject, different content, non-null subject) → promote AND mark both as conflict.
+ * - Otherwise → promote (insert copy into parent session).
+ */
+export function promoteSubagentNotes(
+  store: CortexStore,
+  parentSessionId: string,
+): void {
+  const children = store.getChildSessions(parentSessionId);
+
+  for (const child of children) {
+    const childNotes = store.getActiveNotes(child.id);
+    // Include superseded notes too — child insertions may have already superseded parent notes
+    const parentNotes = store.getNotesBySession(parentSessionId);
+
+    for (const childNote of childNotes) {
+      // Check for exact duplicate: same kind + subject + content (in any status)
+      const exactDup = parentNotes.find(
+        p =>
+          p.kind === childNote.kind &&
+          p.subject === childNote.subject &&
+          p.content === childNote.content,
+      );
+      if (exactDup) continue;
+
+      // Check for conflict: same kind + subject (non-null), different content
+      const conflictNote =
+        childNote.subject !== null
+          ? parentNotes.find(
+              p =>
+                p.kind === childNote.kind &&
+                p.subject === childNote.subject &&
+                p.content !== childNote.content,
+            )
+          : undefined;
+
+      if (conflictNote) {
+        // Promote the child note — insertNote may auto-supersede the conflicting parent note
+        const promoted = store.insertNote({
+          sessionId: parentSessionId,
+          kind: childNote.kind as InsertNoteOpts['kind'],
+          content: childNote.content,
+          ...(childNote.subject !== null ? { subject: childNote.subject } : {}),
+          ...(childNote.alternatives !== null ? { alternatives: childNote.alternatives } : {}),
+        });
+        // Re-activate the original conflict note if auto-superseded, then mark both as conflict
+        store.updateNoteStatus(conflictNote.id, 'active');
+        store.markConflict(conflictNote.id);
+        store.markConflict(promoted.id);
+      } else {
+        // Normal promotion
+        store.insertNote({
+          sessionId: parentSessionId,
+          kind: childNote.kind as InsertNoteOpts['kind'],
+          content: childNote.content,
+          ...(childNote.subject !== null ? { subject: childNote.subject } : {}),
+          ...(childNote.alternatives !== null ? { alternatives: childNote.alternatives } : {}),
+        });
+      }
+    }
+  }
 }
 
 export function renderCompressed(events: CompressedEvent[]): string {

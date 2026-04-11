@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { applySchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
-import { consolidateLevel1, renderCompressed } from '../src/capture/consolidate.js';
+import {
+  consolidateLevel1,
+  renderCompressed,
+  getPendingConsolidation,
+  writeSessionSummary,
+  promoteSubagentNotes,
+} from '../src/capture/consolidate.js';
 import type { CompressedEvent } from '../src/capture/consolidate.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -268,5 +274,174 @@ describe('renderCompressed', () => {
 
   it('returns empty string for empty array', () => {
     expect(renderCompressed([])).toBe('');
+  });
+});
+
+// ── Level 2: getPendingConsolidation ──────────────────────────────────
+
+describe('getPendingConsolidation', () => {
+  it('detects sessions needing consolidation', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const s = store.createSession();
+    store.endSession(s.id);
+
+    const pending = getPendingConsolidation(store);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.id).toBe(s.id);
+  });
+
+  it('skips already-consolidated sessions', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const s = store.createSession();
+    store.endSession(s.id);
+    // Write a session-layer state → this session is now consolidated
+    store.insertState({ sessionId: s.id, layer: 'session', content: 'done' });
+
+    const pending = getPendingConsolidation(store);
+    expect(pending).toHaveLength(0);
+  });
+
+  it('skips active sessions', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    store.createSession(); // active, never ended
+
+    const pending = getPendingConsolidation(store);
+    expect(pending).toHaveLength(0);
+  });
+});
+
+// ── Level 2: writeSessionSummary ──────────────────────────────────────
+
+describe('writeSessionSummary', () => {
+  it('writes session summary and prunes events', () => {
+    const { store, sessionId } = makeStore();
+    store.insertEvent({ sessionId, type: 'read', target: 'a.ts' });
+    store.insertEvent({ sessionId, type: 'edit', target: 'b.ts' });
+
+    expect(store.getEventCount(sessionId)).toBe(2);
+
+    writeSessionSummary(store, sessionId, 'Worked on a.ts and b.ts');
+
+    // State written
+    const state = store.getSessionState(sessionId);
+    expect(state).toBeDefined();
+    expect(state!.content).toBe('Worked on a.ts and b.ts');
+    expect(state!.layer).toBe('session');
+
+    // Events pruned
+    expect(store.getEventCount(sessionId)).toBe(0);
+  });
+
+  it('session appears consolidated after writeSessionSummary', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const s = store.createSession();
+    store.endSession(s.id);
+
+    writeSessionSummary(store, s.id, 'Summary text');
+
+    const pending = getPendingConsolidation(store);
+    expect(pending).toHaveLength(0);
+  });
+});
+
+// ── Level 2: promoteSubagentNotes ─────────────────────────────────────
+
+describe('promoteSubagentNotes', () => {
+  it('promotes child session notes to parent', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const parent = store.createSession();
+    const child = store.createSession({ parentSessionId: parent.id });
+
+    store.insertNote({
+      sessionId: child.id,
+      kind: 'insight',
+      content: 'Found something interesting',
+    });
+
+    promoteSubagentNotes(store, parent.id);
+
+    const parentNotes = store.getActiveNotes(parent.id);
+    expect(parentNotes).toHaveLength(1);
+    expect(parentNotes[0]!.content).toBe('Found something interesting');
+  });
+
+  it('deduplicates identical notes on promotion', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const parent = store.createSession();
+    const child = store.createSession({ parentSessionId: parent.id });
+
+    // Same note in both parent and child
+    store.insertNote({
+      sessionId: parent.id,
+      kind: 'insight',
+      content: 'Duplicate insight',
+    });
+    store.insertNote({
+      sessionId: child.id,
+      kind: 'insight',
+      content: 'Duplicate insight',
+    });
+
+    promoteSubagentNotes(store, parent.id);
+
+    const parentNotes = store.getActiveNotes(parent.id);
+    // Should still be only 1, not 2
+    expect(parentNotes).toHaveLength(1);
+  });
+
+  it('flags conflicting notes (same kind+subject, different content)', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const parent = store.createSession();
+    const child = store.createSession({ parentSessionId: parent.id });
+
+    store.insertNote({
+      sessionId: parent.id,
+      kind: 'decision',
+      subject: 'auth-strategy',
+      content: 'Use JWT',
+    });
+    store.insertNote({
+      sessionId: child.id,
+      kind: 'decision',
+      subject: 'auth-strategy',
+      content: 'Use sessions instead',
+    });
+
+    promoteSubagentNotes(store, parent.id);
+
+    const parentNotes = store.getActiveNotes(parent.id);
+    // Should have 2 notes (original + promoted)
+    expect(parentNotes).toHaveLength(2);
+
+    // Both should be marked as conflict
+    for (const note of parentNotes) {
+      expect(note.conflict).toBe(true);
+    }
+  });
+
+  it('promotes notes from multiple children', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const parent = store.createSession();
+    const child1 = store.createSession({ parentSessionId: parent.id });
+    const child2 = store.createSession({ parentSessionId: parent.id });
+
+    store.insertNote({ sessionId: child1.id, kind: 'insight', content: 'Insight from child 1' });
+    store.insertNote({ sessionId: child2.id, kind: 'insight', content: 'Insight from child 2' });
+
+    promoteSubagentNotes(store, parent.id);
+
+    const parentNotes = store.getActiveNotes(parent.id);
+    expect(parentNotes).toHaveLength(2);
+    const contents = parentNotes.map(n => n.content);
+    expect(contents).toContain('Insight from child 1');
+    expect(contents).toContain('Insight from child 2');
   });
 });
