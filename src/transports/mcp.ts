@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import * as path from 'node:path';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -13,6 +15,48 @@ import type { InsertNoteOpts } from '../db/store.js';
 import { buildFullState } from '../query/state.js';
 import { recall } from '../query/recall.js';
 import { brief } from '../query/brief.js';
+
+// ── Engagement state file ────────────────────────────────────────────
+
+let engagementPath: string | null = null;
+
+export function deriveEngagementPath(dir: string): string {
+  // Normalize to lowercase POSIX path for cross-environment consistency
+  // Node.js sees C:\Claude Code\cortex, bash sees /c/Claude Code/cortex
+  let normalized = dir.replace(/\\/g, '/').toLowerCase();
+  normalized = normalized.replace(/^([a-z]):\//, '/$1/');
+  const sanitized = normalized.replace(/[^a-z0-9]/g, '_');
+  // Use os.tmpdir() — on Windows, /tmp/ resolves to C:\tmp\ (doesn't exist),
+  // but os.tmpdir() resolves to the real temp dir that Git Bash's /tmp/ maps to
+  return path.join(os.tmpdir(), `cortex-${sanitized}.state`);
+}
+
+function readEngagement(): Record<string, string> {
+  if (!engagementPath) return {};
+  try {
+    const raw = fs.readFileSync(engagementPath, 'utf8');
+    const result: Record<string, string> = {};
+    for (const line of raw.split('\n')) {
+      const eq = line.indexOf('=');
+      if (eq > 0) result[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function writeEngagement(key: string, value: string): void {
+  if (!engagementPath) return;
+  const content = readEngagement();
+  content[key] = value;
+  const out = Object.entries(content).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
+  try {
+    fs.writeFileSync(engagementPath, out);
+  } catch {
+    // /tmp/ write failure is non-fatal — don't break the MCP server
+  }
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -126,6 +170,7 @@ export function handleToolCall(
 ): string {
   switch (toolName) {
     case 'cortex_state': {
+      writeEngagement('state_called', 'true');
       return buildFullState(store);
     }
 
@@ -144,6 +189,7 @@ export function handleToolCall(
           ...(subject !== undefined ? { subject } : {}),
           ...(alternatives !== undefined ? { alternatives } : {}),
         });
+        writeEngagement('edit_count_since_note', '0');
         const subjectStr = note.subject ? `[${note.subject}]` : '';
         const preview = note.content.length > 60 ? note.content.slice(0, 60) + '…' : note.content;
         return `Noted (${note.kind}${subjectStr}): ${preview}`;
@@ -200,6 +246,7 @@ export function createMcpServer(store: CortexStore): Server {
 
 export async function startServer(startDir?: string): Promise<void> {
   const dir = startDir ?? process.cwd();
+  engagementPath = deriveEngagementPath(dir);
   const { store } = openCortexDb(dir);
   ensureSession(store);
 

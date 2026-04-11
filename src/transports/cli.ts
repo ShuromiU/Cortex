@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 import { Command } from 'commander';
 import { openDatabase, applySchema, initializeMeta } from '../db/schema.js';
 import { CortexStore } from '../db/store.js';
@@ -13,6 +14,7 @@ import {
 } from '../capture/hooks.js';
 import { consolidateLevel1, renderCompressed, mergeProjectState } from '../capture/consolidate.js';
 import { buildHeader, formatTokens } from '../query/state.js';
+import { deriveEngagementPath } from './mcp.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -143,6 +145,14 @@ export function createProgram(): Command {
 
       // Create new session
       store.createSession();
+
+      // Reset engagement state file for the new session
+      const engPath = deriveEngagementPath(process.cwd());
+      try {
+        fs.writeFileSync(engPath, 'state_called=false\nedit_count_since_note=0\n');
+      } catch {
+        // Non-fatal — /tmp/ write may fail on some systems
+      }
 
       // Print header
       const header = buildHeader(store);
