@@ -272,7 +272,7 @@ export class CortexStore {
 
   getEventsBySession(sessionId: string): ParsedEvent[] {
     const rows = this.db
-      .prepare('SELECT * FROM events WHERE session_id = ? ORDER BY timestamp ASC')
+      .prepare('SELECT * FROM events WHERE session_id = ? ORDER BY timestamp ASC, rowid ASC')
       .all(sessionId) as EventRow[];
     return rows.map(parseEventRow);
   }
