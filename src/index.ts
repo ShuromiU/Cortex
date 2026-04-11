@@ -13,5 +13,5 @@ export { buildHeader, buildFullState } from './query/state.js';
 export { recall } from './query/recall.js';
 export { brief } from './query/brief.js';
 // Transports
-export { createMcpServer, startServer, handleToolCall, TOOL_DEFINITIONS } from './transports/mcp.js';
+export { createMcpServer, startServer, handleToolCall, TOOL_DEFINITIONS, deriveEngagementPath } from './transports/mcp.js';
 export { createProgram } from './transports/cli.js';
