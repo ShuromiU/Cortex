@@ -24,8 +24,8 @@ function createStore(): { store: CortexStore; sessionId: string } {
 // ── TOOL_DEFINITIONS ──────────────────────────────────────────────────
 
 describe('TOOL_DEFINITIONS', () => {
-  it('defines exactly 4 tools', () => {
-    expect(TOOL_DEFINITIONS).toHaveLength(4);
+  it('defines exactly 7 tools', () => {
+    expect(TOOL_DEFINITIONS).toHaveLength(7);
   });
 
   it('has cortex_state tool', () => {
@@ -82,6 +82,26 @@ describe('TOOL_DEFINITIONS', () => {
     // "for" is optional — not in required
     const requiredArr = tool.inputSchema.required as string[];
     expect(requiredArr).not.toContain('for');
+  });
+
+  it('has cortex_engage tool with no required fields', () => {
+    const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_engage');
+    expect(tool).toBeDefined();
+    expect(tool!.inputSchema.required).toHaveLength(0);
+  });
+
+  it('has cortex_disengage tool with no required fields', () => {
+    const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_disengage');
+    expect(tool).toBeDefined();
+    expect(tool!.inputSchema.required).toHaveLength(0);
+  });
+
+  it('has cortex_summarize tool with optional what field', () => {
+    const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_summarize');
+    expect(tool).toBeDefined();
+    expect(tool!.inputSchema.required).toHaveLength(0);
+    const whatProp = (tool!.inputSchema.properties as Record<string, unknown>)['what'];
+    expect(whatProp).toBeDefined();
   });
 });
 
@@ -220,6 +240,55 @@ describe('handleToolCall', () => {
   it('cortex_brief reports no context when nothing matches', () => {
     const result = handleToolCall(store, 'cortex_brief', { topic: 'irrelevant-xyz' });
     expect(result).toContain('No context found for');
+  });
+
+  // cortex_engage
+
+  it('cortex_engage returns cognitive state string', () => {
+    const result = handleToolCall(store, 'cortex_engage', {});
+    expect(typeof result).toBe('string');
+  });
+
+  it('cortex_engage includes notes when they exist', () => {
+    store.insertNote({ sessionId, kind: 'insight', content: 'Existing context' });
+    const result = handleToolCall(store, 'cortex_engage', {});
+    expect(result).toContain('Existing context');
+  });
+
+  // cortex_disengage
+
+  it('cortex_disengage returns confirmation', () => {
+    const result = handleToolCall(store, 'cortex_disengage', {});
+    expect(result).toContain('disengaged');
+  });
+
+  // cortex_summarize
+
+  it('cortex_summarize returns summary string', () => {
+    const result = handleToolCall(store, 'cortex_summarize', {});
+    expect(typeof result).toBe('string');
+  });
+
+  it('cortex_summarize includes user description when provided', () => {
+    const result = handleToolCall(store, 'cortex_summarize', { what: 'Refactored the auth module' });
+    expect(result).toContain('Refactored the auth module');
+  });
+
+  it('cortex_summarize includes file activity', () => {
+    store.insertEvent({ sessionId, type: 'edit', target: 'src/foo.ts' });
+    store.insertEvent({ sessionId, type: 'edit', target: 'src/foo.ts' });
+    store.insertEvent({ sessionId, type: 'write', target: 'src/bar.ts' });
+    const result = handleToolCall(store, 'cortex_summarize', {});
+    expect(result).toContain('src/foo.ts');
+    expect(result).toContain('src/bar.ts');
+  });
+
+  it('cortex_summarize stores session state', () => {
+    store.insertEvent({ sessionId, type: 'edit', target: 'src/test.ts' });
+    handleToolCall(store, 'cortex_summarize', {});
+    const state = store.getSessionState(sessionId);
+    expect(state).toBeDefined();
+    expect(state!.content).toContain('src/test.ts');
   });
 
   // unknown tool

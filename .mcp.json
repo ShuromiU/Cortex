@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "refcertify": {
+      "command": "refcertify",
+      "args": ["serve"]
+    },
+    "cortex": {
+      "command": "cortex",
+      "args": ["serve"]
+    },
+    "sibling-reports": {
+      "command": "node",
+      "args": ["../sibling-reports-mcp/dist/index.js"]
+    }
+  }
+}
