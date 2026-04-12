@@ -149,7 +149,7 @@ export function createProgram(): Command {
       // Reset engagement state file for the new session
       const engPath = deriveEngagementPath(process.cwd());
       try {
-        fs.writeFileSync(engPath, 'state_called=false\nedit_count_since_note=0\n');
+        fs.writeFileSync(engPath, 'enabled=false\nstate_called=false\n');
       } catch {
         // Non-fatal — /tmp/ write may fail on some systems
       }

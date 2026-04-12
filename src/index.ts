@@ -12,6 +12,7 @@ export { consolidateLevel1, renderCompressed, getPendingConsolidation, writeSess
 export { buildHeader, buildFullState } from './query/state.js';
 export { recall } from './query/recall.js';
 export { brief } from './query/brief.js';
+export { buildSessionSummary } from './query/summarize.js';
 // Transports
 export { createMcpServer, startServer, handleToolCall, TOOL_DEFINITIONS, deriveEngagementPath } from './transports/mcp.js';
 export { createProgram } from './transports/cli.js';

@@ -19,7 +19,7 @@ export function buildHeader(store: CortexStore): string {
   const count = store.getSessionCount();
 
   if (count === 0) {
-    return 'Cortex: no prior sessions';
+    return 'Cortex: no prior sessions | call cortex_engage to activate working memory';
   }
 
   // Token savings
@@ -60,7 +60,7 @@ export function buildHeader(store: CortexStore): string {
   }
 
   // Fallback
-  return `Cortex: ${focus} | ${countSessions}${savingsStr}`;
+  return `Cortex: ${focus} | ${countSessions}${savingsStr}\n→ Call cortex_engage to activate working memory for this session`;
 }
 
 interface FileActivity {

@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "nexus": {
+      "command": "nexus",
+      "args": ["serve"]
+    },
+    "cortex": {
+      "command": "cortex",
+      "args": ["serve"]
+    },
+    "flowstate-reports": {
+      "command": "node",
+      "args": ["../flowstate-reports-mcp/dist/index.js"]
+    }
+  }
+}

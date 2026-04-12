@@ -39,7 +39,7 @@ describe('formatTokens', () => {
 describe('buildHeader — empty', () => {
   it('returns no-prior-sessions message when no sessions exist', () => {
     const store = makeStore();
-    expect(buildHeader(store)).toBe('Cortex: no prior sessions');
+    expect(buildHeader(store)).toBe('Cortex: no prior sessions | call cortex_engage to activate working memory');
   });
 });
 

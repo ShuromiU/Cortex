@@ -15,6 +15,7 @@ import type { InsertNoteOpts } from '../db/store.js';
 import { buildFullState } from '../query/state.js';
 import { recall } from '../query/recall.js';
 import { brief } from '../query/brief.js';
+import { buildSessionSummary } from '../query/summarize.js';
 
 // ── Engagement state file ────────────────────────────────────────────
 
@@ -159,6 +160,38 @@ export const TOOL_DEFINITIONS = [
       required: ['topic'],
     },
   },
+  {
+    name: 'cortex_engage',
+    description: 'Activate Cortex working memory for this session. Enables event logging and enforcement gates, then returns the full cognitive state. Call this when you want Cortex to track your work.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'cortex_disengage',
+    description: 'Deactivate Cortex working memory for this session. Disables event logging and enforcement gates.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'cortex_summarize',
+    description: 'Generate a smart summary of the current session: files touched, directories, commands, test cycles, decisions. Use at the end of a session to preserve context for future sessions.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        what: {
+          type: 'string',
+          description: 'Brief description of what the session accomplished (optional — auto-inferred from events if omitted)',
+        },
+      },
+      required: [],
+    },
+  },
 ] as const;
 
 // ── Tool handler ──────────────────────────────────────────────────────
@@ -189,7 +222,6 @@ export function handleToolCall(
           ...(subject !== undefined ? { subject } : {}),
           ...(alternatives !== undefined ? { alternatives } : {}),
         });
-        writeEngagement('edit_count_since_note', '0');
         const subjectStr = note.subject ? `[${note.subject}]` : '';
         const preview = note.content.length > 60 ? note.content.slice(0, 60) + '…' : note.content;
         return `Noted (${note.kind}${subjectStr}): ${preview}`;
@@ -207,6 +239,25 @@ export function handleToolCall(
       const topic = args['topic'] as string;
       const forAgent = args['for'] as string | undefined;
       return brief(store, topic, forAgent);
+    }
+
+    case 'cortex_engage': {
+      writeEngagement('enabled', 'true');
+      writeEngagement('state_called', 'true');
+      return buildFullState(store);
+    }
+
+    case 'cortex_disengage': {
+      writeEngagement('enabled', 'false');
+      return 'Cortex disengaged. Event logging and gates disabled for this session.';
+    }
+
+    case 'cortex_summarize': {
+      const what = args['what'] as string | undefined;
+      const summary = buildSessionSummary(store, what);
+      const sessionId = ensureSession(store);
+      store.insertState({ sessionId, layer: 'session', content: summary });
+      return summary;
     }
 
     default:
