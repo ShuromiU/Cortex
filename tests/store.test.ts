@@ -37,6 +37,9 @@ describe('CortexStore — sessions', () => {
     expect(session.ended_at).toBeNull();
     expect(session.focus).toBeNull();
     expect(session.parent_session_id).toBeNull();
+    expect(session.scope_type).toBe('project');
+    expect(session.scope_key).toBeNull();
+    expect(session.git_root).toBeNull();
 
     const retrieved = store.getSession(session.id);
     expect(retrieved).toBeDefined();
@@ -57,6 +60,25 @@ describe('CortexStore — sessions', () => {
   it('creates a session with focus', () => {
     const session = store.createSession({ focus: 'implement feature X' });
     expect(session.focus).toBe('implement feature X');
+  });
+
+  it('creates a session with explicit scope metadata', () => {
+    const session = store.createSession({
+      focus: 'fix auth',
+      gitRoot: '/repo',
+      worktreePath: '/repo',
+      branchRef: 'feature/auth',
+      headOid: 'abc123',
+      scopeType: 'branch',
+      scopeKey: 'branch:/repo:feature/auth',
+    });
+
+    expect(session.git_root).toBe('/repo');
+    expect(session.worktree_path).toBe('/repo');
+    expect(session.branch_ref).toBe('feature/auth');
+    expect(session.head_oid).toBe('abc123');
+    expect(session.scope_type).toBe('branch');
+    expect(session.scope_key).toBe('branch:/repo:feature/auth');
   });
 
   it('updates session focus', () => {
@@ -118,6 +140,30 @@ describe('CortexStore — sessions', () => {
 
     const recent = store.getRecentSessions(2);
     expect(recent.length).toBe(2);
+  });
+
+  it('lists recent sessions within a scope', () => {
+    const main1 = store.createSession({
+      scopeType: 'branch',
+      scopeKey: 'branch:/repo/.git:/repo:main',
+      branchRef: 'main',
+    });
+    store.createSession({
+      scopeType: 'branch',
+      scopeKey: 'branch:/repo/.git:/repo:feature/auth',
+      branchRef: 'feature/auth',
+    });
+    const main2 = store.createSession({
+      scopeType: 'branch',
+      scopeKey: 'branch:/repo/.git:/repo:main',
+      branchRef: 'main',
+    });
+
+    const recent = store.getRecentSessionsByScope('branch:/repo/.git:/repo:main', 10);
+    expect(recent.length).toBe(2);
+    expect(recent[0]!.id).toBe(main2.id);
+    expect(recent[1]!.id).toBe(main1.id);
+    expect(store.getSessionCountByScope('branch:/repo/.git:/repo:main')).toBe(2);
   });
 
   it('gets unconsolidated sessions', () => {
@@ -331,6 +377,178 @@ describe('CortexStore — utility', () => {
       return store.getEventCount(session.id);
     });
     expect(result).toBe(2);
+  });
+
+  it('returns counts for core and v2 tables', () => {
+    const counts = store.getTableCounts();
+    expect(counts.sessions).toBe(0);
+    expect(counts.command_runs).toBe(0);
+    expect(counts.episodes).toBe(0);
+    expect(counts.branch_snapshots).toBe(0);
+    expect(counts.project_snapshots).toBe(0);
+    expect(counts.memory_items).toBe(0);
+    expect(counts.retrieval_log).toBe(0);
+  });
+
+  it('upserts and retrieves branch snapshots', () => {
+    const snapshot = store.upsertBranchSnapshot({
+      scopeKey: 'branch:/repo/.git:/repo:feature/auth',
+      gitRoot: '/repo/.git',
+      worktreePath: '/repo',
+      branchRef: 'feature/auth',
+      headOid: 'abc123',
+      focus: 'auth',
+      summary: 'Auth branch summary',
+      recentFiles: ['src/auth.ts'],
+      intents: ['[auth] Finish the refactor'],
+      blockers: ['[auth] Fix test failures'],
+      lastSessionId: null,
+    });
+
+    expect(snapshot.branch_ref).toBe('feature/auth');
+    expect(snapshot.recent_files).toEqual(['src/auth.ts']);
+
+    const updated = store.upsertBranchSnapshot({
+      scopeKey: 'branch:/repo/.git:/repo:feature/auth',
+      gitRoot: '/repo/.git',
+      worktreePath: '/repo',
+      branchRef: 'feature/auth',
+      headOid: 'def456',
+      focus: 'auth',
+      summary: 'Updated auth branch summary',
+      recentFiles: ['src/auth.ts', 'src/session.ts'],
+      intents: ['[auth] Finish the refactor'],
+      blockers: [],
+      lastSessionId: null,
+    });
+
+    expect(updated.summary).toContain('Updated');
+    expect(updated.recent_files).toContain('src/session.ts');
+    expect(store.getBranchSnapshot('branch:/repo/.git:/repo:feature/auth')?.head_oid).toBe('def456');
+  });
+
+  it('creates memory items for notes, command runs, episodes, and branch snapshots', () => {
+    const session = store.createSession({
+      gitRoot: '/repo/.git',
+      worktreePath: '/repo',
+      branchRef: 'feature/auth',
+      headOid: 'abc123',
+      scopeType: 'branch',
+      scopeKey: 'branch:/repo/.git:/repo:feature/auth',
+    });
+
+    const note = store.insertNote({
+      sessionId: session.id,
+      kind: 'blocker',
+      subject: 'auth',
+      content: 'Refresh tokens are failing in staging.',
+    });
+    const run = store.insertCommandRun({
+      sessionId: session.id,
+      category: 'test',
+      commandSummary: 'vitest run auth',
+      exitCode: 1,
+      stderrTail: 'authorization denied',
+    });
+    const episode = store.insertEpisode({
+      sessionId: session.id,
+      kind: 'command_failure',
+      summary: 'test failed: vitest run auth (exit 1)',
+      metadata: { stderr_tail: 'authorization denied' },
+    });
+    const snapshot = store.upsertBranchSnapshot({
+      scopeKey: 'branch:/repo/.git:/repo:feature/auth',
+      gitRoot: '/repo/.git',
+      worktreePath: '/repo',
+      branchRef: 'feature/auth',
+      headOid: 'abc123',
+      focus: 'auth',
+      summary: 'Auth gateway work in progress',
+      recentFiles: ['src/auth.ts'],
+      intents: ['[auth] Finish refresh rotation'],
+      blockers: ['[auth] Fix staging token failures'],
+      lastSessionId: session.id,
+    });
+
+    expect(store.getMemoryItemBySource('notes', note.id)?.kind).toBe('note:blocker');
+    expect(store.getMemoryItemBySource('command_runs', run.id)?.text).toContain('authorization denied');
+    expect(store.getMemoryItemBySource('episodes', episode.id)?.state).toBe('hot');
+    expect(store.getMemoryItemBySource('branch_snapshots', snapshot.id)?.text).toContain('Auth gateway work in progress');
+  });
+
+  it('inserts and retrieves command runs', () => {
+    const session = store.createSession();
+    const eventId = store.insertEvent({ sessionId: session.id, type: 'cmd' });
+    const run = store.insertCommandRun({
+      sessionId: session.id,
+      eventId,
+      category: 'test',
+      commandSummary: 'vitest run',
+      exitCode: 1,
+      stdoutTail: 'stdout tail',
+      stderrTail: 'stderr tail',
+      filesTouched: ['src/auth.ts'],
+    });
+
+    expect(run.category).toBe('test');
+    expect(run.files_touched).toEqual(['src/auth.ts']);
+    expect(store.getCommandRunByEvent(eventId)?.stderr_tail).toBe('stderr tail');
+    expect(store.getCommandRunsBySession(session.id)).toHaveLength(1);
+  });
+
+  it('inserts and retrieves episodes', () => {
+    const session = store.createSession();
+    const episode = store.insertEpisode({
+      sessionId: session.id,
+      kind: 'command_failure',
+      summary: 'test failed: vitest run (exit 1)',
+      target: 'src/auth.ts',
+      metadata: { exit_code: 1 },
+    });
+
+    expect(episode.kind).toBe('command_failure');
+    expect(episode.metadata.exit_code).toBe(1);
+    expect(store.getEpisodesBySession(session.id)).toHaveLength(1);
+  });
+
+  it('searches and touches memory items through FTS', () => {
+    const session = store.createSession({
+      gitRoot: '/repo/.git',
+      worktreePath: '/repo',
+      branchRef: 'feature/reports',
+      headOid: 'abc123',
+      scopeType: 'branch',
+      scopeKey: 'branch:/repo/.git:/repo:feature/reports',
+    });
+    const note = store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'reports',
+      content: 'Ship the reports rewrite behind a feature flag.',
+    });
+
+    const results = store.searchMemoryItems('reports* OR flag*', 5);
+    expect(results.map(item => item.id)).toContain(`notes:${note.id}`);
+
+    store.touchMemoryItems([`notes:${note.id}`]);
+    expect(store.getMemoryItemBySource('notes', note.id)?.access_count).toBe(1);
+  });
+
+  it('records retrieval log entries', () => {
+    const session = store.createSession();
+    const log = store.insertRetrievalLog({
+      sessionId: session.id,
+      topic: 'auth',
+      queryText: 'auth*',
+      resultIds: ['notes:1'],
+      totalCandidates: 3,
+      returnedCount: 1,
+      tokenEstimate: 42,
+    });
+
+    expect(log.topic).toBe('auth');
+    expect(log.result_ids).toEqual(['notes:1']);
+    expect(store.getRetrievalLogsBySession(session.id)).toHaveLength(1);
   });
 });
 

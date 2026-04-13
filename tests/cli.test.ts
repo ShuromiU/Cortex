@@ -92,13 +92,15 @@ describe('createProgram', () => {
       expect(optNames).toContain('--file');
     });
 
-    it('log cmd has optional --exit and --cmd options', () => {
+    it('log cmd has optional --exit, --cmd, --stdout, and --stderr options', () => {
       const program = createProgram();
       const log = program.commands.find(c => c.name() === 'log')!;
       const cmd = log.commands.find(c => c.name() === 'cmd')!;
       const optNames = cmd.options.map(o => o.long);
       expect(optNames).toContain('--exit');
       expect(optNames).toContain('--cmd');
+      expect(optNames).toContain('--stdout');
+      expect(optNames).toContain('--stderr');
     });
 
     it('log agent has --desc option', () => {
@@ -134,6 +136,12 @@ describe('createProgram', () => {
     const program = createProgram();
     const names = program.commands.map(c => c.name());
     expect(names).toContain('consolidate');
+  });
+
+  it('has evaluate command', () => {
+    const program = createProgram();
+    const names = program.commands.map(c => c.name());
+    expect(names).toContain('evaluate');
   });
 
   it('has serve command', () => {
