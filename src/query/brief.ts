@@ -1,62 +1,52 @@
 import type { CortexStore } from '../db/store.js';
-
-// ── Kind priority ─────────────────────────────────────────────────────
+import { renderMemoryLine } from './render.js';
+import { logRetrieval, retrieveMemory } from './retrieval.js';
 
 const KIND_PRIORITY: Record<string, number> = {
-  decision: 0,
-  intent: 1,
-  blocker: 2,
-  insight: 3,
+  'note:decision': 0,
+  'note:intent': 1,
+  'note:blocker': 2,
+  'note:insight': 3,
 };
 
-function kindPriority(kind: string): number {
-  return KIND_PRIORITY[kind] ?? 99;
+function compareBriefOrder(leftKind: string, rightKind: string): number {
+  return (KIND_PRIORITY[leftKind] ?? 99) - (KIND_PRIORITY[rightKind] ?? 99);
 }
-
-function kindLabel(kind: string): string {
-  return kind.charAt(0).toUpperCase() + kind.slice(1);
-}
-
-// ── brief ─────────────────────────────────────────────────────────────
 
 export function brief(store: CortexStore, topic: string, forAgent?: string): string {
-  const lowerTopic = topic.toLowerCase();
-
+  const retrieval = retrieveMemory(store, topic, 5);
   const lines: string[] = [];
 
   if (forAgent) {
     lines.push(`Briefing for ${forAgent}:`);
   }
 
-  // Current session focus
-  const currentSession = store.getCurrentSession();
-  if (currentSession?.focus) {
-    lines.push(`Focus: ${currentSession.focus}`);
+  if (retrieval.context.preferredScope && retrieval.context.preferredScope.scopeType !== 'project') {
+    lines.push(`Scope: ${retrieval.context.preferredScope.scopeLabel}`);
   }
 
-  // Filter active notes matching topic in subject or content
-  const activeNotes = store.getActiveNotes();
-  const relevant = activeNotes.filter(note => {
-    const inSubject = (note.subject ?? '').toLowerCase().includes(lowerTopic);
-    const inContent = note.content.toLowerCase().includes(lowerTopic);
-    return inSubject || inContent;
+  if (retrieval.context.focus) {
+    lines.push(`Focus: ${retrieval.context.focus}`);
+  }
+
+  if (retrieval.results.length === 0) {
+    lines.push(`No context found for "${topic}".`);
+    const renderedEmpty = lines.join('\n');
+    logRetrieval(store, retrieval, renderedEmpty);
+    return renderedEmpty;
+  }
+
+  const ordered = [...retrieval.results].sort((left, right) => {
+    const kindDelta = compareBriefOrder(left.kind, right.kind);
+    if (kindDelta !== 0) {
+      return kindDelta;
+    }
+    return right.retrieval_score - left.retrieval_score;
   });
 
-  // Sort by kind priority
-  relevant.sort((a, b) => kindPriority(a.kind) - kindPriority(b.kind));
+  lines.push(...ordered.map(item => renderMemoryLine(item, 2)));
 
-  // Max 5
-  const topNotes = relevant.slice(0, 5);
-
-  for (const note of topNotes) {
-    const label = kindLabel(note.kind);
-    const subject = note.subject ? `[${note.subject}] ` : '';
-    lines.push(`${label}: ${subject}${note.content}`);
-  }
-
-  if (topNotes.length === 0) {
-    lines.push(`No context found for "${topic}".`);
-  }
-
-  return lines.join('\n');
+  const rendered = lines.join('\n');
+  logRetrieval(store, retrieval, rendered);
+  return rendered;
 }

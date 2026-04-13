@@ -334,6 +334,8 @@ describe('writeSessionSummary', () => {
 
     // Events pruned
     expect(store.getEventCount(sessionId)).toBe(0);
+    expect(store.getEpisodesBySession(sessionId)).toHaveLength(1);
+    expect(store.getEpisodesBySession(sessionId)[0]!.kind).toBe('session_summary');
   });
 
   it('session appears consolidated after writeSessionSummary', () => {
