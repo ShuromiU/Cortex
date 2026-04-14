@@ -21,7 +21,7 @@ Now:
 
 ## Core Behavior
 
-- `SessionStart` can inject a Cortex header automatically.
+- `SessionStart` can inject a small decision-oriented Cortex header automatically.
 - Cortex now supports branch-scoped restore: switching branches restores the right snapshot.
 - `cortex_recall(topic)` searches notes, summaries, snapshots, and command/episode memory.
 - `cortex_brief(topic)` returns a smaller, agent-friendly subset.
@@ -93,8 +93,8 @@ Run Cortex at the start of every Claude session:
 - consolidates old unconsolidated sessions
 - refreshes branch/project state
 - starts a scoped session
-- prints a branch-aware header
-- auto-engages Cortex for the new session
+- prints a branch-aware header that explains when to use Cortex and when to skip it
+- auto-engages Cortex for the new session without pretending full state was already loaded
 
 ### PostToolUse Hook
 
@@ -117,6 +117,53 @@ To capture file, command, and agent activity:
   }
 }
 ```
+
+## Codex Setup
+
+Codex can use Cortex globally through MCP, but current Codex lifecycle hooks do not match Claude's hook surface on Windows.
+
+### Global MCP
+
+Add Cortex to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.cortex]
+command = "C:\\Program Files\\nodejs\\node.exe"
+args = ["C:\\Claude Code\\cortex\\dist\\transports\\cli.js", "serve"]
+```
+
+### Global Instructions
+
+Create `~/.codex/AGENTS.md` with guidance like:
+
+```markdown
+- Start each substantial task with `cortex_state` when Cortex is available.
+- Use `cortex_recall` before re-investigating prior work.
+- Use `cortex_brief` before agent delegation when topic context matters.
+- Write `cortex_note` entries for real decisions, blockers, and non-obvious discoveries.
+```
+
+If you want Codex to load existing Claude-style repo docs automatically, add this to `~/.codex/config.toml` too:
+
+```toml
+project_doc_fallback_filenames = ["CLAUDE.md", ".claude.local.md"]
+project_doc_max_bytes = 65536
+```
+
+### Current Codex Limitation
+
+Current Codex docs say hooks are disabled on Windows, and `PreToolUse` / `PostToolUse` currently only emit `Bash` even on supported platforms. So Claude's exact behavior does not carry over today:
+
+- `cortex inject-header` is not automatically injected into native Windows Codex sessions
+- file-edit and agent events are not captured through Codex hooks the way Claude captures them
+
+The practical Codex setup today is:
+
+- register Cortex as a global MCP server
+- mark the server `required = true` and give it a longer startup timeout in `~/.codex/config.toml`
+- on Windows, launch Codex through a small wrapper that runs `cortex inject-header` before starting Codex
+- teach Codex to call `cortex_state` at the start of substantial work via `AGENTS.md`
+- keep using the Claude hook path where full automatic logging is required
 
 ## MCP Tools
 
@@ -164,11 +211,19 @@ Retrieval is hybrid:
 
 ## Recommended Usage
 
-- let global settings start Cortex automatically
-- write notes for real decisions, blockers, and non-obvious discoveries
-- use `cortex_recall` before re-investigating prior work
-- use `cortex_brief` before agent delegation when topic context matters
-- use `cortex_summarize` when ending a dense work session and you want an explicit checkpoint
+Use Cortex selectively: skip trivial one-shot work, and use it when prior context is likely to matter.
+
+Trigger conditions (call voluntarily when the trigger fires):
+
+- `cortex_state` at the start of resumed, branch-sensitive, or otherwise non-trivial work, or after a branch switch
+- `cortex_note(decision, alternatives=[...])` after a design pivot or trade-off — include what you rejected and why
+- `cortex_note(insight)` when you discover a concrete value, constraint, or gotcha easy to hallucinate later
+- `cortex_note(blocker)` when you hit a dead end worth skipping on return
+- `cortex_recall(topic)` before re-investigating something that feels familiar
+- `cortex_brief(topic)` before dispatching a subagent on a topic with history in the repo — paste the result into the agent's prompt yourself
+- `cortex_summarize` at the end of a dense work session so the next one resumes gracefully
+
+Anti-patterns: don't note routine acknowledgments, don't tell subagents to call `cortex_brief` themselves, don't re-call `cortex_state` multiple times per session, don't summarize throwaway sessions.
 
 ## Data
 

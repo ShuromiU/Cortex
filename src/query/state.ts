@@ -99,6 +99,51 @@ function renderHeaderHighlights(items: ParsedMemoryItem[]): string | null {
   return `Hot: ${highlights.join(' | ')}`;
 }
 
+type UsagePolicyMode = 'fresh' | 'selective' | 'resume';
+
+function renderUsagePolicy(mode: UsagePolicyMode): string[] {
+  switch (mode) {
+    case 'fresh':
+      return [
+        'Use: skip cortex_state for trivial one-shot work. If this task becomes multi-step or resume-sensitive, call cortex_state after your first pass.',
+        'Notes: keep cortex_note for durable decisions, blockers, and non-obvious discoveries.',
+      ];
+
+    case 'resume':
+      return [
+        'Use: prior context likely matters here. Start with cortex_state before non-trivial work; use cortex_recall(topic) before re-investigating familiar ground.',
+        'Skip only for trivial one-shot work. Notes should stay load-bearing: decisions, blockers, and non-obvious discoveries only.',
+      ];
+
+    case 'selective':
+      return [
+        'Use: call cortex_state for resumed, branch-sensitive, or non-trivial work. Skip trivial one-shot tasks.',
+        'Use cortex_recall(topic) before re-investigating familiar ground, and reserve cortex_note for durable decisions, blockers, and non-obvious discoveries.',
+      ];
+  }
+
+  throw new Error(`Unknown usage policy mode: ${mode}`);
+}
+
+function withUsagePolicy(lines: string[], mode: UsagePolicyMode): string {
+  return [...lines.filter(line => line.length > 0), ...renderUsagePolicy(mode)].join('\n');
+}
+
+function renderResumeCandidate(items: ParsedMemoryItem[]): string | null {
+  const candidate = items
+    .filter(item => item.state === 'hot' || item.state === 'pinned')
+    .find(item => item.kind === 'note:intent' || item.kind === 'note:focus');
+  if (!candidate) {
+    return null;
+  }
+  const subjectPart = candidate.subject ? `[${candidate.subject}] ` : '';
+  const content = renderMemorySnippet(extractNoteContent(candidate), 1, 100);
+  if (!content) {
+    return null;
+  }
+  return `Resume: ${subjectPart}${content}`;
+}
+
 function renderSnapshotSection(snapshot: BranchSnapshotRow): string {
   const lines: string[] = [];
 
@@ -162,9 +207,10 @@ function renderNoteBullet(item: ParsedMemoryItem): string {
 
 function renderWorkingNotes(items: ParsedMemoryItem[]): string[] {
   const sections: string[] = [];
-  const order = ['note:intent', 'note:decision', 'note:blocker', 'note:insight'];
+  const order = ['note:intent', 'note:focus', 'note:decision', 'note:blocker', 'note:insight'];
   const labels: Record<string, string> = {
     'note:intent': 'Intents',
+    'note:focus': 'Focus',
     'note:decision': 'Decisions',
     'note:blocker': 'Blockers',
     'note:insight': 'Insights',
@@ -208,7 +254,10 @@ export function buildHeader(store: CortexStore): string {
     : store.getSessionCount();
 
   if (count === 0) {
-    return 'Cortex: working memory active | no prior sessions yet';
+    return withUsagePolicy(
+      ['Cortex: working memory active | no prior sessions yet'],
+      'fresh',
+    );
   }
 
   const { saved } = store.getTotalTokens();
@@ -217,6 +266,7 @@ export function buildHeader(store: CortexStore): string {
   const recentSessions = resolveRecentSessions(store, preferredScope?.scopeKey ?? null, 10);
   const workingSet = resolveWorkingSet(store, 8);
   const headerHighlights = renderHeaderHighlights(workingSet);
+  const resumeLine = renderResumeCandidate(workingSet);
   let focus = 'unfocused';
   for (const session of recentSessions) {
     if (session.focus !== null) {
@@ -241,7 +291,10 @@ export function buildHeader(store: CortexStore): string {
       if (headerHighlights) {
         lines.push(headerHighlights);
       }
-      return lines.join('\n');
+      if (resumeLine) {
+        lines.push(resumeLine);
+      }
+      return withUsagePolicy(lines, 'resume');
     }
   }
 
@@ -254,7 +307,10 @@ export function buildHeader(store: CortexStore): string {
     if (headerHighlights) {
       lines.push(headerHighlights);
     }
-    return lines.join('\n');
+    if (resumeLine) {
+      lines.push(resumeLine);
+    }
+    return withUsagePolicy(lines, 'resume');
   }
 
   const endedSessions = recentSessions.filter(session => session.status === 'ended');
@@ -268,7 +324,10 @@ export function buildHeader(store: CortexStore): string {
       if (headerHighlights) {
         lines.push(headerHighlights);
       }
-      return lines.join('\n');
+      if (resumeLine) {
+        lines.push(resumeLine);
+      }
+      return withUsagePolicy(lines, 'resume');
     }
   }
 
@@ -277,11 +336,19 @@ export function buildHeader(store: CortexStore): string {
     return buildProvisionalHeader(store, focus, countSessions, savingsStr, unconsolidated);
   }
 
+  const fallback: string[] = [`Cortex: ${focus} | ${countSessions}${savingsStr}`];
   if (headerHighlights) {
-    return `Cortex: ${focus} | ${countSessions}${savingsStr}\n${headerHighlights}\n-> Call cortex_state for full briefing`;
+    fallback.push(headerHighlights);
   }
-
-  return `Cortex: ${focus} | ${countSessions}${savingsStr}\n-> Call cortex_state for full briefing`;
+  if (resumeLine) {
+    fallback.push(resumeLine);
+  }
+  if (fallback.length === 1) {
+    fallback.push(
+      'No memory on this scope yet.',
+    );
+  }
+  return withUsagePolicy(fallback, resumeLine || headerHighlights ? 'resume' : 'selective');
 }
 
 interface FileActivity {
@@ -345,9 +412,7 @@ function buildProvisionalHeader(
 
   lines.push(`Commands: ${cmdCount}`);
   lines.push(`Active notes: ${activeNoteCount}`);
-  lines.push('-> Call cortex_state for full briefing');
-
-  return lines.join('\n');
+  return withUsagePolicy(lines, 'resume');
 }
 
 export function buildFullState(store: CortexStore): string {

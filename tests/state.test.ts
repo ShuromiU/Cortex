@@ -33,7 +33,10 @@ describe('formatTokens', () => {
 describe('buildHeader - empty', () => {
   it('returns no-prior-sessions message when no sessions exist', () => {
     const store = makeStore();
-    expect(buildHeader(store)).toBe('Cortex: working memory active | no prior sessions yet');
+    const header = buildHeader(store);
+    expect(header).toContain('Cortex: working memory active | no prior sessions yet');
+    expect(header).toContain('skip cortex_state for trivial one-shot work');
+    expect(header).toContain('Notes: keep cortex_note');
   });
 });
 
@@ -53,7 +56,8 @@ describe('buildHeader - provisional (unconsolidated sessions)', () => {
     expect(header).toContain('Cortex [provisional]');
     expect(header).toContain('auth');
     expect(header).toContain('1 session');
-    expect(header).toContain('-> Call cortex_state for full briefing');
+    expect(header).toContain('Use: prior context likely matters here.');
+    expect(header).toContain('cortex_recall(topic)');
   });
 
   it('shows file activity with reads and edits counts', () => {
@@ -104,6 +108,7 @@ describe('buildHeader - consolidated session state', () => {
     const header = buildHeader(store);
     expect(header).toContain('Cortex: refactor');
     expect(header).toContain('Refactored auth module.');
+    expect(header).toContain('Use: prior context likely matters here.');
     expect(header).not.toContain('[provisional]');
   });
 
@@ -163,6 +168,23 @@ describe('buildHeader - project state', () => {
     const header = buildHeader(store);
     expect(header).toContain('Project notes.');
     expect(header).not.toContain('Session notes.');
+  });
+});
+
+describe('buildHeader - live resume signals', () => {
+  it('surfaces hot intent as a resume candidate', () => {
+    const store = makeStore();
+    const session = store.createSession({ focus: 'auth' });
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'intent',
+      subject: 'auth',
+      content: 'finish token rotation',
+    });
+
+    const header = buildHeader(store);
+    expect(header).toContain('Resume: [auth] finish token rotation');
+    expect(header).toContain('Use: prior context likely matters here.');
   });
 });
 
