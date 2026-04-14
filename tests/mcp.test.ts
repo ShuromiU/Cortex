@@ -33,6 +33,12 @@ describe('TOOL_DEFINITIONS', () => {
     expect(tool).toBeDefined();
   });
 
+  it('cortex_state description frames Cortex as selective, not mandatory', () => {
+    const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_state')!;
+    expect(tool.description).toContain('skip trivial one-shot tasks');
+    expect(tool.description).toContain('resumed, branch-sensitive');
+  });
+
   it('cortex_state has no required fields', () => {
     const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_state')!;
     expect(tool.inputSchema.required).toHaveLength(0);
@@ -41,6 +47,12 @@ describe('TOOL_DEFINITIONS', () => {
   it('has cortex_note tool', () => {
     const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_note');
     expect(tool).toBeDefined();
+  });
+
+  it('cortex_note description emphasizes durable memory only', () => {
+    const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_note')!;
+    expect(tool.description).toContain('future sessions only');
+    expect(tool.description).toContain('routine progress');
   });
 
   it('cortex_note requires kind and content', () => {
@@ -58,6 +70,11 @@ describe('TOOL_DEFINITIONS', () => {
   it('has cortex_recall tool', () => {
     const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_recall');
     expect(tool).toBeDefined();
+  });
+
+  it('cortex_recall description targets familiar-ground investigations', () => {
+    const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_recall')!;
+    expect(tool.description).toContain('re-investigating familiar ground');
   });
 
   it('cortex_recall requires topic', () => {

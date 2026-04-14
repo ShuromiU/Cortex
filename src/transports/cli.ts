@@ -146,7 +146,7 @@ export function createProgram(): Command {
 
       const engPath = deriveEngagementPath(process.cwd());
       try {
-        fs.writeFileSync(engPath, 'enabled=true\nstate_called=true\n');
+        fs.writeFileSync(engPath, 'enabled=true\nstate_called=false\n');
       } catch {
         // Non-fatal.
       }

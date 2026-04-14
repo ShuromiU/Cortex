@@ -85,7 +85,7 @@ function ensureSession(store: CortexStore, cwd: string): string {
 export const TOOL_DEFINITIONS = [
   {
     name: 'cortex_state',
-    description: 'Get the full cognitive state: active notes, recent session activity, project state.',
+    description: 'Load working memory when prior context is likely relevant. Start with this for resumed, branch-sensitive, or otherwise non-trivial work; skip trivial one-shot tasks. Returns top-scored notes, recent decisions, branch snapshot, and the last-session tail. Usually call it once per session; later mutations show up through cortex_recall.',
     inputSchema: {
       type: 'object' as const,
       properties: {},
@@ -94,7 +94,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'cortex_note',
-    description: 'Record a note (insight, decision, intent, blocker, or focus) to working memory.',
+    description: 'Save durable memory for future sessions only. Use it for decisions (include rejected alternatives), blockers, committed approaches, and non-obvious constraints or gotchas. Do not use it for acknowledgments, routine progress, or anything obvious from code or git. Notes compete for retrieval, so keep them load-bearing.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -122,7 +122,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'cortex_recall',
-    description: 'Search notes and consolidated state for a topic.',
+    description: 'Pull evidence from prior sessions on a topic before re-investigating familiar ground, revisiting recurring bugs or tests, or proposing changes in an area with history. Returns past decisions, insights, episodes, and command outcomes with scope context. Faster than re-reading old files and catches decisions that live only in memory.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -136,7 +136,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'cortex_brief',
-    description: 'Generate a focused briefing on a topic, optionally for a named agent.',
+    description: 'Compact topical context to paste into a subagent prompt. Call before dispatching an Agent on a non-trivial task in a topic with history in this repo. Returns a smaller, focused subset than cortex_state. Paste the result into the agent prompt yourself; do not ask subagents to call cortex_brief because they do not share your session context reliably.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -154,7 +154,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'cortex_engage',
-    description: 'Activate Cortex working memory for this session. Enables event logging and enforcement gates, then returns the full cognitive state. Call this when you want Cortex to track your work.',
+    description: 'Activate Cortex capture for this session and immediately load the current working memory. Usually already engaged by `cortex inject-header` at session start. Call it after cortex_disengage or if startup wiring did not run.',
     inputSchema: {
       type: 'object' as const,
       properties: {},
@@ -163,7 +163,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'cortex_disengage',
-    description: 'Deactivate Cortex working memory for this session. Disables event logging and enforcement gates.',
+    description: 'Turn off Cortex capture and enforcement gates for this session. Use sparingly: when running throwaway or destructive work you do not want memorialized, or while debugging Cortex itself. Call cortex_engage to re-enable.',
     inputSchema: {
       type: 'object' as const,
       properties: {},
@@ -172,7 +172,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'cortex_summarize',
-    description: 'Generate a smart summary of the current session: files touched, directories, commands, test cycles, decisions. Use at the end of a session to preserve context for future sessions.',
+    description: 'Checkpoint the session before it ends so the next one resumes gracefully. Call it after a meaningful unit of work, before a long break, or when the user explicitly stops for the day. Next-session inject-header uses this summary as the resume tail. Skip throwaway sessions.',
     inputSchema: {
       type: 'object' as const,
       properties: {

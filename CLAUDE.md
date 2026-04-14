@@ -6,7 +6,7 @@ Persistent working memory for coding agents.
 - Cortex is now retrieval-first, not transcript-first.
 - Sessions are branch/worktree-aware.
 - `memory_items` is the canonical search/retrieval layer.
-- Default state is a scored working set, not “all active notes”.
+- Default state is a scored working set, not "all active notes".
 - Memory decays through `hot`, `warm`, `cold`, `archived`; recalled/touched memory is reinforced.
 
 ## What Matters In This Repo
@@ -24,15 +24,41 @@ Persistent working memory for coding agents.
 - `src/memory/hotness.ts` — decay/reinforcement scoring
 - `src/query/retrieval.ts` — retrieval/reranking
 - `src/query/state.ts` — startup/default working-set rendering
+- `src/query/recall.ts` — `cortex_recall` search
+- `src/query/brief.ts` — `cortex_brief` topical context
+- `src/query/summarize.ts` — `cortex_summarize` session wrap-up
+- `src/query/scope.ts` — branch/worktree session scoping
 - `src/transports/cli.ts` — `inject-header`, CLI logging, evaluation
 - `src/transports/mcp.ts` — MCP tools used by Claude
 
 ## Expected Behavior
-- `inject-header` should create a scoped session, print a small header, and auto-engage Cortex.
+- `inject-header` should create a scoped session, print a small decision-oriented header, and auto-engage Cortex without pretending `cortex_state` already ran.
 - `cortex_state` should show the current working set, not a full historical dump.
 - `cortex_recall` and `cortex_brief` should search notes, snapshots, summaries, and command/episode memory.
 - Branch switches should restore the matching snapshot.
 - Stale notes should decay out of the default state unless reinforced by actual retrieval/use.
+
+## When To Use Cortex (Trigger Conditions)
+
+Use Cortex selectively. Skip trivial one-shot work; reach for it when prior context is likely to matter.
+
+Call these voluntarily when the trigger fires — don't wait to be told.
+
+- `cortex_state` — at the start of resumed, branch-sensitive, or otherwise non-trivial work in this repo, or after a branch switch. Rarely need to re-call within a session.
+- `cortex_note(kind=decision, alternatives=[...])` — after a design pivot or trade-off call. Always include what you rejected and why.
+- `cortex_note(kind=insight)` — when you discover a concrete value, constraint, or gotcha easy to hallucinate later: real dimensions, exact constants, non-obvious API behavior, flaky-test triggers.
+- `cortex_note(kind=blocker)` — when you hit a dead end you want your next self to skip.
+- `cortex_note(kind=intent|focus)` — when you commit to an approach and want the next session to pick up from it.
+- `cortex_recall(topic)` — before re-investigating something that feels familiar.
+- `cortex_brief(topic)` — before dispatching a subagent on a non-trivial task with history in this repo. Paste the result into the agent's prompt yourself.
+- `cortex_summarize` — at the end of a dense work session so the next one resumes gracefully.
+- `cortex_disengage` — before running throwaway/destructive work you don't want memorialized, or while debugging Cortex itself. Pair with `cortex_engage` to resume.
+
+Anti-patterns:
+- Don't write notes for routine acknowledgments, task tracking, or anything obvious from code/git.
+- Don't tell subagents to call `cortex_brief` — call it yourself and paste the result.
+- Don't re-call `cortex_state` multiple times per session.
+- Don't call `cortex_summarize` for throwaway sessions.
 
 ## Verification
 - Run `npm run build`
