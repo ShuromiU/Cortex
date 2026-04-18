@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { classifyCommand, redactCommand, extractTouchedFiles } from '../src/capture/redact.js';
+import {
+  captureOutputTail,
+  classifyCommand,
+  redactCommand,
+  redactSensitiveText,
+  extractTouchedFiles,
+} from '../src/capture/redact.js';
 
 // ── classifyCommand ────────────────────────────────────────────────────
 
@@ -215,6 +221,22 @@ describe('redactCommand', () => {
     expect(result).toContain('--password=');
     expect(result).toContain('[REDACTED]');
     expect(result).not.toContain('hunter2');
+  });
+});
+
+describe('redactSensitiveText', () => {
+  it('redacts secrets in generic output text', () => {
+    const output = 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456';
+    expect(redactSensitiveText(output)).toContain('Bearer [REDACTED]');
+  });
+});
+
+describe('captureOutputTail', () => {
+  it('keeps only the tail of long output', () => {
+    const input = Array.from({ length: 60 }, (_, index) => `line-${index + 1}`).join('\n');
+    const tail = captureOutputTail(input);
+    expect(tail).toContain('line-60');
+    expect(tail).not.toContain('line-1');
   });
 });
 

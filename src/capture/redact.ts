@@ -86,9 +86,13 @@ export function classifyCommand(cmd: string): string {
  * Replaces matched secrets with [REDACTED], keeping flag prefixes intact.
  */
 export function redactCommand(cmd: string): string {
-  if (!cmd || !cmd.trim()) return cmd;
+  return redactSensitiveText(cmd);
+}
 
-  let result = cmd;
+export function redactSensitiveText(text: string): string {
+  if (!text || !text.trim()) return text;
+
+  let result = text;
 
   // API key patterns (prefix + 10+ chars)
   // Order matters: longer/more-specific prefixes first
@@ -128,6 +132,24 @@ export function redactCommand(cmd: string): string {
   );
 
   return result;
+}
+
+const OUTPUT_TAIL_LINE_LIMIT = 40;
+const OUTPUT_TAIL_CHAR_LIMIT = 2000;
+
+export function captureOutputTail(raw: string): string {
+  const normalized = raw.replace(/\r\n/g, '\n').replace(/\0/g, '').trimEnd();
+  if (!normalized) {
+    return '';
+  }
+
+  const lines = normalized.split('\n');
+  const tailLines = lines.slice(-OUTPUT_TAIL_LINE_LIMIT).join('\n');
+  if (tailLines.length <= OUTPUT_TAIL_CHAR_LIMIT) {
+    return tailLines;
+  }
+
+  return tailLines.slice(-OUTPUT_TAIL_CHAR_LIMIT);
 }
 
 // ── File Path Extraction ──────────────────────────────────────────────

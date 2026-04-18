@@ -4,8 +4,6 @@ import { applySchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import { buildHeader, buildFullState, formatTokens } from '../src/query/state.js';
 
-// ── Helpers ────────────────────────────────────────────────────────────
-
 function createTestDb(): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
@@ -16,8 +14,6 @@ function createTestDb(): Database.Database {
 function makeStore(): CortexStore {
   return new CortexStore(createTestDb());
 }
-
-// ── formatTokens ──────────────────────────────────────────────────────
 
 describe('formatTokens', () => {
   it('formats values below 1000 as plain number', () => {
@@ -34,16 +30,17 @@ describe('formatTokens', () => {
   });
 });
 
-// ── buildHeader ───────────────────────────────────────────────────────
-
-describe('buildHeader — empty', () => {
+describe('buildHeader - empty', () => {
   it('returns no-prior-sessions message when no sessions exist', () => {
     const store = makeStore();
-    expect(buildHeader(store)).toBe('Cortex: no prior sessions | call cortex_engage to activate working memory');
+    const header = buildHeader(store);
+    expect(header).toContain('Cortex: working memory active | no prior sessions yet');
+    expect(header).toContain('skip cortex_state for trivial one-shot work');
+    expect(header).toContain('Notes: keep cortex_note');
   });
 });
 
-describe('buildHeader — provisional (unconsolidated sessions)', () => {
+describe('buildHeader - provisional (unconsolidated sessions)', () => {
   let store: CortexStore;
   let sessionId: string;
 
@@ -59,7 +56,8 @@ describe('buildHeader — provisional (unconsolidated sessions)', () => {
     expect(header).toContain('Cortex [provisional]');
     expect(header).toContain('auth');
     expect(header).toContain('1 session');
-    expect(header).toContain('→ Call cortex_state for full briefing');
+    expect(header).toContain('Use: prior context likely matters here.');
+    expect(header).toContain('cortex_recall(topic)');
   });
 
   it('shows file activity with reads and edits counts', () => {
@@ -89,21 +87,18 @@ describe('buildHeader — provisional (unconsolidated sessions)', () => {
   });
 
   it('shows top 5 files by total activity', () => {
-    // Create 6 files with activity, check only 5 appear
     for (let i = 1; i <= 6; i++) {
       store.insertEvent({ sessionId, type: 'read', target: `file${i}.ts` });
     }
-    // Give file1.ts more activity to make it the top
     store.insertEvent({ sessionId, type: 'edit', target: 'file1.ts' });
     store.insertEvent({ sessionId, type: 'edit', target: 'file1.ts' });
 
     const header = buildHeader(store);
-    // file6.ts has only 1 read (least activity), should be omitted
     expect(header).not.toContain('file6.ts');
   });
 });
 
-describe('buildHeader — consolidated session state', () => {
+describe('buildHeader - consolidated session state', () => {
   it('uses session-level state from most recent ended session', () => {
     const store = makeStore();
     const session = store.createSession({ focus: 'refactor' });
@@ -113,6 +108,7 @@ describe('buildHeader — consolidated session state', () => {
     const header = buildHeader(store);
     expect(header).toContain('Cortex: refactor');
     expect(header).toContain('Refactored auth module.');
+    expect(header).toContain('Use: prior context likely matters here.');
     expect(header).not.toContain('[provisional]');
   });
 
@@ -127,7 +123,7 @@ describe('buildHeader — consolidated session state', () => {
   });
 });
 
-describe('buildHeader — token savings', () => {
+describe('buildHeader - token savings', () => {
   it('includes savings when saved tokens > 0', () => {
     const store = makeStore();
     const session = store.createSession();
@@ -150,7 +146,7 @@ describe('buildHeader — token savings', () => {
   });
 });
 
-describe('buildHeader — project state', () => {
+describe('buildHeader - project state', () => {
   it('uses project state when available', () => {
     const store = makeStore();
     const session = store.createSession({ focus: 'feature-x' });
@@ -175,9 +171,24 @@ describe('buildHeader — project state', () => {
   });
 });
 
-// ── buildFullState ────────────────────────────────────────────────────
+describe('buildHeader - live resume signals', () => {
+  it('surfaces hot intent as a resume candidate', () => {
+    const store = makeStore();
+    const session = store.createSession({ focus: 'auth' });
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'intent',
+      subject: 'auth',
+      content: 'finish token rotation',
+    });
 
-describe('buildFullState — notes and events', () => {
+    const header = buildHeader(store);
+    expect(header).toContain('Resume: [auth] finish token rotation');
+    expect(header).toContain('Use: prior context likely matters here.');
+  });
+});
+
+describe('buildFullState - notes and events', () => {
   it('returns empty string when no notes and no events', () => {
     const store = makeStore();
     expect(buildFullState(store)).toBe('');
@@ -198,7 +209,6 @@ describe('buildFullState — notes and events', () => {
     const blockerIdx = state.indexOf('Blockers:');
     const insightIdx = state.indexOf('Insights:');
 
-    // Order: intent, decision, blocker, insight
     expect(intentIdx).toBeGreaterThanOrEqual(0);
     expect(decisionIdx).toBeGreaterThan(intentIdx);
     expect(blockerIdx).toBeGreaterThan(decisionIdx);
@@ -221,13 +231,12 @@ describe('buildFullState — notes and events', () => {
     store.markConflict(note.id);
 
     const state = buildFullState(store);
-    expect(state).toContain('⚠ conflict');
+    expect(state).toContain('[conflict]');
   });
 
   it('does not render superseded notes', () => {
     const store = makeStore();
     const session = store.createSession();
-    // Inserting two decisions with same subject — first gets superseded
     store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'auth', content: 'use sessions' });
     store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'auth', content: 'use JWT' });
 
@@ -237,7 +246,7 @@ describe('buildFullState — notes and events', () => {
   });
 });
 
-describe('buildFullState — groups by topic', () => {
+describe('buildFullState - groups by topic', () => {
   it('includes session activity from recent sessions', () => {
     const store = makeStore();
     const session = store.createSession({ focus: 'perf' });
