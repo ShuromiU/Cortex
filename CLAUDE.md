@@ -32,33 +32,31 @@ Persistent working memory for coding agents.
 - `src/transports/mcp.ts` — MCP tools used by Claude
 
 ## Expected Behavior
-- `inject-header` should create a scoped session, print a small decision-oriented header, and auto-engage Cortex without pretending `cortex_state` already ran.
+- `inject-header` is a manual CLI command. It is no longer wired to `SessionStart` — running it creates a scoped session, prints a decision-oriented header, and flips the engagement file to `enabled=true`, but Claude Code sessions do not trigger it automatically.
 - `cortex_state` should show the current working set, not a full historical dump.
 - `cortex_recall` and `cortex_brief` should search notes, snapshots, summaries, and command/episode memory.
 - Branch switches should restore the matching snapshot.
 - Stale notes should decay out of the default state unless reinforced by actual retrieval/use.
 
-## When To Use Cortex (Trigger Conditions)
+## When To Use Cortex
 
-Use Cortex selectively. Skip trivial one-shot work; reach for it when prior context is likely to matter.
+**Cortex is opt-in.** Do not call any `cortex_*` tool unless the user explicitly asks for Cortex, or has already called `cortex_engage` this session. No automatic startup calls, no "this feels non-trivial so I should load memory" reasoning.
 
-Call these voluntarily when the trigger fires — don't wait to be told.
+When the user opts in (explicit request, or the engagement file shows `enabled=true`), the available tools are:
 
-- `cortex_state` — at the start of resumed, branch-sensitive, or otherwise non-trivial work in this repo, or after a branch switch. Rarely need to re-call within a session.
-- `cortex_note(kind=decision, alternatives=[...])` — after a design pivot or trade-off call. Always include what you rejected and why.
-- `cortex_note(kind=insight)` — when you discover a concrete value, constraint, or gotcha easy to hallucinate later: real dimensions, exact constants, non-obvious API behavior, flaky-test triggers.
-- `cortex_note(kind=blocker)` — when you hit a dead end you want your next self to skip.
-- `cortex_note(kind=intent|focus)` — when you commit to an approach and want the next session to pick up from it.
-- `cortex_recall(topic)` — before re-investigating something that feels familiar.
-- `cortex_brief(topic)` — before dispatching a subagent on a non-trivial task with history in this repo. Paste the result into the agent's prompt yourself.
-- `cortex_summarize` — at the end of a dense work session so the next one resumes gracefully.
-- `cortex_disengage` — before running throwaway/destructive work you don't want memorialized, or while debugging Cortex itself. Pair with `cortex_engage` to resume.
+- `cortex_engage` — activate Cortex capture for the session and load the current working memory.
+- `cortex_state` — working set: top-scored notes, decisions, branch snapshot, last-session tail.
+- `cortex_note(kind, content, ...)` — durable memory. `kind` is one of `decision` (include `alternatives`), `insight`, `blocker`, `intent`, `focus`. Reserve for load-bearing items; skip routine progress.
+- `cortex_recall(topic)` — search notes/snapshots/summaries/episodes before re-investigating familiar ground.
+- `cortex_brief(topic)` — compact topical context to paste into a subagent prompt. Call it yourself; don't ask subagents to call it.
+- `cortex_summarize` — checkpoint a dense session so the next one resumes gracefully.
+- `cortex_disengage` — turn capture and enforcement back off.
 
-Anti-patterns:
+Anti-patterns (still apply once engaged):
 - Don't write notes for routine acknowledgments, task tracking, or anything obvious from code/git.
-- Don't tell subagents to call `cortex_brief` — call it yourself and paste the result.
 - Don't re-call `cortex_state` multiple times per session.
 - Don't call `cortex_summarize` for throwaway sessions.
+- Don't engage Cortex unprompted just because a task looks interesting.
 
 ## Verification
 - Run `npm run build`
