@@ -1,6 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { describe, it, expect, vi } from 'vitest';
 import { Command } from 'commander';
 import { createProgram } from '../src/transports/cli.js';
+import { deriveEngagementPath } from '../src/transports/mcp.js';
 
 // ── createProgram ─────────────────────────────────────────────────────
 
@@ -92,13 +96,15 @@ describe('createProgram', () => {
       expect(optNames).toContain('--file');
     });
 
-    it('log cmd has optional --exit and --cmd options', () => {
+    it('log cmd has optional --exit, --cmd, --stdout, and --stderr options', () => {
       const program = createProgram();
       const log = program.commands.find(c => c.name() === 'log')!;
       const cmd = log.commands.find(c => c.name() === 'cmd')!;
       const optNames = cmd.options.map(o => o.long);
       expect(optNames).toContain('--exit');
       expect(optNames).toContain('--cmd');
+      expect(optNames).toContain('--stdout');
+      expect(optNames).toContain('--stderr');
     });
 
     it('log agent has --desc option', () => {
@@ -118,6 +124,25 @@ describe('createProgram', () => {
     expect(names).toContain('inject-header');
   });
 
+  it('inject-header engages cortex without claiming state was already loaded', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-cli-'));
+    const originalCwd = process.cwd();
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    try {
+      process.chdir(tempDir);
+      const program = createProgram();
+      await program.parseAsync(['node', 'cortex', 'inject-header']);
+
+      const engagement = fs.readFileSync(deriveEngagementPath(tempDir), 'utf8');
+      expect(engagement).toContain('enabled=true');
+      expect(engagement).toContain('state_called=false');
+    } finally {
+      stdoutSpy.mockRestore();
+      process.chdir(originalCwd);
+    }
+  });
+
   it('has status command', () => {
     const program = createProgram();
     const names = program.commands.map(c => c.name());
@@ -134,6 +159,12 @@ describe('createProgram', () => {
     const program = createProgram();
     const names = program.commands.map(c => c.name());
     expect(names).toContain('consolidate');
+  });
+
+  it('has evaluate command', () => {
+    const program = createProgram();
+    const names = program.commands.map(c => c.name());
+    expect(names).toContain('evaluate');
   });
 
   it('has serve command', () => {

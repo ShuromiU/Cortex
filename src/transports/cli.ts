@@ -3,7 +3,7 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { Command } from 'commander';
-import { openDatabase, applySchema, initializeMeta } from '../db/schema.js';
+import { openDatabase, ensureCortexSchema } from '../db/schema.js';
 import { CortexStore } from '../db/store.js';
 import {
   handleReadEvent,
@@ -12,11 +12,16 @@ import {
   handleCmdEvent,
   handleAgentEvent,
 } from '../capture/hooks.js';
-import { consolidateLevel1, renderCompressed, mergeProjectState } from '../capture/consolidate.js';
+import {
+  consolidateLevel1,
+  renderCompressed,
+  mergeProjectState,
+  writeSessionSummary,
+} from '../capture/consolidate.js';
+import { evaluateDatabase } from '../eval/harness.js';
 import { buildHeader, formatTokens } from '../query/state.js';
 import { deriveEngagementPath } from './mcp.js';
-
-// ── Helpers ───────────────────────────────────────────────────────────
+import { ensureScopedSession, syncBranchSnapshotForSession } from '../scope/runtime.js';
 
 function findDbPath(startDir: string): string {
   return path.join(startDir, '.cortex.db');
@@ -25,28 +30,25 @@ function findDbPath(startDir: string): string {
 function openCortexDb(startDir: string): { store: CortexStore; dbPath: string } {
   const dbPath = findDbPath(startDir);
   const db = openDatabase(dbPath);
-  applySchema(db);
-
-  // Initialize meta if not yet set
-  const checkMeta = db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as
-    | { value: string }
-    | undefined;
-  if (!checkMeta) {
-    initializeMeta(db, startDir);
-  }
-
+  ensureCortexSchema(db, startDir);
   const store = new CortexStore(db);
   return { store, dbPath };
 }
 
-function ensureSession(store: CortexStore): string {
-  const current = store.getCurrentSession();
-  if (current) return current.id;
-  const session = store.createSession();
-  return session.id;
+function ensureSession(store: CortexStore, cwd: string): string {
+  return ensureScopedSession(store, cwd).id;
 }
 
-// ── Program ───────────────────────────────────────────────────────────
+function parseTopics(raw?: string): string[] {
+  if (!raw) {
+    return [];
+  }
+
+  return raw
+    .split(',')
+    .map(topic => topic.trim())
+    .filter(topic => topic.length > 0);
+}
 
 export function createProgram(): Command {
   const program = new Command();
@@ -55,8 +57,6 @@ export function createProgram(): Command {
     .name('cortex')
     .description('Cortex working memory for AI agents')
     .version('0.1.0');
-
-  // ── log subcommand ────────────────────────────────────────────────
 
   const log = program.command('log').description('Log events to the working memory');
 
@@ -67,7 +67,7 @@ export function createProgram(): Command {
     .option('--lines <range>', 'Line range (e.g. 10-50)')
     .action((opts: { file: string; lines?: string }) => {
       const { store } = openCortexDb(process.cwd());
-      const sessionId = ensureSession(store);
+      const sessionId = ensureSession(store, process.cwd());
       handleReadEvent(store, sessionId, { file: opts.file, lines: opts.lines });
     });
 
@@ -78,7 +78,7 @@ export function createProgram(): Command {
     .option('--lines <range>', 'Line range (e.g. 10-50)')
     .action((opts: { file: string; lines?: string }) => {
       const { store } = openCortexDb(process.cwd());
-      const sessionId = ensureSession(store);
+      const sessionId = ensureSession(store, process.cwd());
       handleEditEvent(store, sessionId, { file: opts.file, lines: opts.lines });
     });
 
@@ -88,7 +88,7 @@ export function createProgram(): Command {
     .requiredOption('--file <path>', 'File path that was written')
     .action((opts: { file: string }) => {
       const { store } = openCortexDb(process.cwd());
-      const sessionId = ensureSession(store);
+      const sessionId = ensureSession(store, process.cwd());
       handleWriteEvent(store, sessionId, { file: opts.file });
     });
 
@@ -97,10 +97,17 @@ export function createProgram(): Command {
     .description('Log a command execution event')
     .option('--exit <code>', 'Exit code of the command')
     .option('--cmd <text>', 'Command text')
-    .action((opts: { exit?: string; cmd?: string }) => {
+    .option('--stdout <text>', 'Captured stdout for the command (optional)')
+    .option('--stderr <text>', 'Captured stderr for the command (optional)')
+    .action((opts: { exit?: string; cmd?: string; stdout?: string; stderr?: string }) => {
       const { store } = openCortexDb(process.cwd());
-      const sessionId = ensureSession(store);
-      handleCmdEvent(store, sessionId, { exit: opts.exit, cmd: opts.cmd });
+      const sessionId = ensureSession(store, process.cwd());
+      handleCmdEvent(store, sessionId, {
+        exit: opts.exit,
+        cmd: opts.cmd,
+        stdout: opts.stdout,
+        stderr: opts.stderr,
+      });
     });
 
   log
@@ -109,57 +116,43 @@ export function createProgram(): Command {
     .requiredOption('--desc <text>', 'Description of the agent task')
     .action((opts: { desc: string }) => {
       const { store } = openCortexDb(process.cwd());
-      const sessionId = ensureSession(store);
+      const sessionId = ensureSession(store, process.cwd());
       handleAgentEvent(store, sessionId, { desc: opts.desc });
     });
-
-  // ── inject-header ─────────────────────────────────────────────────
 
   program
     .command('inject-header')
     .description('Consolidate sessions, start a new session, print context header')
     .action(() => {
       const { store } = openCortexDb(process.cwd());
-
-      // Consolidate unconsolidated ended sessions (Level 1)
       const unconsolidated = store.getUnconsolidatedSessions();
+
       for (const session of unconsolidated) {
         const compressed = consolidateLevel1(store, session.id);
         if (compressed.length > 0) {
-          store.insertState({
-            sessionId: session.id,
-            layer: 'session',
-            content: renderCompressed(compressed),
-          });
+          writeSessionSummary(store, session.id, renderCompressed(compressed));
         }
       }
 
-      // Level 3: merge older session states into project state if threshold exceeded
       mergeProjectState(store);
 
-      // End any currently active session
       const current = store.getCurrentSession();
       if (current) {
+        syncBranchSnapshotForSession(store, current.id);
         store.endSession(current.id);
       }
 
-      // Create new session
-      store.createSession();
+      ensureScopedSession(store, process.cwd());
 
-      // Reset engagement state file for the new session
       const engPath = deriveEngagementPath(process.cwd());
       try {
-        fs.writeFileSync(engPath, 'enabled=false\nstate_called=false\n');
+        fs.writeFileSync(engPath, 'enabled=true\nstate_called=false\n');
       } catch {
-        // Non-fatal — /tmp/ write may fail on some systems
+        // Non-fatal.
       }
 
-      // Print header
-      const header = buildHeader(store);
-      process.stdout.write(header + '\n');
+      process.stdout.write(`${buildHeader(store)}\n`);
     });
-
-  // ── status ────────────────────────────────────────────────────────
 
   program
     .command('status')
@@ -169,7 +162,7 @@ export function createProgram(): Command {
         const { store, dbPath } = openCortexDb(process.cwd());
         const rootPath = store.getMeta('root_path') ?? process.cwd();
         const sessionCount = store.getSessionCount();
-        process.stdout.write(`OK\n`);
+        process.stdout.write('OK\n');
         process.stdout.write(`DB: ${dbPath}\n`);
         process.stdout.write(`Root: ${rootPath}\n`);
         process.stdout.write(`Sessions: ${sessionCount}\n`);
@@ -179,20 +172,16 @@ export function createProgram(): Command {
       }
     });
 
-  // ── stats ─────────────────────────────────────────────────────────
-
   program
     .command('stats')
     .description('Token savings dashboard')
     .action(() => {
       const { store } = openCortexDb(process.cwd());
-
-      // Focus
       const recentSessions = store.getRecentSessions(10);
       let focus = 'unfocused';
-      for (const s of recentSessions) {
-        if (s.focus !== null) {
-          focus = s.focus;
+      for (const session of recentSessions) {
+        if (session.focus !== null) {
+          focus = session.focus;
           break;
         }
       }
@@ -212,8 +201,6 @@ export function createProgram(): Command {
       process.stdout.write(`Efficiency:    ${efficiency}%\n`);
     });
 
-  // ── consolidate ───────────────────────────────────────────────────
-
   program
     .command('consolidate')
     .description('Manually trigger Level 1 consolidation for unconsolidated sessions')
@@ -230,11 +217,7 @@ export function createProgram(): Command {
       for (const session of unconsolidated) {
         const compressed = consolidateLevel1(store, session.id);
         if (compressed.length > 0) {
-          store.insertState({
-            sessionId: session.id,
-            layer: 'session',
-            content: renderCompressed(compressed),
-          });
+          writeSessionSummary(store, session.id, renderCompressed(compressed));
           count++;
         }
       }
@@ -242,7 +225,22 @@ export function createProgram(): Command {
       process.stdout.write(`Consolidated ${count} session(s).\n`);
     });
 
-  // ── serve ─────────────────────────────────────────────────────────
+  program
+    .command('evaluate')
+    .description('Evaluate current memory state and recall output sizes for a Cortex DB')
+    .option('--db <path>', 'Path to the Cortex SQLite database', '.cortex.db')
+    .option('--root <path>', 'Project root path for schema initialization', process.cwd())
+    .option('--topics <items>', 'Comma-separated topics to replay')
+    .action((opts: { db: string; root: string; topics?: string }) => {
+      const dbPath = path.isAbsolute(opts.db)
+        ? opts.db
+        : path.resolve(process.cwd(), opts.db);
+      const rootPath = path.isAbsolute(opts.root)
+        ? opts.root
+        : path.resolve(process.cwd(), opts.root);
+      const result = evaluateDatabase(dbPath, rootPath, parseTopics(opts.topics));
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    });
 
   program
     .command('serve')
@@ -254,8 +252,6 @@ export function createProgram(): Command {
 
   return program;
 }
-
-// ── Direct execution ──────────────────────────────────────────────────
 
 const self = process.argv[1] ?? '';
 if (self.endsWith('cli.js') || self.endsWith('cli.ts')) {

@@ -232,7 +232,14 @@ export function writeSessionSummary(
   sessionId: string,
   summary: string,
 ): void {
-  store.insertState({ sessionId, layer: 'session', content: summary });
+  const stateId = store.insertState({ sessionId, layer: 'session', content: summary });
+  store.insertEpisode({
+    id: stateId,
+    sessionId,
+    kind: 'session_summary',
+    summary,
+    sourceStateId: stateId,
+  });
   store.deleteEventsBySession(sessionId);
 }
 
