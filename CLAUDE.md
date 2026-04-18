@@ -68,3 +68,19 @@ Anti-patterns:
   - `~/.claude/settings.json`
   - `~/.claude/hooks/cortex-hook.sh`
   - the live path Claude uses for the Cortex MCP server
+
+## RefCertify — Codebase Index (use before Read/Grep on this repo)
+
+Cortex's source lives at `C:\Claude Code\cortex` and is indexed by RefCertify. Use RefCertify MCP tools instead of Read/Grep when navigating the code. Every tool accepts `compact: true` (~50% smaller payloads).
+
+**Workflow:** `refcertify_outline` (file or array) → `refcertify_source` (one symbol) → `refcertify_slice` (symbol + referenced symbols) → `refcertify_find` / `refcertify_search` → `refcertify_refs` → `refcertify_deps` → `refcertify_grep` → THEN Read.
+
+**High-leverage tools for refactor work in this repo:**
+- `refcertify_callers(name)` — who calls a memory/retrieval function before you change its signature.
+- `refcertify_diff_outline(refA, refB?)` — semantic diff of changed symbols across refs (great for reviewing migrations to `memory_items` or hotness).
+- `refcertify_signatures([names])` — batch signature lookup when comparing query/* methods.
+- `refcertify_unused_exports({path: 'src/'})` — dead-code finder; flag pre-`memory_items`-era exports.
+- `refcertify_kind_index('interface', {path: 'src/db'})` — every type in a subtree.
+- `refcertify_pack(query, budget_tokens?)` — assemble a token-budgeted bundle for a question instead of guessing files.
+
+**Grep is allowed only for non-code files** (markdown, JSON, yaml, config). The global `~/.claude/hooks/refcertify-first.sh` enforces this.
