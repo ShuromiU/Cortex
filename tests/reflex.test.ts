@@ -110,4 +110,26 @@ describe('reflectMemory', () => {
     expect(parseHookJson(result)).toContain('npm run test');
     expect(parseHookJson(result)).toContain('retrieval logs');
   });
+
+  it('does not surface resolved blocker notes for matching command anchors', () => {
+    const { store, sessionId } = createTestStore();
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-'));
+
+    const note = store.insertNote({
+      sessionId,
+      kind: 'blocker',
+      subject: 'npm-run-test-missing',
+      content: '`npm run test` does not exist as a script in package.json.',
+    });
+    store.updateNoteStatus(note.id, 'resolved');
+
+    const result = reflectMemory(store, {
+      event: 'cmd',
+      cmd: 'npm run test',
+      sessionId,
+      stateDir,
+    });
+
+    expect(result).toBe('');
+  });
 });

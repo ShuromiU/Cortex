@@ -168,6 +168,20 @@ describe('handleToolCall', () => {
     expect(result).toContain('Testing works');
   });
 
+  it('cortex_state records a spent ledger entry', () => {
+    store.insertNote({ sessionId, kind: 'insight', content: 'Ledger spent check' });
+    handleToolCall(store, 'cortex_state', {});
+    const stats = store.getLedgerStats();
+    expect(stats.byType['state']?.spent ?? 0).toBeGreaterThan(0);
+  });
+
+  it('cortex_recall records a spent ledger entry', () => {
+    handleToolCall(store, 'cortex_recall', { topic: 'testing' });
+    const stats = store.getLedgerStats();
+    expect(stats.spent).toBeGreaterThan(0);
+    expect(stats.byType['recall']?.spent ?? 0).toBeGreaterThan(0);
+  });
+
   // cortex_note
 
   it('cortex_note creates a note and returns confirmation', () => {

@@ -1,4 +1,5 @@
 import type { CortexStore, ParsedEvent, SessionRow, InsertNoteOpts } from '../db/store.js';
+import { estimateTokens } from '../query/retrieval.js';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -232,6 +233,11 @@ export function writeSessionSummary(
   sessionId: string,
   summary: string,
 ): void {
+  const events = store.getEventsBySession(sessionId);
+  const savedTokens = Math.max(
+    0,
+    estimateTokens(JSON.stringify(events)) - estimateTokens(summary),
+  );
   const stateId = store.insertState({ sessionId, layer: 'session', content: summary });
   store.insertEpisode({
     id: stateId,
@@ -241,6 +247,14 @@ export function writeSessionSummary(
     sourceStateId: stateId,
   });
   store.deleteEventsBySession(sessionId);
+  if (savedTokens > 0) {
+    store.insertLedgerEntry({
+      sessionId,
+      type: 'consolidation',
+      direction: 'saved',
+      tokens: savedTokens,
+    });
+  }
 }
 
 /**

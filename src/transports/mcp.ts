@@ -18,6 +18,7 @@ import { recall } from '../query/recall.js';
 import { brief } from '../query/brief.js';
 import { buildSessionSummary } from '../query/summarize.js';
 import { ensureScopedSession, syncBranchSnapshotForSession } from '../scope/runtime.js';
+import { estimateTokens } from '../query/retrieval.js';
 
 let engagementPath: string | null = null;
 
@@ -221,9 +222,17 @@ export function handleToolCall(
       return renderCortexRoute();
 
     case 'cortex_state': {
-      ensureScopedSession(store, cwd);
+      const session = ensureScopedSession(store, cwd);
+      writeEngagement('enabled', 'true');
       writeEngagement('state_called', 'true');
-      return buildFullState(store);
+      const output = buildFullState(store);
+      store.insertLedgerEntry({
+        sessionId: session.id,
+        type: 'state',
+        direction: 'spent',
+        tokens: estimateTokens(output),
+      });
+      return output;
     }
 
     case 'cortex_note': {
@@ -253,23 +262,44 @@ export function handleToolCall(
     }
 
     case 'cortex_recall': {
-      ensureScopedSession(store, cwd);
+      const session = ensureScopedSession(store, cwd);
       const topic = args['topic'] as string;
-      return recall(store, topic);
+      const output = recall(store, topic);
+      store.insertLedgerEntry({
+        sessionId: session.id,
+        type: 'recall',
+        direction: 'spent',
+        tokens: estimateTokens(output),
+      });
+      return output;
     }
 
     case 'cortex_brief': {
-      ensureScopedSession(store, cwd);
+      const session = ensureScopedSession(store, cwd);
       const topic = args['topic'] as string;
       const forAgent = args['for'] as string | undefined;
-      return brief(store, topic, forAgent);
+      const output = brief(store, topic, forAgent);
+      store.insertLedgerEntry({
+        sessionId: session.id,
+        type: 'brief',
+        direction: 'spent',
+        tokens: estimateTokens(output),
+      });
+      return output;
     }
 
     case 'cortex_engage': {
-      ensureScopedSession(store, cwd);
+      const session = ensureScopedSession(store, cwd);
       writeEngagement('enabled', 'true');
       writeEngagement('state_called', 'true');
-      return buildFullState(store);
+      const output = buildFullState(store);
+      store.insertLedgerEntry({
+        sessionId: session.id,
+        type: 'state',
+        direction: 'spent',
+        tokens: estimateTokens(output),
+      });
+      return output;
     }
 
     case 'cortex_disengage': {

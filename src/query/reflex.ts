@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { CortexStore } from '../db/store.js';
 import { renderMemoryLine } from './render.js';
-import { logRetrieval, retrieveMemory } from './retrieval.js';
+import { estimateTokens, logRetrieval, retrieveMemory } from './retrieval.js';
 
 export type ReflexEvent = 'prompt' | 'edit' | 'cmd' | 'agent';
 
@@ -29,6 +29,7 @@ const LOAD_BEARING_KINDS = new Set([
   'episode:command_failure',
 ]);
 
+const ACTIVE_REFLEX_STATES = new Set(['pinned', 'hot', 'warm']);
 const HIGH_CONFIDENCE_SCORE = 9;
 const MAX_CONTEXT_CHARS = 460;
 
@@ -132,6 +133,9 @@ export function reflectMemory(store: CortexStore, options: ReflexOptions): strin
 
   const retrieval = retrieveMemory(store, anchor, 6);
   const candidate = retrieval.results.find(item => {
+    if (!ACTIVE_REFLEX_STATES.has(item.state)) {
+      return false;
+    }
     if (!LOAD_BEARING_KINDS.has(item.kind)) {
       return false;
     }
@@ -166,6 +170,14 @@ export function reflectMemory(store: CortexStore, options: ReflexOptions): strin
 
   const additionalContext = renderAdditionalContext(renderMemoryLine(candidate, 3));
   logRetrieval(store, retrieval, additionalContext);
+  if (options.sessionId) {
+    store.insertLedgerEntry({
+      sessionId: options.sessionId,
+      type: 'reflex',
+      direction: 'spent',
+      tokens: estimateTokens(additionalContext),
+    });
+  }
   writeState(options, state);
   return toHookJson(options.event, additionalContext);
 }

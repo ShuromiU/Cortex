@@ -349,6 +349,18 @@ describe('writeSessionSummary', () => {
     const pending = getPendingConsolidation(store);
     expect(pending).toHaveLength(0);
   });
+
+  it('records a consolidation saved ledger entry from compression', () => {
+    const { store, sessionId } = makeStore();
+    store.insertEvent({ sessionId, type: 'read', target: 'a.ts' });
+    store.insertEvent({ sessionId, type: 'edit', target: 'b.ts' });
+
+    writeSessionSummary(store, sessionId, 'short');
+
+    const stats = store.getLedgerStats();
+    expect(stats.saved).toBeGreaterThan(0);
+    expect(stats.byType['consolidation']?.saved ?? 0).toBeGreaterThan(0);
+  });
 });
 
 // ── Level 2: promoteSubagentNotes ─────────────────────────────────────
