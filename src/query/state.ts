@@ -105,20 +105,20 @@ function renderUsagePolicy(mode: UsagePolicyMode): string[] {
   switch (mode) {
     case 'fresh':
       return [
-        'Use: skip cortex_state for trivial one-shot work. If this task becomes multi-step or resume-sensitive, call cortex_state after your first pass.',
-        'Notes: keep cortex_note for durable decisions, blockers, and non-obvious discoveries.',
+        'Cortex is ambient: capture is on after SessionStart, and reflex whispers only when prior context is high-confidence.',
+        'Use cortex_route for memory capabilities; keep cortex_note for durable decisions, blockers, and non-obvious discoveries.',
       ];
 
     case 'resume':
       return [
-        'Use: prior context likely matters here. Start with cortex_state before non-trivial work; use cortex_recall(topic) before re-investigating familiar ground.',
-        'Skip only for trivial one-shot work. Notes should stay load-bearing: decisions, blockers, and non-obvious discoveries only.',
+        'Cortex is ambient: prior context may surface automatically as short reflex whispers on focus shifts.',
+        'Use cortex_recall(topic), cortex_state, or cortex_brief only when you need more than the whisper; keep notes load-bearing.',
       ];
 
     case 'selective':
       return [
-        'Use: call cortex_state for resumed, branch-sensitive, or non-trivial work. Skip trivial one-shot tasks.',
-        'Use cortex_recall(topic) before re-investigating familiar ground, and reserve cortex_note for durable decisions, blockers, and non-obvious discoveries.',
+        'Cortex is ambient: no startup ritual is required, and silence is normal when no high-confidence memory matches.',
+        'Use cortex_route for help, cortex_recall(topic) for explicit search, and cortex_note for durable decisions, blockers, and insights.',
       ];
   }
 
@@ -255,7 +255,7 @@ export function buildHeader(store: CortexStore): string {
 
   if (count === 0) {
     return withUsagePolicy(
-      ['Cortex: working memory active | no prior sessions yet'],
+      ['Cortex: ambient memory active | no prior sessions yet'],
       'fresh',
     );
   }

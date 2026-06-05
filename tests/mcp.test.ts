@@ -24,8 +24,20 @@ function createStore(): { store: CortexStore; sessionId: string } {
 // ── TOOL_DEFINITIONS ──────────────────────────────────────────────────
 
 describe('TOOL_DEFINITIONS', () => {
-  it('defines exactly 7 tools', () => {
-    expect(TOOL_DEFINITIONS).toHaveLength(7);
+  it('defines exactly 8 tools', () => {
+    expect(TOOL_DEFINITIONS).toHaveLength(8);
+  });
+
+  it('has cortex_route tool', () => {
+    const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_route');
+    expect(tool).toBeDefined();
+  });
+
+  it('cortex_route is a cold-callable capability router', () => {
+    const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_route')!;
+    expect(tool.description).toContain('ambient memory');
+    expect(tool.description).toContain('route');
+    expect(tool.inputSchema.required).toEqual([]);
   });
 
   it('has cortex_state tool', () => {
@@ -33,10 +45,11 @@ describe('TOOL_DEFINITIONS', () => {
     expect(tool).toBeDefined();
   });
 
-  it('cortex_state description frames Cortex as selective, not mandatory', () => {
+  it('cortex_state description frames Cortex as explicit expansion, not a startup ritual', () => {
     const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_state')!;
-    expect(tool.description).toContain('skip trivial one-shot tasks');
-    expect(tool.description).toContain('resumed, branch-sensitive');
+    expect(tool.description).toContain('explicitly need');
+    expect(tool.description).toContain('ambient');
+    expect(tool.description).not.toContain('Start with this');
   });
 
   it('cortex_state has no required fields', () => {
@@ -132,6 +145,14 @@ describe('handleToolCall', () => {
     const result = createStore();
     store = result.store;
     sessionId = result.sessionId;
+  });
+
+  it('cortex_route explains ambient capture, reflex, and explicit recall tools', () => {
+    const result = handleToolCall(store, 'cortex_route', {});
+    expect(result).toContain('Cortex route');
+    expect(result).toContain('ambient capture');
+    expect(result).toContain('reflex');
+    expect(result).toContain('cortex_recall');
   });
 
   // cortex_state

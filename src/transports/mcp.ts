@@ -28,7 +28,12 @@ export function deriveEngagementPath(dir: string): string {
   return path.join(os.tmpdir(), `cortex-${sanitized}.state`);
 }
 
-function readEngagement(): Record<string, string> {
+export function configureEngagementPath(dir: string): string {
+  engagementPath = deriveEngagementPath(dir);
+  return engagementPath;
+}
+
+export function readEngagement(): Record<string, string> {
   if (!engagementPath) {
     return {};
   }
@@ -48,7 +53,7 @@ function readEngagement(): Record<string, string> {
   }
 }
 
-function writeEngagement(key: string, value: string): void {
+export function writeEngagement(key: string, value: string): void {
   if (!engagementPath) {
     return;
   }
@@ -64,6 +69,16 @@ function writeEngagement(key: string, value: string): void {
   } catch {
     // Non-fatal.
   }
+}
+
+export function renderCortexRoute(): string {
+  return [
+    'Cortex route: ambient memory for coding agents.',
+    'Default behavior: ambient capture is enabled at session start, and the reflex may whisper short prior context on focus shifts.',
+    'Use cortex_recall(topic) for explicit search when a topic feels familiar or prior work may matter.',
+    'Use cortex_state for a broader working set when resuming dense work, and cortex_brief(topic) before delegating with context.',
+    'Use cortex_note for durable decisions, blockers, and non-obvious insights; use cortex_disengage to silence capture and reflex.',
+  ].join('\n');
 }
 
 function findDbPath(startDir: string): string {
@@ -84,8 +99,17 @@ function ensureSession(store: CortexStore, cwd: string): string {
 
 export const TOOL_DEFINITIONS = [
   {
+    name: 'cortex_route',
+    description: 'Cold-callable route/help entry point for Cortex ambient memory. Explains automatic capture, reflex whispers, and when to use recall, state, brief, note, engage, or disengage.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
     name: 'cortex_state',
-    description: 'Load working memory when prior context is likely relevant. Start with this for resumed, branch-sensitive, or otherwise non-trivial work; skip trivial one-shot tasks. Returns top-scored notes, recent decisions, branch snapshot, and the last-session tail. Usually call it once per session; later mutations show up through cortex_recall.',
+    description: 'Load the broader Cortex working set when you explicitly need more context than ambient reflex whispers provide. Returns top-scored notes, recent decisions, branch snapshot, and the last-session tail.',
     inputSchema: {
       type: 'object' as const,
       properties: {},
@@ -193,6 +217,9 @@ export function handleToolCall(
   cwd: string = process.cwd(),
 ): string {
   switch (toolName) {
+    case 'cortex_route':
+      return renderCortexRoute();
+
     case 'cortex_state': {
       ensureScopedSession(store, cwd);
       writeEngagement('state_called', 'true');
@@ -292,7 +319,7 @@ export function createMcpServer(store: CortexStore, cwd: string = process.cwd())
 
 export async function startServer(startDir?: string): Promise<void> {
   const dir = startDir ?? process.cwd();
-  engagementPath = deriveEngagementPath(dir);
+  configureEngagementPath(dir);
   const { store } = openCortexDb(dir);
   ensureScopedSession(store, dir);
 

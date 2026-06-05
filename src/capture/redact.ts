@@ -20,6 +20,8 @@ export function classifyCommand(cmd: string): string {
   if (/^go\s+run\b/.test(normalized)) return 'run';
   if (/^cargo\s+run\b/.test(normalized)) return 'run';
   if (/^dotnet\s+run\b/.test(normalized)) return 'run';
+  if (/^(npm|yarn|pnpm|bun)\s+(test|run\s+test)\b/.test(normalized)) return 'test';
+  if (/^(npm|yarn|pnpm|bun)\s+(build|run\s+build)\b/.test(normalized)) return 'build';
 
   // Single-word prefixes
   const first = normalized.split(' ')[0]!.toLowerCase();

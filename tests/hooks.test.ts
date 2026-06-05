@@ -116,7 +116,7 @@ describe('handleCmdEvent', () => {
     expect(runs).toHaveLength(1);
     expect(runs[0]!.event_id).toBe(events[0]!.id);
     expect(runs[0]!.command_summary).toBe('npm run build');
-    expect(runs[0]!.category).toBe('npm');
+    expect(runs[0]!.category).toBe('build');
     expect(runs[0]!.exit_code).toBe(0);
   });
 

@@ -34,9 +34,10 @@ describe('buildHeader - empty', () => {
   it('returns no-prior-sessions message when no sessions exist', () => {
     const store = makeStore();
     const header = buildHeader(store);
-    expect(header).toContain('Cortex: working memory active | no prior sessions yet');
-    expect(header).toContain('skip cortex_state for trivial one-shot work');
-    expect(header).toContain('Notes: keep cortex_note');
+    expect(header).toContain('Cortex: ambient memory active | no prior sessions yet');
+    expect(header).toContain('Cortex is ambient');
+    expect(header).toContain('cortex_route');
+    expect(header).not.toContain('Start with cortex_state');
   });
 });
 
@@ -56,8 +57,9 @@ describe('buildHeader - provisional (unconsolidated sessions)', () => {
     expect(header).toContain('Cortex [provisional]');
     expect(header).toContain('auth');
     expect(header).toContain('1 session');
-    expect(header).toContain('Use: prior context likely matters here.');
+    expect(header).toContain('Cortex is ambient');
     expect(header).toContain('cortex_recall(topic)');
+    expect(header).not.toContain('Start with cortex_state');
   });
 
   it('shows file activity with reads and edits counts', () => {
@@ -108,7 +110,7 @@ describe('buildHeader - consolidated session state', () => {
     const header = buildHeader(store);
     expect(header).toContain('Cortex: refactor');
     expect(header).toContain('Refactored auth module.');
-    expect(header).toContain('Use: prior context likely matters here.');
+    expect(header).toContain('Cortex is ambient');
     expect(header).not.toContain('[provisional]');
   });
 
@@ -184,7 +186,8 @@ describe('buildHeader - live resume signals', () => {
 
     const header = buildHeader(store);
     expect(header).toContain('Resume: [auth] finish token rotation');
-    expect(header).toContain('Use: prior context likely matters here.');
+    expect(header).toContain('Cortex is ambient');
+    expect(header).not.toContain('Start with cortex_state');
   });
 });
 

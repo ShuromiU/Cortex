@@ -2,8 +2,8 @@
 
 ## Working Rules
 
-- Start by calling `cortex_state` when the MCP server is available. Codex on Windows does not get Claude-style startup injection natively, so this is a required first step for substantial work.
-- Use `cortex_recall` before repeating prior investigation and `cortex_brief` before delegating work to an agent.
+- Cortex is ambient memory. SessionStart quietly enables capture, and the reflex may surface short prior context without a model ritual.
+- Use `cortex_route` when you need the Cortex capability map. Use `cortex_recall`, `cortex_state`, or `cortex_brief` only when you explicitly need more context than the reflex provides.
 - Write `cortex_note` entries for real decisions, blockers, and non-obvious discoveries.
 
 ## Repo Priorities

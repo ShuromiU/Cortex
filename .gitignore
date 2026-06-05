@@ -5,4 +5,5 @@ dist/
 *.db-wal
 .cortex.db
 .claude/
+.codex/
 .refcertify/

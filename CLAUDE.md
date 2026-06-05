@@ -23,16 +23,20 @@ Persistent working memory for coding agents.
 - `src/memory/items.ts` — memory-item text/state shaping
 - `src/memory/hotness.ts` — decay/reinforcement scoring
 - `src/query/retrieval.ts` — retrieval/reranking
+- `src/query/reflex.ts` — focus-shift memory reflex for hook `additionalContext`
 - `src/query/state.ts` — startup/default working-set rendering
 - `src/query/recall.ts` — `cortex_recall` search
 - `src/query/brief.ts` — `cortex_brief` topical context
 - `src/query/summarize.ts` — `cortex_summarize` session wrap-up
 - `src/query/scope.ts` — branch/worktree session scoping
-- `src/transports/cli.ts` — `inject-header`, CLI logging, evaluation
+- `src/transports/cli.ts` — `inject-header`, `route`, `reflect`, CLI logging, evaluation
+- `src/transports/hook-entry.ts` — JSON hook bridge for Codex/Claude wrappers
 - `src/transports/mcp.ts` — MCP tools used by Claude
 
 ## Expected Behavior
-- `inject-header` is a manual CLI command. It is no longer wired to `SessionStart` — running it creates a scoped session, prints a decision-oriented header, and flips the engagement file to `enabled=true`, but Claude Code sessions do not trigger it automatically.
+- `inject-header --quiet` is wired to SessionStart for ambient capture. It creates a scoped session and flips the engagement file to `enabled=true` without dumping a large header.
+- `cortex reflect` is hook-facing and emits short `additionalContext` only for high-confidence remembered focus shifts; silence is the default.
+- `cortex_route` / `cortex route` are the cold-callable capability map.
 - `cortex_state` should show the current working set, not a full historical dump.
 - `cortex_recall` and `cortex_brief` should search notes, snapshots, summaries, and command/episode memory.
 - Branch switches should restore the matching snapshot.
@@ -40,23 +44,24 @@ Persistent working memory for coding agents.
 
 ## When To Use Cortex
 
-**Cortex is opt-in.** Do not call any `cortex_*` tool unless the user explicitly asks for Cortex, or has already called `cortex_engage` this session. No automatic startup calls, no "this feels non-trivial so I should load memory" reasoning.
+**Cortex is ambient.** The system manages capture and short reflex whispers. Do not add model-side rituals such as "always call `cortex_state` first"; use explicit tools only when the current task needs more memory than the ambient whisper provides.
 
-When the user opts in (explicit request, or the engagement file shows `enabled=true`), the available tools are:
+Available tools:
 
-- `cortex_engage` — activate Cortex capture for the session and load the current working memory.
-- `cortex_state` — working set: top-scored notes, decisions, branch snapshot, last-session tail.
+- `cortex_route` — compact capability map and routing guidance.
+- `cortex_engage` — re-enable Cortex capture after `cortex_disengage`.
+- `cortex_state` — explicit working set: top-scored notes, decisions, branch snapshot, last-session tail.
 - `cortex_note(kind, content, ...)` — durable memory. `kind` is one of `decision` (include `alternatives`), `insight`, `blocker`, `intent`, `focus`. Reserve for load-bearing items; skip routine progress.
-- `cortex_recall(topic)` — search notes/snapshots/summaries/episodes before re-investigating familiar ground.
+- `cortex_recall(topic)` — explicit search over notes/snapshots/summaries/episodes when prior work may matter.
 - `cortex_brief(topic)` — compact topical context to paste into a subagent prompt. Call it yourself; don't ask subagents to call it.
 - `cortex_summarize` — checkpoint a dense session so the next one resumes gracefully.
-- `cortex_disengage` — turn capture and enforcement back off.
+- `cortex_disengage` — turn capture and reflex off for the current session.
 
 Anti-patterns (still apply once engaged):
 - Don't write notes for routine acknowledgments, task tracking, or anything obvious from code/git.
 - Don't re-call `cortex_state` multiple times per session.
 - Don't call `cortex_summarize` for throwaway sessions.
-- Don't engage Cortex unprompted just because a task looks interesting.
+- Don't tell the model to perform startup memory rituals; hook wiring owns ambient capture.
 
 ## Verification
 - Run `npm run build`

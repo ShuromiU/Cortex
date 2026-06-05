@@ -22,8 +22,13 @@ describe('classifyCommand', () => {
     expect(classifyCommand('npm install')).toBe('npm');
     expect(classifyCommand('npx tsc --noEmit')).toBe('npm');
     expect(classifyCommand('yarn add lodash')).toBe('npm');
-    expect(classifyCommand('pnpm run build')).toBe('npm');
-    expect(classifyCommand('bun run test')).toBe('npm');
+  });
+
+  it('classifies package-manager test and build scripts by behavior', () => {
+    expect(classifyCommand('npm test')).toBe('test');
+    expect(classifyCommand('npm run test')).toBe('test');
+    expect(classifyCommand('pnpm run build')).toBe('build');
+    expect(classifyCommand('bun run test')).toBe('test');
   });
 
   // test runners

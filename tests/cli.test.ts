@@ -124,6 +124,24 @@ describe('createProgram', () => {
     expect(names).toContain('inject-header');
   });
 
+  it('has route command', () => {
+    const program = createProgram();
+    const names = program.commands.map(c => c.name());
+    expect(names).toContain('route');
+  });
+
+  it('has reflect command with event anchor options', () => {
+    const program = createProgram();
+    const reflect = program.commands.find(c => c.name() === 'reflect')!;
+    expect(reflect).toBeDefined();
+    const optNames = reflect.options.map(o => o.long);
+    expect(optNames).toContain('--event');
+    expect(optNames).toContain('--prompt');
+    expect(optNames).toContain('--file');
+    expect(optNames).toContain('--cmd');
+    expect(optNames).toContain('--desc');
+  });
+
   it('inject-header engages cortex without claiming state was already loaded', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-cli-'));
     const originalCwd = process.cwd();
@@ -137,6 +155,30 @@ describe('createProgram', () => {
       const engagement = fs.readFileSync(deriveEngagementPath(tempDir), 'utf8');
       expect(engagement).toContain('enabled=true');
       expect(engagement).toContain('state_called=false');
+    } finally {
+      stdoutSpy.mockRestore();
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('inject-header --quiet engages cortex without printing startup output', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-cli-quiet-'));
+    const originalCwd = process.cwd();
+    let stdout = '';
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      stdout += chunk.toString();
+      return true;
+    });
+
+    try {
+      process.chdir(tempDir);
+      const program = createProgram();
+      await program.parseAsync(['node', 'cortex', 'inject-header', '--quiet']);
+
+      const engagement = fs.readFileSync(deriveEngagementPath(tempDir), 'utf8');
+      expect(engagement).toContain('enabled=true');
+      expect(engagement).toContain('state_called=false');
+      expect(stdout).toBe('');
     } finally {
       stdoutSpy.mockRestore();
       process.chdir(originalCwd);

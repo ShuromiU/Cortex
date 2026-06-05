@@ -20,7 +20,13 @@ import {
 } from '../capture/consolidate.js';
 import { evaluateDatabase } from '../eval/harness.js';
 import { buildHeader, formatTokens } from '../query/state.js';
-import { deriveEngagementPath } from './mcp.js';
+import { reflectMemory, type ReflexEvent } from '../query/reflex.js';
+import {
+  configureEngagementPath,
+  deriveEngagementPath,
+  readEngagement,
+  renderCortexRoute,
+} from './mcp.js';
 import { ensureScopedSession, syncBranchSnapshotForSession } from '../scope/runtime.js';
 
 function findDbPath(startDir: string): string {
@@ -123,7 +129,9 @@ export function createProgram(): Command {
   program
     .command('inject-header')
     .description('Consolidate sessions, start a new session, print context header')
-    .action(() => {
+    .option('--quiet', 'Engage capture without printing the working-memory header')
+    .action((opts: { quiet?: boolean }) => {
+      configureEngagementPath(process.cwd());
       const { store } = openCortexDb(process.cwd());
       const unconsolidated = store.getUnconsolidatedSessions();
 
@@ -151,7 +159,48 @@ export function createProgram(): Command {
         // Non-fatal.
       }
 
+      if (opts.quiet) {
+        return;
+      }
+
       process.stdout.write(`${buildHeader(store)}\n`);
+    });
+
+  program
+    .command('route')
+    .description('Show Cortex ambient-memory capabilities and routing guidance')
+    .action(() => {
+      process.stdout.write(`${renderCortexRoute()}\n`);
+    });
+
+  program
+    .command('reflect')
+    .description('Emit hook additionalContext when remembered context matches the current focus')
+    .requiredOption('--event <event>', 'Hook event anchor type: prompt, edit, cmd, or agent')
+    .option('--prompt <text>', 'User prompt text for prompt events')
+    .option('--file <path>', 'File path for edit events')
+    .option('--cmd <text>', 'Command text for command events')
+    .option('--desc <text>', 'Agent task description for agent events')
+    .action((opts: { event: ReflexEvent; prompt?: string; file?: string; cmd?: string; desc?: string }) => {
+      configureEngagementPath(process.cwd());
+      if (readEngagement()['enabled'] !== 'true') {
+        return;
+      }
+
+      const { store } = openCortexDb(process.cwd());
+      const session = ensureScopedSession(store, process.cwd());
+      const output = reflectMemory(store, {
+        event: opts.event,
+        prompt: opts.prompt,
+        file: opts.file,
+        cmd: opts.cmd,
+        desc: opts.desc,
+        sessionId: session.id,
+      });
+
+      if (output) {
+        process.stdout.write(`${output}\n`);
+      }
     });
 
   program

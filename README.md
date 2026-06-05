@@ -2,7 +2,7 @@
 
 Persistent working memory for Claude Code and other MCP-compatible coding agents.
 
-Cortex V2 is branch-aware, retrieval-first, and always-on friendly. It stores decisions, blockers, command outcomes, snapshots, and session summaries in a local SQLite database, then restores a small working set at session start and retrieves targeted context on demand.
+Cortex V2 is branch-aware, retrieval-first, and ambient by default. It stores decisions, blockers, command outcomes, snapshots, and session summaries in a local SQLite database, then quietly captures activity and surfaces short prior-context whispers only when a high-confidence focus shift matches memory.
 
 ## What Changed In V2
 
@@ -21,8 +21,10 @@ Now:
 
 ## Core Behavior
 
-- `SessionStart` can inject a small decision-oriented Cortex header automatically.
+- `SessionStart` quietly enables capture with `cortex inject-header --quiet`.
+- `cortex reflect` can emit short hook `additionalContext` on high-confidence focus shifts.
 - Cortex now supports branch-scoped restore: switching branches restores the right snapshot.
+- `cortex_route` / `cortex route` provide the cold-callable capability map.
 - `cortex_recall(topic)` searches notes, summaries, snapshots, and command/episode memory.
 - `cortex_brief(topic)` returns a smaller, agent-friendly subset.
 - touched and recalled memory stays hot; ignored memory decays out of the default state.
@@ -69,7 +71,7 @@ Add Cortex to `~/.claude/settings.json`:
 
 ### SessionStart Hook
 
-Run Cortex at the start of every Claude session:
+Run Cortex quietly at the start of every Claude session:
 
 ```json
 {
@@ -80,7 +82,7 @@ Run Cortex at the start of every Claude session:
         "hooks": [
           {
             "type": "command",
-            "command": "cortex inject-header"
+            "command": "cortex inject-header --quiet"
           }
         ]
       }
@@ -93,8 +95,9 @@ Run Cortex at the start of every Claude session:
 - consolidates old unconsolidated sessions
 - refreshes branch/project state
 - starts a scoped session
-- prints a branch-aware header that explains when to use Cortex and when to skip it
-- auto-engages Cortex for the new session without pretending full state was already loaded
+- auto-engages Cortex for the new session without dumping a large header
+
+Use `cortex inject-header` without `--quiet` only when you explicitly want to print the larger branch-aware working-memory header.
 
 ### PostToolUse Hook
 
@@ -120,7 +123,7 @@ To capture file, command, and agent activity:
 
 ## Codex Setup
 
-Codex can use Cortex globally through MCP, but current Codex lifecycle hooks do not match Claude's hook surface on Windows.
+Codex is the primary Cortex runtime. Use MCP for explicit tools and hooks for quiet capture/reflex behavior.
 
 ### Global MCP
 
@@ -132,43 +135,54 @@ command = "C:\\Program Files\\nodejs\\node.exe"
 args = ["C:\\Claude Code\\cortex\\dist\\transports\\cli.js", "serve"]
 ```
 
-### Global Instructions
+### Hooks
 
-Create `~/.codex/AGENTS.md` with guidance like:
-
-```markdown
-- Start each substantial task with `cortex_state` when Cortex is available.
-- Use `cortex_recall` before re-investigating prior work.
-- Use `cortex_brief` before agent delegation when topic context matters.
-- Write `cortex_note` entries for real decisions, blockers, and non-obvious discoveries.
-```
-
-If you want Codex to load existing Claude-style repo docs automatically, add this to `~/.codex/config.toml` too:
+Enable Codex hooks and add quiet Cortex wiring to `~/.codex/config.toml`:
 
 ```toml
-project_doc_fallback_filenames = ["CLAUDE.md", ".claude.local.md"]
-project_doc_max_bytes = 65536
+[features]
+hooks = true
+
+[[hooks.SessionStart]]
+matcher = "^(startup|resume)$"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = 'cmd.exe /d /s /c call "C:/Users/dev/.codex/cortex-hooks/cortex-hook.cmd" session-start'
+timeout = 30
+
+[[hooks.UserPromptSubmit]]
+matcher = ".*"
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = 'cmd.exe /d /s /c call "C:/Users/dev/.codex/cortex-hooks/cortex-hook.cmd" reflect-prompt'
+timeout = 15
+
+[[hooks.PreToolUse]]
+matcher = "(apply_patch|shell_command|Bash|Agent)"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = 'cmd.exe /d /s /c call "C:/Users/dev/.codex/cortex-hooks/cortex-hook.cmd" reflect-pre'
+timeout = 15
+
+[[hooks.PostToolUse]]
+matcher = "(apply_patch|shell_command|Bash|Agent)"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = 'cmd.exe /d /s /c call "C:/Users/dev/.codex/cortex-hooks/cortex-hook.cmd" post'
+timeout = 15
 ```
 
-### Current Codex Limitation
-
-Current Codex docs say hooks are disabled on Windows, and `PreToolUse` / `PostToolUse` currently only emit `Bash` even on supported platforms. So Claude's exact behavior does not carry over today:
-
-- `cortex inject-header` is not automatically injected into native Windows Codex sessions
-- file-edit and agent events are not captured through Codex hooks the way Claude captures them
-
-The practical Codex setup today is:
-
-- register Cortex as a global MCP server
-- mark the server `required = true` and give it a longer startup timeout in `~/.codex/config.toml`
-- on Windows, launch Codex through a small wrapper that runs `cortex inject-header` before starting Codex
-- teach Codex to call `cortex_state` at the start of substantial work via `AGENTS.md`
-- keep using the Claude hook path where full automatic logging is required
+The wrapper calls `cortex inject-header --quiet` for SessionStart and `dist/transports/hook-entry.js` for hook JSON parsing. If Codex asks to trust the new hook entries, approve them through Codex's normal trusted-hash flow.
 
 ## MCP Tools
 
 | Tool | Purpose |
 |------|---------|
+| `cortex_route` | Explain ambient memory behavior and route to the right Cortex tool |
 | `cortex_state` | Return the current scored working set |
 | `cortex_note` | Record an `insight`, `decision`, `intent`, `blocker`, or `focus` |
 | `cortex_recall` | Retrieve evidence for a topic from memory |
@@ -181,6 +195,11 @@ The practical Codex setup today is:
 
 ```text
 cortex inject-header
+cortex inject-header --quiet
+cortex route
+cortex reflect --event prompt --prompt "..."
+cortex reflect --event edit --file src/file.ts
+cortex reflect --event cmd --cmd "npm run test"
 cortex status
 cortex stats
 cortex consolidate
@@ -211,19 +230,15 @@ Retrieval is hybrid:
 
 ## Recommended Usage
 
-Use Cortex selectively: skip trivial one-shot work, and use it when prior context is likely to matter.
+Cortex should feel ambient. Let hooks capture activity and let the reflex stay silent unless it has high-confidence prior context.
 
-Trigger conditions (call voluntarily when the trigger fires):
+- Use `cortex_route` when you need the capability map.
+- Use `cortex_recall(topic)` or `cortex_state` only when you explicitly need more context than the reflex surfaced.
+- Use `cortex_brief(topic)` before dispatching a subagent when topic history matters.
+- Use `cortex_note(decision, alternatives=[...])`, `cortex_note(insight)`, or `cortex_note(blocker)` for load-bearing memory only.
+- Use `cortex_summarize` at the end of a dense work session so the next one resumes gracefully.
 
-- `cortex_state` at the start of resumed, branch-sensitive, or otherwise non-trivial work, or after a branch switch
-- `cortex_note(decision, alternatives=[...])` after a design pivot or trade-off — include what you rejected and why
-- `cortex_note(insight)` when you discover a concrete value, constraint, or gotcha easy to hallucinate later
-- `cortex_note(blocker)` when you hit a dead end worth skipping on return
-- `cortex_recall(topic)` before re-investigating something that feels familiar
-- `cortex_brief(topic)` before dispatching a subagent on a topic with history in the repo — paste the result into the agent's prompt yourself
-- `cortex_summarize` at the end of a dense work session so the next one resumes gracefully
-
-Anti-patterns: don't note routine acknowledgments, don't tell subagents to call `cortex_brief` themselves, don't re-call `cortex_state` multiple times per session, don't summarize throwaway sessions.
+Anti-patterns: don't add startup rituals to agent instructions, don't note routine acknowledgments, don't tell subagents to call `cortex_brief` themselves, don't re-call `cortex_state` multiple times per session, and don't summarize throwaway sessions.
 
 ## Data
 
