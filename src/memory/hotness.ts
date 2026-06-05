@@ -144,6 +144,10 @@ export function deriveMemoryItemState(
     return item.state;
   }
 
+  if (item.text.toLowerCase().includes('status: resolved')) {
+    return 'cold';
+  }
+
   const score = computeMemoryHotness(item, now);
   if (score >= 7) {
     return 'hot';

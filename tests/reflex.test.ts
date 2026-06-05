@@ -111,6 +111,49 @@ describe('reflectMemory', () => {
     expect(parseHookJson(result)).toContain('retrieval logs');
   });
 
+  it('stays silent for vague continuation prompts even when generic words match memory', () => {
+    const { store, sessionId } = createTestStore();
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-'));
+
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'pulse all-project hub foundation fix',
+      content: 'Implemented Pulse foundation fix with active project records and the reports panel scope.',
+    });
+
+    const result = reflectMemory(store, {
+      event: 'prompt',
+      prompt: 'Continue with the fix',
+      sessionId,
+      stateDir,
+    });
+
+    expect(result).toBe('');
+  });
+
+  it('surfaces prompt memory when the prompt includes distinctive matching terms', () => {
+    const { store, sessionId } = createTestStore();
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-'));
+
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'pulse all-project hub foundation fix',
+      content: 'Implemented Pulse foundation fix with active project records and the reports panel scope.',
+    });
+
+    const result = reflectMemory(store, {
+      event: 'prompt',
+      prompt: 'Continue Pulse all-project hub foundation fix',
+      sessionId,
+      stateDir,
+    });
+
+    expect(result).not.toBe('');
+    expect(parseHookJson(result)).toContain('pulse all-project hub foundation fix');
+  });
+
   it('does not surface resolved blocker notes for matching command anchors', () => {
     const { store, sessionId } = createTestStore();
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-'));

@@ -31,6 +31,7 @@ const LOAD_BEARING_KINDS = new Set([
 
 const ACTIVE_REFLEX_STATES = new Set(['pinned', 'hot', 'warm']);
 const HIGH_CONFIDENCE_SCORE = 9;
+const MIN_PROMPT_TOKEN_HITS = 2;
 const MAX_CONTEXT_CHARS = 460;
 
 function sanitizeKey(value: string): string {
@@ -97,6 +98,18 @@ function anchorAppearsInItem(event: ReflexEvent, anchor: string, itemText: strin
   return true;
 }
 
+function promptStronglyMatchesItem(tokens: string[], exactPhrase: boolean, tokenHits: number): boolean {
+  if (tokens.length === 0) {
+    return false;
+  }
+
+  if (exactPhrase) {
+    return true;
+  }
+
+  return tokens.length >= MIN_PROMPT_TOKEN_HITS && tokenHits >= MIN_PROMPT_TOKEN_HITS;
+}
+
 function renderAdditionalContext(line: string): string {
   const context = `Cortex memory: ${line}`;
   if (context.length <= MAX_CONTEXT_CHARS) {
@@ -143,6 +156,12 @@ export function reflectMemory(store: CortexStore, options: ReflexOptions): strin
       return false;
     }
     if (retrieval.context.preferredScope && item.scope_bonus < 2) {
+      return false;
+    }
+    if (
+      options.event === 'prompt'
+      && !promptStronglyMatchesItem(retrieval.context.tokens, item.exact_phrase, item.token_hits)
+    ) {
       return false;
     }
 

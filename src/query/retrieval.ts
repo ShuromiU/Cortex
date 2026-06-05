@@ -7,6 +7,57 @@ import { deriveProjectScopeKey } from '../scope/keys.js';
 import { getPreferredScope, type PreferredScope } from './scope.js';
 
 const TOKEN_PATTERN = /[a-z0-9][a-z0-9._/-]*/gi;
+const TOKEN_SPLIT_PATTERN = /[._/-]+/g;
+const LOW_SIGNAL_TOKENS = new Set([
+  'a',
+  'all',
+  'an',
+  'and',
+  'are',
+  'as',
+  'at',
+  'be',
+  'by',
+  'can',
+  'continue',
+  'could',
+  'did',
+  'do',
+  'does',
+  'fix',
+  'fixed',
+  'fixes',
+  'fixing',
+  'for',
+  'from',
+  'has',
+  'have',
+  'implement',
+  'implemented',
+  'implementation',
+  'in',
+  'is',
+  'it',
+  'just',
+  'now',
+  'of',
+  'on',
+  'or',
+  'plan',
+  'please',
+  'should',
+  'that',
+  'the',
+  'this',
+  'to',
+  'was',
+  'were',
+  'will',
+  'with',
+  'without',
+  'work',
+  'would',
+]);
 
 const KIND_BONUS: Record<string, number> = {
   'note:decision': 3.4,
@@ -65,7 +116,8 @@ export function estimateTokens(text: string): number {
 
 function tokenizeTopic(topic: string): string[] {
   const matches = topic.toLowerCase().match(TOKEN_PATTERN) ?? [];
-  return Array.from(new Set(matches)).slice(0, 8);
+  const tokens = matches.flatMap(match => match.split(TOKEN_SPLIT_PATTERN));
+  return Array.from(new Set(tokens.filter(token => token.length > 1 && !LOW_SIGNAL_TOKENS.has(token)))).slice(0, 8);
 }
 
 function buildFtsQuery(tokens: string[]): string | null {

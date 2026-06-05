@@ -116,4 +116,24 @@ describe('memory hotness', () => {
     expect(fullState).toContain('Token refresh still fails in staging');
     expect(fullState).not.toContain('Legacy CSS polish task');
   });
+
+  it('does not reheat resolved blocker notes during hotness refresh', () => {
+    const store = new CortexStore(createTestDb());
+    const session = store.createSession({ focus: 'auth' });
+
+    const blocker = store.insertNote({
+      sessionId: session.id,
+      kind: 'blocker',
+      subject: 'npm-run-lint-broken',
+      content: '`npm run lint` used to call next lint.',
+    });
+    store.updateNoteStatus(blocker.id, 'resolved');
+
+    const item = store.getMemoryItemBySource('notes', blocker.id)!;
+    expect(item.state).toBe('cold');
+
+    refreshMemoryHotness(store, [item.scope_key], new Date('2026-04-13T12:00:00.000Z'));
+
+    expect(store.getMemoryItemBySource('notes', blocker.id)?.state).toBe('cold');
+  });
 });

@@ -737,6 +737,26 @@ describe('CortexStore — notes', () => {
     expect(resolved!.status).toBe('resolved');
   });
 
+  it('does not reheat resolved notes when touching memory items', () => {
+    const blocker = store.insertNote({
+      sessionId,
+      kind: 'blocker',
+      subject: 'npm-run-lint-broken',
+      content: '`npm run lint` used to call next lint.',
+    });
+    store.updateNoteStatus(blocker.id, 'resolved');
+
+    const item = store.getMemoryItemBySource('notes', blocker.id)!;
+    expect(item.state).toBe('cold');
+
+    store.touchMemoryItems([item.id], '2026-04-13T12:00:00.000Z');
+
+    const touched = store.getMemoryItemBySource('notes', blocker.id)!;
+    expect(touched.state).toBe('cold');
+    expect(touched.access_count).toBe(item.access_count + 1);
+    expect(touched.last_accessed_at).toBe('2026-04-13T12:00:00.000Z');
+  });
+
   it('gets notes by status', () => {
     const note1 = store.insertNote({ sessionId, kind: 'insight', content: 'Insight 1' });
     store.insertNote({ sessionId, kind: 'insight', content: 'Insight 2' });

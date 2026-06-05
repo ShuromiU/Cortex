@@ -1546,6 +1546,7 @@ export class CortexStore {
            last_accessed_at = ?,
            state = CASE
              WHEN state IN ('pinned', 'archived') THEN state
+             WHEN lower(text) LIKE '%status: resolved%' THEN 'cold'
              ELSE 'hot'
            END
        WHERE id = ?`,

@@ -41,6 +41,8 @@ Persistent working memory for coding agents.
 - `cortex_recall` and `cortex_brief` should search notes, snapshots, summaries, and command/episode memory.
 - Branch switches should restore the matching snapshot.
 - Stale notes should decay out of the default state unless reinforced by actual retrieval/use.
+- Resolved notes should remain cold even when retrieved, and should not trigger reflex `additionalContext`.
+- Prompt reflex should stay silent for vague continuation prompts unless distinctive terms strongly match memory.
 
 ## When To Use Cortex
 

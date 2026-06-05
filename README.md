@@ -28,6 +28,8 @@ Now:
 - `cortex_recall(topic)` searches notes, summaries, snapshots, and command/episode memory.
 - `cortex_brief(topic)` returns a smaller, agent-friendly subset.
 - touched and recalled memory stays hot; ignored memory decays out of the default state.
+- resolved notes stay cold and do not trigger hook reflex whispers.
+- vague prompt hooks stay silent unless the prompt includes distinctive matching terms.
 
 ## Install
 

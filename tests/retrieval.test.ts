@@ -4,6 +4,7 @@ import { applySchema, initializeMeta } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import { recall } from '../src/query/recall.js';
 import { brief } from '../src/query/brief.js';
+import { buildRetrievalContext } from '../src/query/retrieval.js';
 
 function createTestDb(): Database.Database {
   const db = new Database(':memory:');
@@ -14,6 +15,26 @@ function createTestDb(): Database.Database {
 }
 
 describe('retrieval', () => {
+  it('drops generic continuation prompt words before building a query', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+
+    const context = buildRetrievalContext(store, 'Continue with the fix');
+
+    expect(context.tokens).toEqual([]);
+    expect(context.queryText).toBeNull();
+  });
+
+  it('keeps distinctive terms while dropping generic workflow words', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+
+    const context = buildRetrievalContext(store, 'Continue Pulse all-project hub foundation fix');
+
+    expect(context.tokens).toEqual(['pulse', 'project', 'hub', 'foundation']);
+    expect(context.queryText).toBe('"pulse" OR "project" OR "hub" OR "foundation"');
+  });
+
   it('prefers branch-scoped memory over project-wide matches', () => {
     const db = createTestDb();
     const store = new CortexStore(db);
