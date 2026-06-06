@@ -165,15 +165,21 @@ describe('TOOL_DEFINITIONS', () => {
 describe('handleToolCall', () => {
   let store: CortexStore;
   let sessionId: string;
+  let cwd: string;
+
+  function callTool(toolName: string, args: Record<string, unknown> = {}): string {
+    return handleToolCall(store, toolName, args, cwd);
+  }
 
   beforeEach(() => {
     const result = createStore();
     store = result.store;
     sessionId = result.sessionId;
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-mcp-cwd-'));
   });
 
   it('cortex_route explains ambient capture, reflex, and explicit recall tools', () => {
-    const result = handleToolCall(store, 'cortex_route', {});
+    const result = callTool('cortex_route');
     expect(result).toContain('Cortex route');
     expect(result).toContain('ambient capture');
     expect(result).toContain('reflex');
@@ -181,10 +187,9 @@ describe('handleToolCall', () => {
   });
 
   it('cortex_route marks Cortex as consulted for hook visibility suppression', () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-mcp-cwd-'));
     configureEngagementPath(cwd);
 
-    handleToolCall(store, 'cortex_route', {}, cwd);
+    callTool('cortex_route');
 
     expect(readEngagement()['cortex_consulted']).toBe('true');
   });
@@ -192,12 +197,12 @@ describe('handleToolCall', () => {
   // cortex_state
 
   it('cortex_state returns a string (cognitive state)', () => {
-    const result = handleToolCall(store, 'cortex_state', {});
+    const result = callTool('cortex_state');
     expect(typeof result).toBe('string');
   });
 
   it('cortex_state returns actionable fallback guidance when state is empty', () => {
-    const result = handleToolCall(store, 'cortex_state', {});
+    const result = callTool('cortex_state');
     expect(result).toContain('Cortex state: no current working memory for this scope.');
     expect(result).toContain('cortex_route');
     expect(result).toContain('cortex_recall(topic)');
@@ -205,19 +210,19 @@ describe('handleToolCall', () => {
 
   it('cortex_state returns content when notes exist', () => {
     store.insertNote({ sessionId, kind: 'insight', content: 'Testing works' });
-    const result = handleToolCall(store, 'cortex_state', {});
+    const result = callTool('cortex_state');
     expect(result).toContain('Testing works');
   });
 
   it('cortex_state records a spent ledger entry', () => {
     store.insertNote({ sessionId, kind: 'insight', content: 'Ledger spent check' });
-    handleToolCall(store, 'cortex_state', {});
+    callTool('cortex_state');
     const stats = store.getLedgerStats();
     expect(stats.byType['state']?.spent ?? 0).toBeGreaterThan(0);
   });
 
   it('cortex_recall records a spent ledger entry', () => {
-    handleToolCall(store, 'cortex_recall', { topic: 'testing' });
+    callTool('cortex_recall', { topic: 'testing' });
     const stats = store.getLedgerStats();
     expect(stats.spent).toBeGreaterThan(0);
     expect(stats.byType['recall']?.spent ?? 0).toBeGreaterThan(0);
@@ -226,7 +231,7 @@ describe('handleToolCall', () => {
   // cortex_note
 
   it('cortex_note creates a note and returns confirmation', () => {
-    const result = handleToolCall(store, 'cortex_note', {
+    const result = callTool('cortex_note', {
       kind: 'insight',
       content: 'This is a test insight',
     });
@@ -235,7 +240,7 @@ describe('handleToolCall', () => {
   });
 
   it('cortex_note confirmation includes compact UTC timestamp', () => {
-    const result = handleToolCall(store, 'cortex_note', {
+    const result = callTool('cortex_note', {
       kind: 'decision',
       content: 'Use SQLite for persistence',
       subject: 'database',
@@ -245,7 +250,7 @@ describe('handleToolCall', () => {
   });
 
   it('cortex_note includes subject in confirmation when provided', () => {
-    const result = handleToolCall(store, 'cortex_note', {
+    const result = callTool('cortex_note', {
       kind: 'decision',
       content: 'Use SQLite for persistence',
       subject: 'database',
@@ -255,7 +260,7 @@ describe('handleToolCall', () => {
 
   it('cortex_note truncates long content to 60 chars', () => {
     const longContent = 'A'.repeat(80);
-    const result = handleToolCall(store, 'cortex_note', {
+    const result = callTool('cortex_note', {
       kind: 'insight',
       content: longContent,
     });
@@ -264,7 +269,7 @@ describe('handleToolCall', () => {
   });
 
   it('cortex_note validates required subject for decisions', () => {
-    const result = handleToolCall(store, 'cortex_note', {
+    const result = callTool('cortex_note', {
       kind: 'decision',
       content: 'Some decision without subject',
     });
@@ -273,7 +278,7 @@ describe('handleToolCall', () => {
   });
 
   it('cortex_note validates required subject for intent', () => {
-    const result = handleToolCall(store, 'cortex_note', {
+    const result = callTool('cortex_note', {
       kind: 'intent',
       content: 'Intend to do something',
     });
@@ -281,7 +286,7 @@ describe('handleToolCall', () => {
   });
 
   it('cortex_note validates required subject for blocker', () => {
-    const result = handleToolCall(store, 'cortex_note', {
+    const result = callTool('cortex_note', {
       kind: 'blocker',
       content: 'Something is blocked',
     });
@@ -289,7 +294,7 @@ describe('handleToolCall', () => {
   });
 
   it('cortex_note allows insight without subject', () => {
-    const result = handleToolCall(store, 'cortex_note', {
+    const result = callTool('cortex_note', {
       kind: 'insight',
       content: 'An insight without subject',
     });
@@ -299,18 +304,18 @@ describe('handleToolCall', () => {
   // cortex_recall
 
   it('cortex_recall returns a string result', () => {
-    const result = handleToolCall(store, 'cortex_recall', { topic: 'testing' });
+    const result = callTool('cortex_recall', { topic: 'testing' });
     expect(typeof result).toBe('string');
   });
 
   it('cortex_recall returns no matches message when nothing found', () => {
-    const result = handleToolCall(store, 'cortex_recall', { topic: 'nonexistent-xyz' });
+    const result = callTool('cortex_recall', { topic: 'nonexistent-xyz' });
     expect(result).toContain('No matches for');
   });
 
   it('cortex_recall finds relevant notes', () => {
     store.insertNote({ sessionId, kind: 'insight', content: 'SQLite is great for local storage' });
-    const result = handleToolCall(store, 'cortex_recall', { topic: 'sqlite' });
+    const result = callTool('cortex_recall', { topic: 'sqlite' });
     expect(result).toContain('SQLite is great');
   });
 
@@ -322,7 +327,7 @@ describe('handleToolCall', () => {
     });
     const before = store.getNotesBySession(sessionId);
 
-    const result = handleToolCall(store, 'cortex_suggest_notes', {});
+    const result = callTool('cortex_suggest_notes');
     const parsed = JSON.parse(result) as {
       suggestions: Array<{ kind: string; content: string; evidence: string[] }>;
     };
@@ -352,7 +357,7 @@ describe('handleToolCall', () => {
     });
     const before = store.getActiveNotes(sessionId);
 
-    const result = handleToolCall(store, 'cortex_validate_memory', { topic: 'old file' });
+    const result = callTool('cortex_validate_memory', { topic: 'old file' });
     const parsed = JSON.parse(result) as {
       memories: Array<{ status: string; missing_references: string[] }>;
     };
@@ -365,12 +370,12 @@ describe('handleToolCall', () => {
   // cortex_brief
 
   it('cortex_brief returns a string', () => {
-    const result = handleToolCall(store, 'cortex_brief', { topic: 'testing' });
+    const result = callTool('cortex_brief', { topic: 'testing' });
     expect(typeof result).toBe('string');
   });
 
   it('cortex_brief includes agent context when "for" is provided', () => {
-    const result = handleToolCall(store, 'cortex_brief', {
+    const result = callTool('cortex_brief', {
       topic: 'architecture',
       for: 'implementer-agent',
     });
@@ -384,44 +389,44 @@ describe('handleToolCall', () => {
       content: 'Use TypeScript for type safety',
       subject: 'architecture',
     });
-    const result = handleToolCall(store, 'cortex_brief', { topic: 'architecture' });
+    const result = callTool('cortex_brief', { topic: 'architecture' });
     expect(result).toContain('TypeScript');
   });
 
   it('cortex_brief reports no context when nothing matches', () => {
-    const result = handleToolCall(store, 'cortex_brief', { topic: 'irrelevant-xyz' });
+    const result = callTool('cortex_brief', { topic: 'irrelevant-xyz' });
     expect(result).toContain('No context found for');
   });
 
   // cortex_engage
 
   it('cortex_engage returns cognitive state string', () => {
-    const result = handleToolCall(store, 'cortex_engage', {});
+    const result = callTool('cortex_engage');
     expect(typeof result).toBe('string');
   });
 
   it('cortex_engage includes notes when they exist', () => {
     store.insertNote({ sessionId, kind: 'insight', content: 'Existing context' });
-    const result = handleToolCall(store, 'cortex_engage', {});
+    const result = callTool('cortex_engage');
     expect(result).toContain('Existing context');
   });
 
   // cortex_disengage
 
   it('cortex_disengage returns confirmation', () => {
-    const result = handleToolCall(store, 'cortex_disengage', {});
+    const result = callTool('cortex_disengage');
     expect(result).toContain('disengaged');
   });
 
   // cortex_summarize
 
   it('cortex_summarize returns summary string', () => {
-    const result = handleToolCall(store, 'cortex_summarize', {});
+    const result = callTool('cortex_summarize');
     expect(typeof result).toBe('string');
   });
 
   it('cortex_summarize includes user description when provided', () => {
-    const result = handleToolCall(store, 'cortex_summarize', { what: 'Refactored the auth module' });
+    const result = callTool('cortex_summarize', { what: 'Refactored the auth module' });
     expect(result).toContain('Refactored the auth module');
   });
 
@@ -429,14 +434,14 @@ describe('handleToolCall', () => {
     store.insertEvent({ sessionId, type: 'edit', target: 'src/foo.ts' });
     store.insertEvent({ sessionId, type: 'edit', target: 'src/foo.ts' });
     store.insertEvent({ sessionId, type: 'write', target: 'src/bar.ts' });
-    const result = handleToolCall(store, 'cortex_summarize', {});
+    const result = callTool('cortex_summarize');
     expect(result).toContain('src/foo.ts');
     expect(result).toContain('src/bar.ts');
   });
 
   it('cortex_summarize stores session state', () => {
     store.insertEvent({ sessionId, type: 'edit', target: 'src/test.ts' });
-    handleToolCall(store, 'cortex_summarize', {});
+    callTool('cortex_summarize');
     const state = store.getSessionState(sessionId);
     expect(state).toBeDefined();
     expect(state!.content).toContain('src/test.ts');
@@ -445,7 +450,7 @@ describe('handleToolCall', () => {
   // unknown tool
 
   it('returns error for unknown tool', () => {
-    const result = handleToolCall(store, 'cortex_unknown_tool', {});
+    const result = callTool('cortex_unknown_tool');
     expect(result).toBe('Unknown tool: cortex_unknown_tool');
   });
 });
