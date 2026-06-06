@@ -19,6 +19,11 @@ const LOAD_BEARING_NOTE_KINDS = new Set([
   'insight',
 ]);
 
+const EMPTY_FULL_STATE_FALLBACK = [
+  'Cortex state: no current working memory for this scope.',
+  'Use cortex_route for the capability map, or cortex_recall(topic) if you are resuming a known area.',
+].join('\n');
+
 export function formatTokens(n: number): string {
   if (n >= 1000) {
     const k = n / 1000;
@@ -528,6 +533,10 @@ export function buildFullState(store: CortexStore): string {
   const projectState = store.getProjectState();
   if (projectState && (!preferredScope || preferredScope.scopeType === 'project')) {
     sections.push(`Project state:\n${projectState.content}`);
+  }
+
+  if (sections.length === 0) {
+    return EMPTY_FULL_STATE_FALLBACK;
   }
 
   return sections.join('\n\n');

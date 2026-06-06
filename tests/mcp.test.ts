@@ -178,6 +178,13 @@ describe('handleToolCall', () => {
     expect(typeof result).toBe('string');
   });
 
+  it('cortex_state returns actionable fallback guidance when state is empty', () => {
+    const result = handleToolCall(store, 'cortex_state', {});
+    expect(result).toContain('Cortex state: no current working memory for this scope.');
+    expect(result).toContain('cortex_route');
+    expect(result).toContain('cortex_recall(topic)');
+  });
+
   it('cortex_state returns content when notes exist', () => {
     store.insertNote({ sessionId, kind: 'insight', content: 'Testing works' });
     const result = handleToolCall(store, 'cortex_state', {});

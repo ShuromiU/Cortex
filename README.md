@@ -29,6 +29,7 @@ Now:
 - `cortex_recall(topic)` searches notes, summaries, snapshots, and command/episode memory.
 - `cortex_brief(topic)` returns a smaller, agent-friendly subset.
 - `cortex_state` shows current-session load-bearing notes first, then branch snapshots and the scored working set.
+- When that state is empty, `cortex_state` returns fallback guidance instead of an empty string.
 - Note-backed outputs include compact UTC timestamps, for example `Decision [2026-06-06 05:18Z]: [auth] use OIDC`.
 - Cortex tracks a lightweight current app graph for the active scope and validates file/path references extracted from memory.
 - Missing file references demote retrieved memories and render as `Stale references: missing ...`; historical queries can still surface them as history.
@@ -192,7 +193,7 @@ The wrapper calls `cortex inject-header --quiet` for SessionStart and `dist/tran
 | Tool | Purpose |
 |------|---------|
 | `cortex_route` | Explain ambient memory behavior and route to the right Cortex tool |
-| `cortex_state` | Return current-session notes first, then the scored working set |
+| `cortex_state` | Return current-session notes first, then the scored working set; empty state returns next-step guidance |
 | `cortex_note` | Record an `insight`, `decision`, `intent`, `blocker`, or `focus` |
 | `cortex_recall` | Retrieve evidence for a topic from memory |
 | `cortex_brief` | Return a smaller topical brief, optionally for an agent |

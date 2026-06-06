@@ -192,9 +192,12 @@ describe('buildHeader - live resume signals', () => {
 });
 
 describe('buildFullState - notes and events', () => {
-  it('returns empty string when no notes and no events', () => {
+  it('returns actionable fallback guidance when no notes and no events exist', () => {
     const store = makeStore();
-    expect(buildFullState(store)).toBe('');
+    const state = buildFullState(store);
+    expect(state).toContain('Cortex state: no current working memory for this scope.');
+    expect(state).toContain('cortex_route');
+    expect(state).toContain('cortex_recall(topic)');
   });
 
   it('renders active notes grouped by kind in correct order', () => {

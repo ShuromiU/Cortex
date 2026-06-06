@@ -45,6 +45,7 @@ Persistent working memory for coding agents.
 - `cortex reflect` is hook-facing and emits short `additionalContext` only for high-confidence remembered focus shifts; silence is the default.
 - `cortex_route` / `cortex route` are the cold-callable capability map.
 - `cortex_state` should show current-session load-bearing notes first, then the current working set, not a full historical dump.
+- Empty `cortex_state` should return actionable fallback guidance, not an empty string.
 - `cortex_recall` and `cortex_brief` should search notes, snapshots, summaries, and command/episode memory.
 - Retrieval should rank current-valid memories above memories pointing at missing files, and stale memories should be labeled rather than silently trusted.
 - Note renderers should preserve `Kind [YYYY-MM-DD HH:mmZ]: ...` timestamp format for agent-readable chronology.
@@ -64,7 +65,7 @@ Available tools:
 
 - `cortex_route` — compact capability map and routing guidance.
 - `cortex_engage` — re-enable Cortex capture after `cortex_disengage`.
-- `cortex_state` — explicit state: current-session load-bearing notes, top-scored notes, branch snapshot, last-session tail.
+- `cortex_state` — explicit state: current-session load-bearing notes, top-scored notes, branch snapshot, last-session tail; empty state returns next-step guidance.
 - `cortex_note(kind, content, ...)` — durable memory. `kind` is one of `decision` (include `alternatives`), `insight`, `blocker`, `intent`, `focus`. Reserve for load-bearing items; skip routine progress.
 - `cortex_suggest_notes` — review proposed load-bearing notes from the current session without writing them.
 - `cortex_validate_memory(topic?)` — audit retrieved or recent memories against the current checkout without deleting notes.
