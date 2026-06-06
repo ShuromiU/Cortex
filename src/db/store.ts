@@ -170,6 +170,17 @@ export interface MemoryItemRow {
   created_at: string;
 }
 
+export interface MemoryItemSemanticRow {
+  memory_item_id: string;
+  summary: string;
+  concepts_json: string;
+  entities_json: string;
+  embedding_model: string;
+  embedding_json: string;
+  source_hash: string;
+  updated_at: string;
+}
+
 export interface ParsedMemoryItem {
   id: string;
   session_id: string | null;
@@ -189,6 +200,22 @@ export interface ParsedMemoryItem {
 
 export interface SearchMemoryItemResult extends ParsedMemoryItem {
   fts_rank: number;
+}
+
+export interface ParsedMemoryItemSemantic {
+  memory_item_id: string;
+  summary: string;
+  concepts: string[];
+  entities: string[];
+  embedding_model: string;
+  embedding: number[];
+  source_hash: string;
+  updated_at: string;
+}
+
+export interface SemanticMemoryItemResult extends ParsedMemoryItem {
+  semantic_score: number;
+  semantic: ParsedMemoryItemSemantic;
 }
 
 export interface RetrievalLogRow {
@@ -334,6 +361,17 @@ export interface UpsertMemoryItemOpts {
   createdAt?: string;
 }
 
+export interface UpsertMemoryItemSemanticOpts {
+  memoryItemId: string;
+  summary: string;
+  concepts?: string[];
+  entities?: string[];
+  embeddingModel: string;
+  embedding: number[];
+  sourceHash: string;
+  updatedAt?: string;
+}
+
 export interface InsertRetrievalLogOpts {
   id?: string;
   sessionId?: string | null;
@@ -448,6 +486,19 @@ export function parseMemoryItemRow(row: MemoryItemRow): ParsedMemoryItem {
   };
 }
 
+export function parseMemoryItemSemanticRow(row: MemoryItemSemanticRow): ParsedMemoryItemSemantic {
+  return {
+    memory_item_id: row.memory_item_id,
+    summary: row.summary,
+    concepts: parseJsonStringArray(row.concepts_json),
+    entities: parseJsonStringArray(row.entities_json),
+    embedding_model: row.embedding_model,
+    embedding: parseJsonNumberArray(row.embedding_json),
+    source_hash: row.source_hash,
+    updated_at: row.updated_at,
+  };
+}
+
 export function parseRetrievalLogRow(row: RetrievalLogRow): ParsedRetrievalLog {
   return {
     id: row.id,
@@ -488,6 +539,46 @@ function parseJsonStringArray(raw: string | null | undefined): string[] {
   } catch {
     return [];
   }
+}
+
+function parseJsonNumberArray(raw: string | null | undefined): number[] {
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.filter(value => typeof value === 'number' && Number.isFinite(value));
+  } catch {
+    return [];
+  }
+}
+
+function cosineSimilarity(left: number[], right: number[]): number {
+  if (left.length === 0 || right.length === 0 || left.length !== right.length) {
+    return 0;
+  }
+
+  let dot = 0;
+  let leftMagnitude = 0;
+  let rightMagnitude = 0;
+  for (let i = 0; i < left.length; i += 1) {
+    const leftValue = left[i] ?? 0;
+    const rightValue = right[i] ?? 0;
+    dot += leftValue * rightValue;
+    leftMagnitude += leftValue * leftValue;
+    rightMagnitude += rightValue * rightValue;
+  }
+
+  if (leftMagnitude === 0 || rightMagnitude === 0) {
+    return 0;
+  }
+
+  return dot / (Math.sqrt(leftMagnitude) * Math.sqrt(rightMagnitude));
 }
 
 // ── Store ─────────────────────────────────────────────────────────────
@@ -1447,11 +1538,57 @@ export class CortexStore {
     return this.getMemoryItem(id)!;
   }
 
+  upsertMemoryItemSemantic(opts: UpsertMemoryItemSemanticOpts): ParsedMemoryItemSemantic {
+    const updatedAt = opts.updatedAt ?? new Date().toISOString();
+
+    this.db
+      .prepare(
+        `INSERT INTO memory_item_semantics (
+           memory_item_id,
+           summary,
+           concepts_json,
+           entities_json,
+           embedding_model,
+           embedding_json,
+           source_hash,
+           updated_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(memory_item_id) DO UPDATE SET
+           summary = excluded.summary,
+           concepts_json = excluded.concepts_json,
+           entities_json = excluded.entities_json,
+           embedding_model = excluded.embedding_model,
+           embedding_json = excluded.embedding_json,
+           source_hash = excluded.source_hash,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        opts.memoryItemId,
+        opts.summary,
+        JSON.stringify(opts.concepts ?? []),
+        JSON.stringify(opts.entities ?? []),
+        opts.embeddingModel,
+        JSON.stringify(opts.embedding),
+        opts.sourceHash,
+        updatedAt,
+      );
+
+    return this.getMemoryItemSemantic(opts.memoryItemId)!;
+  }
+
   getMemoryItem(id: string): ParsedMemoryItem | undefined {
     const row = this.db
       .prepare('SELECT * FROM memory_items WHERE id = ?')
       .get(id) as MemoryItemRow | undefined;
     return row ? parseMemoryItemRow(row) : undefined;
+  }
+
+  getMemoryItemSemantic(memoryItemId: string): ParsedMemoryItemSemantic | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM memory_item_semantics WHERE memory_item_id = ?')
+      .get(memoryItemId) as MemoryItemSemanticRow | undefined;
+    return row ? parseMemoryItemSemanticRow(row) : undefined;
   }
 
   getMemoryItemBySource(sourceTable: string, sourceId: string): ParsedMemoryItem | undefined {
@@ -1505,6 +1642,46 @@ export class CortexStore {
       ...parseMemoryItemRow(row),
       fts_rank: row.fts_rank,
     }));
+  }
+
+  searchMemoryItemSemantics(
+    embedding: number[],
+    limit: number,
+    embeddingModel?: string,
+  ): SemanticMemoryItemResult[] {
+    const modelClause = embeddingModel ? 'AND mis.embedding_model = ?' : '';
+    const params = embeddingModel ? [embeddingModel] : [];
+    const rows = this.db
+      .prepare(
+        `SELECT mi.*, mis.*
+         FROM memory_item_semantics mis
+         INNER JOIN memory_items mi ON mi.id = mis.memory_item_id
+         WHERE mi.state != 'archived'
+           ${modelClause}
+         ORDER BY mi.importance DESC, mi.created_at DESC`,
+      )
+      .all(...params) as Array<MemoryItemRow & MemoryItemSemanticRow>;
+
+    return rows
+      .map(row => {
+        const semantic = parseMemoryItemSemanticRow(row);
+        return {
+          ...parseMemoryItemRow(row),
+          semantic_score: cosineSimilarity(embedding, semantic.embedding),
+          semantic,
+        };
+      })
+      .filter(item => item.semantic_score > 0)
+      .sort((left, right) => {
+        if (right.semantic_score !== left.semantic_score) {
+          return right.semantic_score - left.semantic_score;
+        }
+        if (right.importance !== left.importance) {
+          return right.importance - left.importance;
+        }
+        return right.created_at.localeCompare(left.created_at);
+      })
+      .slice(0, limit);
   }
 
   listRecentMemoryItems(limit: number): ParsedMemoryItem[] {

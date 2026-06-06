@@ -209,6 +209,20 @@ describe('createProgram', () => {
     expect(names).toContain('evaluate');
   });
 
+  it('has suggest-notes command', () => {
+    const program = createProgram();
+    const names = program.commands.map(c => c.name());
+    expect(names).toContain('suggest-notes');
+  });
+
+  it('evaluate command accepts quality suite and compare options', () => {
+    const program = createProgram();
+    const evaluate = program.commands.find(c => c.name() === 'evaluate')!;
+    const optNames = evaluate.options.map(o => o.long);
+    expect(optNames).toContain('--suite');
+    expect(optNames).toContain('--compare');
+  });
+
   it('has serve command', () => {
     const program = createProgram();
     const names = program.commands.map(c => c.name());

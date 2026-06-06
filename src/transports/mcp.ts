@@ -19,6 +19,8 @@ import { brief } from '../query/brief.js';
 import { buildSessionSummary } from '../query/summarize.js';
 import { ensureScopedSession, syncBranchSnapshotForSession } from '../scope/runtime.js';
 import { estimateTokens } from '../query/retrieval.js';
+import { formatMemoryTimestamp } from '../query/render.js';
+import { suggestNotes } from '../query/suggest-notes.js';
 
 let engagementPath: string | null = null;
 
@@ -209,6 +211,20 @@ export const TOOL_DEFINITIONS = [
       required: [],
     },
   },
+  {
+    name: 'cortex_suggest_notes',
+    description: 'Suggest load-bearing Cortex notes from the current session without writing them. Use this to review possible decisions, blockers, intents, or insights before calling cortex_note explicitly.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        sessionId: {
+          type: 'string',
+          description: 'Session id to inspect. Defaults to the current scoped session.',
+        },
+      },
+      required: [],
+    },
+  },
 ] as const;
 
 export function handleToolCall(
@@ -255,7 +271,9 @@ export function handleToolCall(
         const preview = note.content.length > 60
           ? `${note.content.slice(0, 60)}…`
           : note.content;
-        return `Noted (${note.kind}${subjectStr}): ${preview}`;
+        const timestamp = formatMemoryTimestamp(note.timestamp);
+        const timestampPart = timestamp ? ` [${timestamp}]` : '';
+        return `Noted (${note.kind}${subjectStr})${timestampPart}: ${preview}`;
       } catch (err) {
         return `Error: ${err instanceof Error ? err.message : String(err)}`;
       }
@@ -286,6 +304,13 @@ export function handleToolCall(
         tokens: estimateTokens(output),
       });
       return output;
+    }
+
+    case 'cortex_suggest_notes': {
+      const session = ensureScopedSession(store, cwd);
+      const sessionId = (args['sessionId'] as string | undefined) ?? session.id;
+      const suggestions = suggestNotes(store, sessionId);
+      return JSON.stringify({ session_id: sessionId, suggestions }, null, 2);
     }
 
     case 'cortex_engage': {

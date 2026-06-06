@@ -137,6 +137,17 @@ CREATE TABLE IF NOT EXISTS memory_items (
   created_at      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS memory_item_semantics (
+  memory_item_id  TEXT PRIMARY KEY REFERENCES memory_items(id) ON DELETE CASCADE,
+  summary         TEXT NOT NULL,
+  concepts_json   TEXT NOT NULL DEFAULT '[]',
+  entities_json   TEXT NOT NULL DEFAULT '[]',
+  embedding_model TEXT NOT NULL,
+  embedding_json  TEXT NOT NULL,
+  source_hash     TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS retrieval_log (
   id               TEXT PRIMARY KEY,
   session_id       TEXT REFERENCES sessions(id) ON DELETE CASCADE,
@@ -201,6 +212,7 @@ CREATE INDEX IF NOT EXISTS idx_memory_items_scope ON memory_items(scope_key, sta
 CREATE INDEX IF NOT EXISTS idx_memory_items_kind ON memory_items(kind, state);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_source ON memory_items(source_table, source_id)
   WHERE source_table IS NOT NULL AND source_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memory_item_semantics_hash ON memory_item_semantics(source_hash);
 CREATE INDEX IF NOT EXISTS idx_retrieval_log_session ON retrieval_log(session_id, created_at);
 `;
 

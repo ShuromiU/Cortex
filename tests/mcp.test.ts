@@ -24,8 +24,8 @@ function createStore(): { store: CortexStore; sessionId: string } {
 // ── TOOL_DEFINITIONS ──────────────────────────────────────────────────
 
 describe('TOOL_DEFINITIONS', () => {
-  it('defines exactly 8 tools', () => {
-    expect(TOOL_DEFINITIONS).toHaveLength(8);
+  it('defines exactly 9 tools', () => {
+    expect(TOOL_DEFINITIONS).toHaveLength(9);
   });
 
   it('has cortex_route tool', () => {
@@ -133,6 +133,14 @@ describe('TOOL_DEFINITIONS', () => {
     const whatProp = (tool!.inputSchema.properties as Record<string, unknown>)['what'];
     expect(whatProp).toBeDefined();
   });
+
+  it('has cortex_suggest_notes tool with optional session id', () => {
+    const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_suggest_notes');
+    expect(tool).toBeDefined();
+    expect(tool!.inputSchema.required).toHaveLength(0);
+    const sessionProp = (tool!.inputSchema.properties as Record<string, unknown>)['sessionId'];
+    expect(sessionProp).toBeDefined();
+  });
 });
 
 // ── handleToolCall ────────────────────────────────────────────────────
@@ -189,8 +197,18 @@ describe('handleToolCall', () => {
       kind: 'insight',
       content: 'This is a test insight',
     });
-    expect(result).toMatch(/^Noted \(insight\):/);
+    expect(result).toMatch(/^Noted \(insight\) \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}Z\]:/);
     expect(result).toContain('This is a test insight');
+  });
+
+  it('cortex_note confirmation includes compact UTC timestamp', () => {
+    const result = handleToolCall(store, 'cortex_note', {
+      kind: 'decision',
+      content: 'Use SQLite for persistence',
+      subject: 'database',
+    });
+
+    expect(result).toMatch(/^Noted \(decision\[database\]\) \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}Z\]:/);
   });
 
   it('cortex_note includes subject in confirmation when provided', () => {
@@ -199,7 +217,7 @@ describe('handleToolCall', () => {
       content: 'Use SQLite for persistence',
       subject: 'database',
     });
-    expect(result).toMatch(/^Noted \(decision\[database\]\):/);
+    expect(result).toMatch(/^Noted \(decision\[database\]\) \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}Z\]:/);
   });
 
   it('cortex_note truncates long content to 60 chars', () => {
@@ -261,6 +279,29 @@ describe('handleToolCall', () => {
     store.insertNote({ sessionId, kind: 'insight', content: 'SQLite is great for local storage' });
     const result = handleToolCall(store, 'cortex_recall', { topic: 'sqlite' });
     expect(result).toContain('SQLite is great');
+  });
+
+  it('cortex_suggest_notes returns proposals without writing notes', () => {
+    store.insertEpisode({
+      sessionId,
+      kind: 'message',
+      summary: 'Decided to use semantic shadow mode before rank mode.',
+    });
+    const before = store.getNotesBySession(sessionId);
+
+    const result = handleToolCall(store, 'cortex_suggest_notes', {});
+    const parsed = JSON.parse(result) as {
+      suggestions: Array<{ kind: string; content: string; evidence: string[] }>;
+    };
+
+    expect(store.getNotesBySession(sessionId)).toEqual(before);
+    expect(parsed.suggestions).toEqual([
+      expect.objectContaining({
+        kind: 'decision',
+        content: expect.stringContaining('semantic shadow mode'),
+        evidence: [expect.stringContaining('Decided to use semantic shadow mode')],
+      }),
+    ]);
   });
 
   // cortex_brief

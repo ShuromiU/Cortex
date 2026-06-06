@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { applySchema, initializeMeta } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
@@ -39,33 +39,40 @@ function parseHookJson(raw: string): string {
 
 describe('reflectMemory', () => {
   it('returns hook JSON for a high-confidence remembered file and dedups the focus', () => {
-    const { store, sessionId } = createTestStore();
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-'));
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-06-06T05:18:24.000Z'));
+      const { store, sessionId } = createTestStore();
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-'));
 
-    store.insertNote({
-      sessionId,
-      kind: 'decision',
-      subject: 'src/db/store.ts',
-      content: 'Keep memory_items as the canonical retrieval layer in src/db/store.ts.',
-    });
+      store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'src/db/store.ts',
+        content: 'Keep memory_items as the canonical retrieval layer in src/db/store.ts.',
+      });
 
-    const first = reflectMemory(store, {
-      event: 'edit',
-      file: 'src/db/store.ts',
-      sessionId,
-      stateDir,
-    });
-    const second = reflectMemory(store, {
-      event: 'edit',
-      file: 'src/db/store.ts',
-      sessionId,
-      stateDir,
-    });
+      const first = reflectMemory(store, {
+        event: 'edit',
+        file: 'src/db/store.ts',
+        sessionId,
+        stateDir,
+      });
+      const second = reflectMemory(store, {
+        event: 'edit',
+        file: 'src/db/store.ts',
+        sessionId,
+        stateDir,
+      });
 
-    expect(first).not.toBe('');
-    expect(parseHookJson(first)).toContain('canonical retrieval layer');
-    expect(parseHookJson(first)).toContain('Cortex memory');
-    expect(second).toBe('');
+      expect(first).not.toBe('');
+      expect(parseHookJson(first)).toContain('Decision [2026-06-06 05:18Z]: [src/db/store.ts]');
+      expect(parseHookJson(first)).toContain('canonical retrieval layer');
+      expect(parseHookJson(first)).toContain('Cortex memory');
+      expect(second).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('stays silent for anchors without strong prior memory', () => {

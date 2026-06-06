@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { applySchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
@@ -21,6 +21,22 @@ function makeStore(): CortexStore {
 // ── recall ────────────────────────────────────────────────────────────
 
 describe('recall — finds notes matching topic', () => {
+  it('renders note timestamps in compact UTC form', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-06-06T05:18:24.000Z'));
+      const store = makeStore();
+      const session = store.createSession();
+      store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'auth', content: 'use JWT tokens' });
+
+      const result = recall(store, 'auth');
+
+      expect(result).toContain('Decision [2026-06-06 05:18Z]: [auth] use JWT tokens');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('finds notes by subject match', () => {
     const store = makeStore();
     const session = store.createSession();
@@ -28,7 +44,7 @@ describe('recall — finds notes matching topic', () => {
     store.insertNote({ sessionId: session.id, kind: 'insight', content: 'unrelated info' });
 
     const result = recall(store, 'auth');
-    expect(result).toContain('Decision:');
+    expect(result).toContain('Decision [');
     expect(result).toContain('[auth] use JWT tokens');
     expect(result).not.toContain('unrelated info');
   });
@@ -118,8 +134,8 @@ describe('recall — finds notes matching topic', () => {
     store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'jwt', content: 'use HS256 signing' });
 
     const result = recall(store, 'jwt');
-    const decisionIdx = result.indexOf('Decision:');
-    const insightIdx = result.indexOf('Insight:');
+    const decisionIdx = result.indexOf('Decision [');
+    const insightIdx = result.indexOf('Insight [');
     expect(decisionIdx).toBeLessThan(insightIdx);
   });
 
@@ -139,6 +155,22 @@ describe('recall — finds notes matching topic', () => {
 // ── brief ─────────────────────────────────────────────────────────────
 
 describe('brief — scoped briefing', () => {
+  it('renders note timestamps in compact UTC form', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-06-06T05:18:24.000Z'));
+      const store = makeStore();
+      const session = store.createSession();
+      store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'auth', content: 'use JWT' });
+
+      const result = brief(store, 'auth');
+
+      expect(result).toContain('Decision [2026-06-06 05:18Z]: [auth] use JWT');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('generates a scoped briefing for a topic', () => {
     const store = makeStore();
     const session = store.createSession();
@@ -189,10 +221,10 @@ describe('brief — scoped briefing', () => {
     store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'cache', content: 'use Redis' });
 
     const result = brief(store, 'cache');
-    const decisionIdx = result.indexOf('Decision:');
-    const intentIdx = result.indexOf('Intent:');
-    const blockerIdx = result.indexOf('Blocker:');
-    const insightIdx = result.indexOf('Insight:');
+    const decisionIdx = result.indexOf('Decision [');
+    const intentIdx = result.indexOf('Intent [');
+    const blockerIdx = result.indexOf('Blocker [');
+    const insightIdx = result.indexOf('Insight [');
 
     expect(decisionIdx).toBeLessThan(intentIdx);
     expect(intentIdx).toBeLessThan(blockerIdx);
@@ -207,7 +239,7 @@ describe('brief — scoped briefing', () => {
     }
 
     const result = brief(store, 'cache');
-    const lines = result.split('\n').filter(l => l.startsWith('Insight:'));
+    const lines = result.split('\n').filter(l => l.startsWith('Insight ['));
     expect(lines.length).toBeLessThanOrEqual(5);
   });
 

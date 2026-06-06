@@ -550,6 +550,52 @@ describe('CortexStore — utility', () => {
     expect(log.result_ids).toEqual(['notes:1']);
     expect(store.getRetrievalLogsBySession(session.id)).toHaveLength(1);
   });
+
+  it('upserts and searches semantic metadata for memory items', () => {
+    const session = store.createSession({
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+    });
+    const note = store.insertNote({
+      sessionId: session.id,
+      kind: 'insight',
+      subject: 'auth cache',
+      content: 'Memoize permission checks in the auth service.',
+    });
+    const memoryItemId = `notes:${note.id}`;
+
+    const semantic = store.upsertMemoryItemSemantic({
+      memoryItemId,
+      summary: 'Authentication permission cache',
+      concepts: ['authentication', 'authorization', 'cache'],
+      entities: ['AuthService'],
+      embeddingModel: 'fake-v1',
+      embedding: [1, 0],
+      sourceHash: 'hash-1',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    expect(semantic.memory_item_id).toBe(memoryItemId);
+    expect(semantic.concepts).toEqual(['authentication', 'authorization', 'cache']);
+    expect(store.getMemoryItemSemantic(memoryItemId)?.embedding).toEqual([1, 0]);
+
+    store.upsertMemoryItemSemantic({
+      memoryItemId,
+      summary: 'Updated authentication cache',
+      concepts: ['authentication', 'cache'],
+      entities: [],
+      embeddingModel: 'fake-v1',
+      embedding: [0.8, 0.2],
+      sourceHash: 'hash-2',
+      updatedAt: '2026-01-01T00:00:01.000Z',
+    });
+
+    expect(store.getMemoryItemSemantic(memoryItemId)?.source_hash).toBe('hash-2');
+
+    const results = store.searchMemoryItemSemantics([1, 0], 5);
+    expect(results[0]?.id).toBe(memoryItemId);
+    expect(results[0]?.semantic_score).toBeCloseTo(0.9701, 4);
+  });
 });
 
 // ── Note Tests ────────────────────────────────────────────────────────

@@ -80,6 +80,7 @@ describe('Schema', () => {
     expect(names).toContain('branch_snapshots');
     expect(names).toContain('project_snapshots');
     expect(names).toContain('memory_items');
+    expect(names).toContain('memory_item_semantics');
     expect(names).toContain('memory_items_fts');
     expect(names).toContain('retrieval_log');
   });
@@ -111,7 +112,46 @@ describe('Schema', () => {
     expect(names).toContain('idx_memory_items_scope');
     expect(names).toContain('idx_memory_items_kind');
     expect(names).toContain('idx_memory_items_source');
+    expect(names).toContain('idx_memory_item_semantics_hash');
     expect(names).toContain('idx_retrieval_log_session');
+  });
+
+  it('stores semantic metadata keyed by memory item id', () => {
+    applySchema(db);
+
+    const sessionId = 'session-1';
+    const memoryItemId = 'memory-1';
+    db.prepare(
+      `INSERT INTO sessions (id, started_at, agent_type, scope_type)
+       VALUES (?, ?, 'primary', 'project')`,
+    ).run(sessionId, '2026-01-01T00:00:00.000Z');
+    db.prepare(
+      `INSERT INTO memory_items (
+         id, session_id, scope_type, scope_key, kind, text, state, importance, created_at
+       ) VALUES (?, ?, 'project', 'project:/repo', 'insight', 'Cache auth lookups.', 'warm', 0.5, ?)`,
+    ).run(memoryItemId, sessionId, '2026-01-01T00:00:00.000Z');
+
+    db.prepare(
+      `INSERT INTO memory_item_semantics (
+         memory_item_id, summary, concepts_json, entities_json, embedding_model,
+         embedding_json, source_hash, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      memoryItemId,
+      'Auth cache summary',
+      JSON.stringify(['cache', 'auth']),
+      JSON.stringify(['AuthService']),
+      'fake-v1',
+      JSON.stringify([0.1, 0.2, 0.3]),
+      'hash-1',
+      '2026-01-01T00:00:01.000Z',
+    );
+
+    const row = db
+      .prepare('SELECT * FROM memory_item_semantics WHERE memory_item_id = ?')
+      .get(memoryItemId) as { summary: string; embedding_json: string };
+    expect(row.summary).toBe('Auth cache summary');
+    expect(JSON.parse(row.embedding_json)).toEqual([0.1, 0.2, 0.3]);
   });
 
   it('is idempotent — applying schema twice is fine', () => {

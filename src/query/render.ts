@@ -47,6 +47,15 @@ export function renderMemorySnippet(
   return `${trimmed.slice(0, maxChars - 1).trimEnd()}…`;
 }
 
+export function formatMemoryTimestamp(createdAt: string): string | null {
+  const parsed = new Date(createdAt);
+  if (!Number.isFinite(parsed.getTime())) {
+    return null;
+  }
+
+  return `${parsed.toISOString().slice(0, 16).replace('T', ' ')}Z`;
+}
+
 export function renderMemoryLine(item: ParsedMemoryItem, maxLines = 3): string {
   if (item.kind.startsWith('note:')) {
     const label = humanizeMemoryKind(item.kind);
@@ -57,7 +66,9 @@ export function renderMemoryLine(item: ParsedMemoryItem, maxLines = 3): string {
       : firstLine;
     const subject = item.subject ? `[${item.subject}] ` : '';
     const resolved = item.text.toLowerCase().includes('status: resolved') ? ' (resolved)' : '';
-    return `${label}: ${subject}${content}${resolved}`;
+    const timestamp = formatMemoryTimestamp(item.created_at);
+    const timestampPart = timestamp ? ` [${timestamp}]` : '';
+    return `${label}${timestampPart}: ${subject}${content}${resolved}`;
   }
 
   if (item.kind === 'session_state' || item.kind === 'episode:session_summary') {

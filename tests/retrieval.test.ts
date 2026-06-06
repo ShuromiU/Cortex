@@ -4,7 +4,7 @@ import { applySchema, initializeMeta } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import { recall } from '../src/query/recall.js';
 import { brief } from '../src/query/brief.js';
-import { buildRetrievalContext } from '../src/query/retrieval.js';
+import { buildRetrievalContext, retrieveMemory } from '../src/query/retrieval.js';
 
 function createTestDb(): Database.Database {
   const db = new Database(':memory:');
@@ -75,7 +75,7 @@ describe('retrieval', () => {
     const output = recall(store, 'auth gateway');
     const firstLine = output.split('\n')[0] ?? '';
     expect(firstLine).toContain('JWT rotation fails');
-    expect(firstLine).toContain('Blocker:');
+    expect(firstLine).toContain('Blocker');
   });
 
   it('logs retrievals and bumps access counts for returned memory items', () => {
@@ -138,5 +138,187 @@ describe('retrieval', () => {
 
     const results = store.searchMemoryItems('authorization*', 5);
     expect(results.map(item => item.id)).toContain(`command_runs:${run.id}`);
+  });
+
+  it('uses temporal intent to prefer old matching memory when requested', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const session = store.createSession({
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+    });
+
+    store.upsertMemoryItem({
+      id: 'old-auth-decision',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+      kind: 'note:decision',
+      sourceTable: 'notes',
+      sourceId: 'old-auth-decision',
+      subject: 'auth',
+      text: 'decision: Use legacy cookie auth for the dashboard.',
+      state: 'warm',
+      importance: 1,
+      createdAt: '2024-01-01T00:00:00.000Z',
+    });
+    store.upsertMemoryItem({
+      id: 'new-auth-decision',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+      kind: 'note:decision',
+      sourceTable: 'notes',
+      sourceId: 'new-auth-decision',
+      subject: 'auth',
+      text: 'decision: Use OIDC auth for the dashboard.',
+      state: 'warm',
+      importance: 1,
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const latest = retrieveMemory(store, 'latest auth dashboard decision', 2);
+    const old = retrieveMemory(store, 'old auth dashboard decision', 2);
+
+    expect(latest.results[0]?.id).toBe('new-auth-decision');
+    expect(old.results[0]?.id).toBe('old-auth-decision');
+  });
+
+  it('uses temporal intent to prefer resolved memory when requested', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const session = store.createSession({
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+    });
+
+    store.upsertMemoryItem({
+      id: 'active-deploy-blocker',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+      kind: 'note:blocker',
+      sourceTable: 'notes',
+      sourceId: 'active-deploy-blocker',
+      subject: 'deploy',
+      text: 'blocker: deploy is missing the current release key.',
+      state: 'hot',
+      importance: 1,
+      createdAt: '2026-01-02T00:00:00.000Z',
+    });
+    store.upsertMemoryItem({
+      id: 'resolved-deploy-blocker',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+      kind: 'note:blocker',
+      sourceTable: 'notes',
+      sourceId: 'resolved-deploy-blocker',
+      subject: 'deploy',
+      text: 'blocker: deploy was missing the old release key.\nStatus: resolved',
+      state: 'cold',
+      importance: 1,
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const retrieval = retrieveMemory(store, 'resolved deploy blocker', 2);
+
+    expect(retrieval.results[0]?.id).toBe('resolved-deploy-blocker');
+  });
+
+  it('keeps returned ranking lexical in shadow semantic mode', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const session = store.createSession({
+      gitRoot: '/repo/.git',
+      worktreePath: '/repo',
+      branchRef: 'feature/auth',
+      headOid: 'feat123',
+      scopeType: 'branch',
+      scopeKey: 'branch:/repo/.git:/repo:feature/auth',
+    });
+    const lexical = store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'password reset',
+      content: 'Keep password reset tokens short lived.',
+    });
+    const semantic = store.insertNote({
+      sessionId: session.id,
+      kind: 'insight',
+      subject: 'account recovery',
+      content: 'User identity proofing handles locked-out sign-in recovery.',
+    });
+    store.upsertMemoryItemSemantic({
+      memoryItemId: `notes:${semantic.id}`,
+      summary: 'Credential reset recovery flow',
+      concepts: ['password reset', 'account recovery'],
+      entities: [],
+      embeddingModel: 'fake-v1',
+      embedding: [1, 0],
+      sourceHash: 'semantic-1',
+    });
+
+    const retrieval = retrieveMemory(store, 'password reset', 1, {
+      semanticMode: 'shadow',
+      semanticProvider: {
+        embeddingModel: 'fake-v1',
+        embed: () => [1, 0],
+      },
+    });
+
+    expect(retrieval.results.map(item => item.id)).toEqual([`notes:${lexical.id}`]);
+    expect(retrieval.semanticCandidates.map(item => item.id)).toContain(`notes:${semantic.id}`);
+  });
+
+  it('lifts high-confidence paraphrase matches in rank semantic mode', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const session = store.createSession({
+      gitRoot: '/repo/.git',
+      worktreePath: '/repo',
+      branchRef: 'feature/auth',
+      headOid: 'feat123',
+      scopeType: 'branch',
+      scopeKey: 'branch:/repo/.git:/repo:feature/auth',
+    });
+    const lexical = store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'session refresh',
+      content: 'Refresh browser session cookies after login.',
+      importance: 0.1,
+    });
+    const semantic = store.insertNote({
+      sessionId: session.id,
+      kind: 'insight',
+      subject: 'credential rotation',
+      content: 'Credential renewal prevents stale authentication grants.',
+      importance: 0.1,
+    });
+    store.upsertMemoryItemSemantic({
+      memoryItemId: `notes:${semantic.id}`,
+      summary: 'Refresh token rotation',
+      concepts: ['refresh token rotation', 'credential renewal'],
+      entities: [],
+      embeddingModel: 'fake-v1',
+      embedding: [1, 0],
+      sourceHash: 'semantic-2',
+    });
+
+    const retrieval = retrieveMemory(store, 'session refresh', 1, {
+      semanticMode: 'rank',
+      semanticProvider: {
+        embeddingModel: 'fake-v1',
+        embed: () => [1, 0],
+      },
+      semanticRankThreshold: 0.9,
+    });
+
+    expect(retrieval.semanticCandidates[0]?.id).toBe(`notes:${semantic.id}`);
+    expect(retrieval.results.map(item => item.id)).toEqual([`notes:${semantic.id}`]);
+    expect(retrieval.results[0]?.semantic_score).toBe(1);
+    expect(retrieval.results[0]?.semantic_rank_applied).toBe(true);
+    expect(retrieval.candidates.map(item => item.id)).toContain(`notes:${lexical.id}`);
   });
 });

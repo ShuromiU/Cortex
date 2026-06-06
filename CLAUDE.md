@@ -8,6 +8,8 @@ Persistent working memory for coding agents.
 - `memory_items` is the canonical search/retrieval layer.
 - Default state starts with current-session load-bearing notes, then uses the scored working set.
 - Memory decays through `hot`, `warm`, `cold`, `archived`; recalled/touched memory is reinforced.
+- Note-backed recall, brief, state, and reflex output includes compact UTC timestamps.
+- Retrieval quality can be benchmarked with fixture suites, and optional semantic retrieval is gated by `CORTEX_SEMANTIC_MODE=off|shadow|rank`.
 
 ## What Matters In This Repo
 - Keep the global Claude integration working: MCP server path, `inject-header`, and hook compatibility matter as much as the library code.
@@ -28,6 +30,7 @@ Persistent working memory for coding agents.
 - `src/query/recall.ts` — `cortex_recall` search
 - `src/query/brief.ts` — `cortex_brief` topical context
 - `src/query/summarize.ts` — `cortex_summarize` session wrap-up
+- `src/query/suggest-notes.ts` — non-mutating note suggestions
 - `src/query/scope.ts` — branch/worktree session scoping
 - `src/transports/cli.ts` — `inject-header`, `route`, `reflect`, CLI logging, evaluation
 - `src/transports/hook-entry.ts` — JSON hook bridge for Codex/Claude wrappers
@@ -39,6 +42,9 @@ Persistent working memory for coding agents.
 - `cortex_route` / `cortex route` are the cold-callable capability map.
 - `cortex_state` should show current-session load-bearing notes first, then the current working set, not a full historical dump.
 - `cortex_recall` and `cortex_brief` should search notes, snapshots, summaries, and command/episode memory.
+- Note renderers should preserve `Kind [YYYY-MM-DD HH:mmZ]: ...` timestamp format for agent-readable chronology.
+- Retrieval should expose score breakdowns for quality evaluation and respect temporal terms such as latest/current, old/history, resolved, and when.
+- Semantic ranking must remain optional; `off` is default, `shadow` must not change returned results, and `rank` must be tested with deterministic fake providers.
 - Branch switches should restore the matching snapshot.
 - Branch snapshot summaries should not be raw command-only hook activity.
 - Stale notes should decay out of the default state unless reinforced by actual retrieval/use.
@@ -55,6 +61,7 @@ Available tools:
 - `cortex_engage` — re-enable Cortex capture after `cortex_disengage`.
 - `cortex_state` — explicit state: current-session load-bearing notes, top-scored notes, branch snapshot, last-session tail.
 - `cortex_note(kind, content, ...)` — durable memory. `kind` is one of `decision` (include `alternatives`), `insight`, `blocker`, `intent`, `focus`. Reserve for load-bearing items; skip routine progress.
+- `cortex_suggest_notes` — review proposed load-bearing notes from the current session without writing them.
 - `cortex_recall(topic)` — explicit search over notes/snapshots/summaries/episodes when prior work may matter.
 - `cortex_brief(topic)` — compact topical context to paste into a subagent prompt. Call it yourself; don't ask subagents to call it.
 - `cortex_summarize` — checkpoint a dense session so the next one resumes gracefully.
@@ -70,6 +77,7 @@ Anti-patterns (still apply once engaged):
 - Run `npm run build`
 - Run `npm run lint`
 - Run `npx vitest run`
+- For retrieval changes, run a fixture-backed `cortex evaluate --suite <path>` when a suitable suite exists.
 - If the change affects real Claude usage, verify:
   - `~/.claude/settings.json`
   - `~/.claude/hooks/cortex-hook.sh`

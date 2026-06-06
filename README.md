@@ -18,6 +18,7 @@ Now:
 - command failures and test cycles captured as durable episodes
 - hot/warm/cold decay with reinforcement from actual use
 - default state built from a scored working set, not “all active notes”
+- timestamped note output, fixture-backed retrieval evaluation, and optional semantic shadow/rank retrieval
 
 ## Core Behavior
 
@@ -28,10 +29,12 @@ Now:
 - `cortex_recall(topic)` searches notes, summaries, snapshots, and command/episode memory.
 - `cortex_brief(topic)` returns a smaller, agent-friendly subset.
 - `cortex_state` shows current-session load-bearing notes first, then branch snapshots and the scored working set.
+- Note-backed outputs include compact UTC timestamps, for example `Decision [2026-06-06 05:18Z]: [auth] use OIDC`.
 - Branch snapshot summaries prefer session summaries, notes, and file/test/agent activity over raw command-only hook noise.
 - touched and recalled memory stays hot; ignored memory decays out of the default state.
 - resolved notes stay cold and do not trigger hook reflex whispers.
 - UserPromptSubmit prompt hooks stay silent; edit and command reflexes still require high-confidence prior context.
+- Optional semantic retrieval is controlled by `CORTEX_SEMANTIC_MODE=off|shadow|rank`; default is `off`.
 
 ## Install
 
@@ -191,6 +194,7 @@ The wrapper calls `cortex inject-header --quiet` for SessionStart and `dist/tran
 | `cortex_note` | Record an `insight`, `decision`, `intent`, `blocker`, or `focus` |
 | `cortex_recall` | Retrieve evidence for a topic from memory |
 | `cortex_brief` | Return a smaller topical brief, optionally for an agent |
+| `cortex_suggest_notes` | Suggest load-bearing notes from the current session without writing them |
 | `cortex_engage` | Re-enable Cortex if it was disengaged |
 | `cortex_disengage` | Disable Cortex hooks for the current session |
 | `cortex_summarize` | Force a session summary/checkpoint |
@@ -208,6 +212,8 @@ cortex status
 cortex stats
 cortex consolidate
 cortex evaluate
+cortex evaluate --suite quality-suite.json --compare previous-eval.json
+cortex suggest-notes
 cortex serve
 cortex log read
 cortex log edit
@@ -225,12 +231,36 @@ Cortex stores:
 - `episodes` for failures, test cycles, and summaries
 - `branch_snapshots` and `project_snapshots` for restore points
 - `memory_items` as the canonical retrieval/search layer
+- `memory_item_semantics` for optional summaries, concepts/entities, and JSON-safe embeddings keyed by `memory_items.id`
 
 Retrieval is hybrid:
 - FTS over `memory_items`
 - scope-aware reranking
 - recency/importance/access reinforcement
 - hot/warm/cold decay
+- temporal intent handling for prompts like `latest`, `old`, `resolved`, and `when`
+- optional semantic shadow/rank candidates when a semantic provider is configured
+
+## Reliability Evaluation
+
+`cortex evaluate` still reports table counts and output sizes. With `--suite`, it also runs retrieval-quality fixtures:
+
+```json
+{
+  "fixtures": [
+    {
+      "topic": "latest auth decision",
+      "expected_top": "auth",
+      "allowed": ["oidc"],
+      "forbidden": ["legacy sessions"],
+      "max_output_tokens": 200,
+      "fresh_after": "2026-01-01T00:00:00.000Z"
+    }
+  ]
+}
+```
+
+The quality report includes `top1_hit`, `recall_at_3`, `noise_count`, `stale_count`, output tokens, and per-result score breakdowns. Pass `--compare previous-eval.json` to include aggregate deltas against an earlier run.
 
 ## Recommended Usage
 
@@ -240,6 +270,7 @@ Cortex should feel ambient. Let hooks capture activity and let the reflex stay s
 - Use `cortex_recall(topic)` or `cortex_state` only when you explicitly need more context than the reflex surfaced.
 - Use `cortex_brief(topic)` before dispatching a subagent when topic history matters.
 - Use `cortex_note(decision, alternatives=[...])`, `cortex_note(insight)`, or `cortex_note(blocker)` for load-bearing memory only.
+- Use `cortex_suggest_notes` / `cortex suggest-notes` to review possible load-bearing notes before explicitly saving them.
 - Use `cortex_summarize` at the end of a dense work session so the next one resumes gracefully.
 
 Anti-patterns: don't add startup rituals to agent instructions, don't note routine acknowledgments, don't tell subagents to call `cortex_brief` themselves, don't re-call `cortex_state` multiple times per session, and don't summarize throwaway sessions.

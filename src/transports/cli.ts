@@ -18,7 +18,12 @@ import {
   mergeProjectState,
   writeSessionSummary,
 } from '../capture/consolidate.js';
-import { evaluateDatabase } from '../eval/harness.js';
+import {
+  evaluateDatabase,
+  type EvaluationOptions,
+  type EvaluationResult,
+  type QualityFixture,
+} from '../eval/harness.js';
 import { buildHeader, formatTokens } from '../query/state.js';
 import { reflectMemory, type ReflexEvent } from '../query/reflex.js';
 import {
@@ -28,6 +33,7 @@ import {
   renderCortexRoute,
 } from './mcp.js';
 import { ensureScopedSession, syncBranchSnapshotForSession } from '../scope/runtime.js';
+import { suggestNotes } from '../query/suggest-notes.js';
 
 function findDbPath(startDir: string): string {
   return path.join(startDir, '.cortex.db');
@@ -54,6 +60,35 @@ function parseTopics(raw?: string): string[] {
     .split(',')
     .map(topic => topic.trim())
     .filter(topic => topic.length > 0);
+}
+
+function readJsonFile(filePath: string): unknown {
+  const resolved = path.isAbsolute(filePath)
+    ? filePath
+    : path.resolve(process.cwd(), filePath);
+  return JSON.parse(fs.readFileSync(resolved, 'utf8')) as unknown;
+}
+
+function parseQualitySuite(filePath: string): QualityFixture[] {
+  const parsed = readJsonFile(filePath);
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    !Array.isArray((parsed as { fixtures?: unknown }).fixtures)
+  ) {
+    throw new Error('Quality suite must be a JSON object with a fixtures array');
+  }
+
+  return (parsed as { fixtures: QualityFixture[] }).fixtures;
+}
+
+function parseEvaluationResult(filePath: string): EvaluationResult {
+  const parsed = readJsonFile(filePath);
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Compare file must be a Cortex evaluation JSON object');
+  }
+
+  return parsed as EvaluationResult;
 }
 
 export function createProgram(): Command {
@@ -280,15 +315,33 @@ export function createProgram(): Command {
     .option('--db <path>', 'Path to the Cortex SQLite database', '.cortex.db')
     .option('--root <path>', 'Project root path for schema initialization', process.cwd())
     .option('--topics <items>', 'Comma-separated topics to replay')
-    .action((opts: { db: string; root: string; topics?: string }) => {
+    .option('--suite <path>', 'Path to a JSON quality suite with retrieval fixtures')
+    .option('--compare <path>', 'Path to a previous cortex evaluate JSON result')
+    .action((opts: { db: string; root: string; topics?: string; suite?: string; compare?: string }) => {
       const dbPath = path.isAbsolute(opts.db)
         ? opts.db
         : path.resolve(process.cwd(), opts.db);
       const rootPath = path.isAbsolute(opts.root)
         ? opts.root
         : path.resolve(process.cwd(), opts.root);
-      const result = evaluateDatabase(dbPath, rootPath, parseTopics(opts.topics));
+      const options: EvaluationOptions = {
+        ...(opts.suite ? { fixtures: parseQualitySuite(opts.suite) } : {}),
+        ...(opts.compare ? { compareTo: parseEvaluationResult(opts.compare) } : {}),
+      };
+      const result = evaluateDatabase(dbPath, rootPath, parseTopics(opts.topics), options);
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    });
+
+  program
+    .command('suggest-notes')
+    .description('Suggest load-bearing notes from the current session without writing them')
+    .option('--session <id>', 'Session id to inspect. Defaults to the current scoped session')
+    .action((opts: { session?: string }) => {
+      const { store } = openCortexDb(process.cwd());
+      const session = ensureScopedSession(store, process.cwd());
+      const sessionId = opts.session ?? session.id;
+      const suggestions = suggestNotes(store, sessionId);
+      process.stdout.write(`${JSON.stringify({ session_id: sessionId, suggestions }, null, 2)}\n`);
     });
 
   program

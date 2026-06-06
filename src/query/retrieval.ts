@@ -2,6 +2,7 @@ import type {
   CortexStore,
   ParsedMemoryItem,
   SearchMemoryItemResult,
+  SemanticMemoryItemResult,
 } from '../db/store.js';
 import { deriveProjectScopeKey } from '../scope/keys.js';
 import { getPreferredScope, type PreferredScope } from './scope.js';
@@ -39,12 +40,16 @@ const LOW_SIGNAL_TOKENS = new Set([
   'is',
   'it',
   'just',
+  'latest',
   'now',
   'of',
+  'old',
   'on',
   'or',
   'plan',
   'please',
+  'recent',
+  'resolved',
   'should',
   'that',
   'the',
@@ -52,6 +57,7 @@ const LOW_SIGNAL_TOKENS = new Set([
   'to',
   'was',
   'were',
+  'when',
   'will',
   'with',
   'without',
@@ -84,6 +90,9 @@ const STATE_BONUS: Record<string, number> = {
 export interface RetrievedMemoryItem extends ParsedMemoryItem {
   retrieval_score: number;
   lexical_score: number;
+  semantic_score: number | null;
+  semantic_rank_applied: boolean;
+  temporal_bonus: number;
   scope_bonus: number;
   kind_bonus: number;
   recency_bonus: number;
@@ -94,6 +103,19 @@ export interface RetrievedMemoryItem extends ParsedMemoryItem {
   fts_rank: number | null;
 }
 
+export type SemanticMode = 'off' | 'shadow' | 'rank';
+
+export interface SemanticProvider {
+  embeddingModel: string;
+  embed(topic: string): number[] | null;
+}
+
+export interface RetrieveMemoryOptions {
+  semanticMode?: SemanticMode;
+  semanticProvider?: SemanticProvider;
+  semanticRankThreshold?: number;
+}
+
 export interface RetrievalContext {
   preferredScope: PreferredScope | undefined;
   projectScopeKey: string | undefined;
@@ -102,16 +124,24 @@ export interface RetrievalContext {
   lowerTopic: string;
   tokens: string[];
   queryText: string | null;
+  temporalIntent: TemporalIntent;
 }
 
 export interface RetrievalResult {
   context: RetrievalContext;
   candidates: RetrievedMemoryItem[];
+  semanticCandidates: RetrievedMemoryItem[];
   results: RetrievedMemoryItem[];
 }
 
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
+}
+
+interface TemporalIntent {
+  preferRecent: boolean;
+  preferOld: boolean;
+  preferResolved: boolean;
 }
 
 function tokenizeTopic(topic: string): string[] {
@@ -194,6 +224,44 @@ function recencyBonus(createdAt: string): number {
   return 0.2;
 }
 
+function ageDays(createdAt: string): number | null {
+  const ageMs = Date.now() - Date.parse(createdAt);
+  if (!Number.isFinite(ageMs)) {
+    return null;
+  }
+
+  return Math.max(0, ageMs / (1000 * 60 * 60 * 24));
+}
+
+function deriveTemporalIntent(lowerTopic: string): TemporalIntent {
+  const words = new Set(lowerTopic.match(TOKEN_PATTERN) ?? []);
+  return {
+    preferRecent: ['latest', 'current', 'recent', 'newest', 'now'].some(word => words.has(word)),
+    preferOld: ['old', 'older', 'oldest', 'previous', 'prior', 'history', 'historical'].some(word => words.has(word)),
+    preferResolved: ['resolved', 'fixed', 'closed', 'done'].some(word => words.has(word)),
+  };
+}
+
+function temporalBonus(item: ParsedMemoryItem, intent: TemporalIntent): number {
+  let bonus = 0;
+  const days = ageDays(item.created_at);
+
+  if (days !== null) {
+    if (intent.preferRecent) {
+      bonus += Math.max(0, 5 - Math.log1p(days) * 0.9);
+    }
+    if (intent.preferOld) {
+      bonus += Math.min(5, Math.log1p(days) * 0.9);
+    }
+  }
+
+  if (intent.preferResolved) {
+    bonus += item.text.toLowerCase().includes('status: resolved') ? 8 : -2;
+  }
+
+  return bonus;
+}
+
 function ftsBonus(rank: number | null): number {
   if (rank === null || !Number.isFinite(rank)) {
     return 0;
@@ -236,6 +304,8 @@ function lexicalScore(
 function rerankCandidate(
   item: SearchMemoryItemResult | ParsedMemoryItem,
   context: RetrievalContext,
+  semanticScore: number | null = null,
+  semanticRankApplied = false,
 ): RetrievedMemoryItem {
   const parsed: ParsedMemoryItem = 'fts_rank' in item ? item : item;
   const { lexicalScore: textScore, tokenHits, exactPhrase } = lexicalScore(
@@ -247,6 +317,7 @@ function rerankCandidate(
   const scope = scopeBonus(parsed, context.preferredScope, context.projectScopeKey);
   const kind = kindBonus(parsed.kind);
   const recency = recencyBonus(parsed.created_at);
+  const temporal = temporalBonus(parsed, context.temporalIntent);
   const hotness = hotnessBonus(parsed);
   const access = Math.min(parsed.access_count * 0.15, 1.5);
   const score =
@@ -254,15 +325,20 @@ function rerankCandidate(
     scope +
     kind +
     recency +
+    temporal +
     hotness +
     access +
     parsed.importance * 3 +
-    ftsBonus('fts_rank' in item ? item.fts_rank : null);
+    ftsBonus('fts_rank' in item ? item.fts_rank : null) +
+    (semanticRankApplied && semanticScore !== null ? semanticScore * 30 : 0);
 
   return {
     ...parsed,
     retrieval_score: score,
     lexical_score: textScore,
+    semantic_score: semanticScore,
+    semantic_rank_applied: semanticRankApplied,
+    temporal_bonus: temporal,
     scope_bonus: scope,
     kind_bonus: kind,
     recency_bonus: recency,
@@ -272,6 +348,67 @@ function rerankCandidate(
     exact_phrase: exactPhrase,
     fts_rank: 'fts_rank' in item ? item.fts_rank : null,
   };
+}
+
+function semanticModeFromEnv(): SemanticMode {
+  const raw = process.env.CORTEX_SEMANTIC_MODE;
+  if (raw === 'shadow' || raw === 'rank') {
+    return raw;
+  }
+  return 'off';
+}
+
+function resolveSemanticMode(options: RetrieveMemoryOptions | undefined): SemanticMode {
+  return options?.semanticMode ?? semanticModeFromEnv();
+}
+
+function retrieveSemanticCandidates(
+  store: CortexStore,
+  context: RetrievalContext,
+  limit: number,
+  options: RetrieveMemoryOptions | undefined,
+): SemanticMemoryItemResult[] {
+  const mode = resolveSemanticMode(options);
+  if (mode === 'off' || !options?.semanticProvider) {
+    return [];
+  }
+
+  const embedding = options.semanticProvider.embed(context.topic);
+  if (!embedding || embedding.length === 0) {
+    return [];
+  }
+
+  return store.searchMemoryItemSemantics(
+    embedding,
+    Math.max(limit * 5, 20),
+    options.semanticProvider.embeddingModel,
+  );
+}
+
+function mergeRankedSemanticCandidates(
+  lexicalCandidates: RetrievedMemoryItem[],
+  semanticCandidates: SemanticMemoryItemResult[],
+  context: RetrievalContext,
+  threshold: number,
+): RetrievedMemoryItem[] {
+  const byId = new Map<string, RetrievedMemoryItem>();
+  for (const candidate of lexicalCandidates) {
+    byId.set(candidate.id, candidate);
+  }
+
+  for (const semantic of semanticCandidates) {
+    if (semantic.semantic_score < threshold) {
+      continue;
+    }
+
+    const existing = byId.get(semantic.id);
+    byId.set(
+      semantic.id,
+      rerankCandidate(existing ?? semantic, context, semantic.semantic_score, true),
+    );
+  }
+
+  return Array.from(byId.values());
 }
 
 function dedupeResults(results: RetrievedMemoryItem[]): RetrievedMemoryItem[] {
@@ -306,6 +443,7 @@ export function buildRetrievalContext(
     lowerTopic,
     tokens,
     queryText: buildFtsQuery(tokens),
+    temporalIntent: deriveTemporalIntent(lowerTopic),
   };
 }
 
@@ -313,6 +451,7 @@ export function retrieveMemory(
   store: CortexStore,
   topic: string,
   limit = 8,
+  options?: RetrieveMemoryOptions,
 ): RetrievalResult {
   const context = buildRetrievalContext(store, topic);
   let candidates: RetrievedMemoryItem[] = [];
@@ -336,6 +475,19 @@ export function retrieveMemory(
     candidates = filtered.map(item => rerankCandidate(item, context));
   }
 
+  const semanticMatches = retrieveSemanticCandidates(store, context, limit, options);
+  const semanticCandidates = semanticMatches.map(item =>
+    rerankCandidate(item, context, item.semantic_score, false),
+  );
+  if (resolveSemanticMode(options) === 'rank') {
+    candidates = mergeRankedSemanticCandidates(
+      candidates,
+      semanticMatches,
+      context,
+      options?.semanticRankThreshold ?? 0.86,
+    );
+  }
+
   candidates.sort((left, right) => {
     if (right.retrieval_score !== left.retrieval_score) {
       return right.retrieval_score - left.retrieval_score;
@@ -347,7 +499,7 @@ export function retrieveMemory(
   });
 
   const results = dedupeResults(candidates).slice(0, limit);
-  return { context, candidates, results };
+  return { context, candidates, semanticCandidates, results };
 }
 
 export function logRetrieval(

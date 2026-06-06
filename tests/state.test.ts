@@ -229,6 +229,22 @@ describe('buildFullState - notes and events', () => {
     expect(state).toContain('[auth] use JWT');
   });
 
+  it('renders note timestamps in compact UTC form', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-06-06T05:18:24.000Z'));
+      const store = makeStore();
+      const session = store.createSession();
+      store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'auth', content: 'use JWT' });
+
+      const state = buildFullState(store);
+
+      expect(state).toContain('Decision [2026-06-06 05:18Z]: [auth] use JWT');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shows conflict flag for conflicted notes', () => {
     const store = makeStore();
     const session = store.createSession();
@@ -248,6 +264,30 @@ describe('buildFullState - notes and events', () => {
     const state = buildFullState(store);
     expect(state).toContain('use JWT');
     expect(state).not.toContain('use sessions');
+  });
+
+  it('keeps unresolved current blockers ahead of resolved stale blockers', () => {
+    const store = makeStore();
+    const session = store.createSession({ focus: 'deploy' });
+    const resolved = store.insertNote({
+      sessionId: session.id,
+      kind: 'blocker',
+      subject: 'deploy',
+      content: 'old deploy key was missing',
+    });
+    store.updateNoteStatus(resolved.id, 'resolved');
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'blocker',
+      subject: 'deploy',
+      content: 'current deploy key is missing',
+    });
+
+    const state = buildFullState(store);
+
+    expect(state).toContain('Blocker');
+    expect(state).toContain('current deploy key is missing');
+    expect(state).not.toContain('old deploy key was missing');
   });
 
   it('prioritizes current-session notes before older broad working context without duplicating them', () => {
