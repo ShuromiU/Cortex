@@ -36,7 +36,7 @@ Now:
 - Branch snapshot summaries and recent-session tails prefer notes and file/test/agent activity over raw command-only hook noise.
 - touched and recalled memory stays hot; ignored memory decays out of the default state.
 - resolved notes stay cold and do not trigger hook reflex whispers.
-- UserPromptSubmit prompt hooks stay silent; edit and command reflexes still require high-confidence prior context.
+- UserPromptSubmit prompt hooks may emit a once-per-session route-level Cortex hint, but do not inject memory facts from prompt text; edit and command reflexes still require high-confidence prior context.
 - Optional semantic retrieval is controlled by `CORTEX_SEMANTIC_MODE=off|shadow|rank`; default is `off`.
 
 ## Install
