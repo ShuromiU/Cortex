@@ -25,6 +25,11 @@ import { suggestNotes } from '../query/suggest-notes.js';
 import { validateMemory } from '../query/validate-memory.js';
 
 let engagementPath: string | null = null;
+const CORTEX_CONSULTED_KEY = 'cortex_consulted';
+
+function markCortexConsulted(): void {
+  writeEngagement(CORTEX_CONSULTED_KEY, 'true');
+}
 
 export function deriveEngagementPath(dir: string): string {
   let normalized = dir.replace(/\\/g, '/').toLowerCase();
@@ -258,8 +263,11 @@ export function handleToolCall(
   args: Record<string, unknown>,
   cwd: string = process.cwd(),
 ): string {
+  configureEngagementPath(cwd);
+
   switch (toolName) {
     case 'cortex_route':
+      markCortexConsulted();
       return renderCortexRoute();
 
     case 'cortex_state': {
@@ -267,6 +275,7 @@ export function handleToolCall(
       refreshCurrentGraphQuietly(store, cwd);
       writeEngagement('enabled', 'true');
       writeEngagement('state_called', 'true');
+      markCortexConsulted();
       const output = buildFullState(store);
       store.insertLedgerEntry({
         sessionId: session.id,
@@ -309,6 +318,7 @@ export function handleToolCall(
     case 'cortex_recall': {
       const session = ensureScopedSession(store, cwd);
       refreshCurrentGraphQuietly(store, cwd);
+      markCortexConsulted();
       const topic = args['topic'] as string;
       const output = recall(store, topic);
       store.insertLedgerEntry({
@@ -323,6 +333,7 @@ export function handleToolCall(
     case 'cortex_brief': {
       const session = ensureScopedSession(store, cwd);
       refreshCurrentGraphQuietly(store, cwd);
+      markCortexConsulted();
       const topic = args['topic'] as string;
       const forAgent = args['for'] as string | undefined;
       const output = brief(store, topic, forAgent);
@@ -355,6 +366,7 @@ export function handleToolCall(
       refreshCurrentGraphQuietly(store, cwd);
       writeEngagement('enabled', 'true');
       writeEngagement('state_called', 'true');
+      markCortexConsulted();
       const output = buildFullState(store);
       store.insertLedgerEntry({
         sessionId: session.id,
