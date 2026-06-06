@@ -452,6 +452,49 @@ describe('buildFullState - notes and events', () => {
       vi.useRealTimers();
     }
   });
+
+  it('filters persisted command-only branch snapshot summaries while keeping stored intents', () => {
+    const store = makeStore();
+    store.createSession({
+      focus: 'activity-tab-note-log-ux-plan',
+      scopeType: 'branch',
+      scopeKey: 'branch:noisy-repo-b',
+      branchRef: 'feature/noisy-repo-b',
+    });
+    store.upsertBranchSnapshot({
+      scopeKey: 'branch:noisy-repo-b',
+      branchRef: 'feature/noisy-repo-b',
+      focus: 'activity-tab-note-log-ux-plan',
+      summary: [
+        'Command (other): exit ?',
+        'Command (read): exit ?',
+        'Command (git): exit ?',
+      ].join('\n'),
+      intents: ['[scaling-next-session-resume] Continue useful Repo-B plan'],
+    });
+
+    const state = buildFullState(store);
+    expect(state).toContain('Branch snapshot');
+    expect(state).toContain('Last focus: activity-tab-note-log-ux-plan');
+    expect(state).toContain('Stored intents: [scaling-next-session-resume] Continue useful Repo-B plan');
+    expect(state).not.toContain('Command (other): exit ?');
+    expect(state).not.toContain('Command (read): exit ?');
+    expect(state).not.toContain('Command (git): exit ?');
+  });
+
+  it('omits recent session tails that only contain command hook noise', () => {
+    const store = makeStore();
+    const session = store.createSession({ focus: 'activity-tab-note-log-ux-plan' });
+    store.insertEvent({ sessionId: session.id, type: 'cmd', metadata: { category: 'other' } });
+    store.insertEvent({ sessionId: session.id, type: 'cmd', metadata: { category: 'read' } });
+    store.insertEvent({ sessionId: session.id, type: 'cmd', metadata: { category: 'git' } });
+
+    const state = buildFullState(store);
+    expect(state).not.toContain('Session (focus: activity-tab-note-log-ux-plan)');
+    expect(state).not.toContain('Command (other): exit ?');
+    expect(state).not.toContain('Command (read): exit ?');
+    expect(state).not.toContain('Command (git): exit ?');
+  });
 });
 
 describe('buildFullState - groups by topic', () => {

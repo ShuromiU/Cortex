@@ -32,7 +32,7 @@ Now:
 - Note-backed outputs include compact UTC timestamps, for example `Decision [2026-06-06 05:18Z]: [auth] use OIDC`.
 - Cortex tracks a lightweight current app graph for the active scope and validates file/path references extracted from memory.
 - Missing file references demote retrieved memories and render as `Stale references: missing ...`; historical queries can still surface them as history.
-- Branch snapshot summaries prefer session summaries, notes, and file/test/agent activity over raw command-only hook noise.
+- Branch snapshot summaries and recent-session tails prefer notes and file/test/agent activity over raw command-only hook noise.
 - touched and recalled memory stays hot; ignored memory decays out of the default state.
 - resolved notes stay cold and do not trigger hook reflex whispers.
 - UserPromptSubmit prompt hooks stay silent; edit and command reflexes still require high-confidence prior context.

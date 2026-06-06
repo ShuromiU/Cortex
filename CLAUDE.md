@@ -51,7 +51,7 @@ Persistent working memory for coding agents.
 - Retrieval should expose score breakdowns for quality evaluation and respect temporal terms such as latest/current, old/history, resolved, and when.
 - Semantic ranking must remain optional; `off` is default, `shadow` must not change returned results, and `rank` must be tested with deterministic fake providers.
 - Branch switches should restore the matching snapshot.
-- Branch snapshot summaries should not be raw command-only hook activity.
+- Branch snapshot summaries and recent-session tails should not be raw command-only hook activity.
 - Stale notes should decay out of the default state unless reinforced by actual retrieval/use.
 - Resolved notes should remain cold even when retrieved, and should not trigger reflex `additionalContext`.
 - Prompt reflex should stay silent for UserPromptSubmit regardless of prompt text.

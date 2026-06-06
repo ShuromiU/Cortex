@@ -167,8 +167,9 @@ function renderSnapshotSection(snapshot: BranchSnapshotRow): string {
     lines.push(`Last focus: ${snapshot.focus}`);
   }
 
-  if (snapshot.summary) {
-    lines.push(snapshot.summary);
+  const summary = filterRenderedCommandNoise(snapshot.summary);
+  if (summary) {
+    lines.push(summary);
   }
 
   if (snapshot.intents.length > 0) {
@@ -184,6 +185,18 @@ function renderSnapshotSection(snapshot: BranchSnapshotRow): string {
   }
 
   return lines.join('\n');
+}
+
+function isRenderedCommandNoise(line: string): boolean {
+  return /^Command \([^)]+\): exit \??\d*$/.test(line.trim());
+}
+
+function filterRenderedCommandNoise(summary: string): string {
+  return summary
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0 && !isRenderedCommandNoise(line))
+    .join('\n');
 }
 
 function resolveRecentSessions(store: CortexStore, scopeKey: string | null, limit: number) {
@@ -502,11 +515,12 @@ export function buildFullState(store: CortexStore): string {
   const recentSessions = resolveRecentSessions(store, preferredScope?.scopeKey ?? null, 3);
   for (const session of recentSessions) {
     const compressed = consolidateLevel1(store, session.id);
-    if (compressed.length === 0) {
+    const renderedEvents = compressed.filter(event => event.type !== 'cmd');
+    if (renderedEvents.length === 0) {
       continue;
     }
 
-    const rendered = renderCompressed(compressed);
+    const rendered = renderCompressed(renderedEvents);
     const focusLabel = session.focus ? ` (focus: ${session.focus})` : '';
     sections.push(`Session${focusLabel}:\n${rendered}`);
   }
