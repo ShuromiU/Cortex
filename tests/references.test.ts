@@ -47,6 +47,8 @@ describe('memory references', () => {
     fs.mkdirSync(path.join(root, 'src'), { recursive: true });
     fs.mkdirSync(path.join(root, 'node_modules', 'pkg'), { recursive: true });
     fs.writeFileSync(path.join(root, 'src', 'alive.ts'), 'export const alive = true;\n');
+    fs.writeFileSync(path.join(root, '.cortex.db'), 'not app code\n');
+    fs.writeFileSync(path.join(root, '.cortex.db-wal'), 'not app code\n');
     fs.writeFileSync(path.join(root, 'node_modules', 'pkg', 'ignored.ts'), 'ignored\n');
     const store = new CortexStore(createTestDb(root));
     const session = store.createSession({
@@ -62,6 +64,8 @@ describe('memory references', () => {
     });
 
     expect(graph.files).toContain('src/alive.ts');
+    expect(graph.files).not.toContain('.cortex.db');
+    expect(graph.files).not.toContain('.cortex.db-wal');
     expect(graph.files).not.toContain('node_modules/pkg/ignored.ts');
     expect(graph.file_count).toBe(1);
   });

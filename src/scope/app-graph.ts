@@ -14,6 +14,16 @@ const IGNORED_DIRS = new Set([
   'node_modules',
 ]);
 
+function shouldIncludeFile(file: string): boolean {
+  const base = path.basename(file);
+  return ![
+    '.cortex.db',
+    '.cortex.db-shm',
+    '.cortex.db-wal',
+    '.cortex.db-journal',
+  ].includes(base);
+}
+
 export interface RefreshCurrentAppGraphOptions {
   scopeKey?: string;
   scopeType?: ScopeType;
@@ -39,6 +49,7 @@ function listGitFiles(worktreePath: string): string[] | null {
       .split(/\r?\n/)
       .map(line => normalizeFilePath(line.trim()))
       .filter(Boolean)
+      .filter(shouldIncludeFile)
       .filter(file => {
         try {
           return fs.statSync(path.join(worktreePath, file)).isFile();
@@ -74,7 +85,10 @@ function walkFiles(root: string): string[] {
       }
 
       if (entry.isFile()) {
-        files.push(normalizeFilePath(path.join(rel, entry.name)));
+        const file = normalizeFilePath(path.join(rel, entry.name));
+        if (shouldIncludeFile(file)) {
+          files.push(file);
+        }
       }
     }
   }
