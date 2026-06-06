@@ -215,6 +215,14 @@ describe('createProgram', () => {
     expect(names).toContain('suggest-notes');
   });
 
+  it('has validate-memory command with optional topic', () => {
+    const program = createProgram();
+    const validate = program.commands.find(c => c.name() === 'validate-memory')!;
+    expect(validate).toBeDefined();
+    const optNames = validate.options.map(o => o.long);
+    expect(optNames).toContain('--topic');
+  });
+
   it('evaluate command accepts quality suite and compare options', () => {
     const program = createProgram();
     const evaluate = program.commands.find(c => c.name() === 'evaluate')!;

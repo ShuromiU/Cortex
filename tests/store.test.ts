@@ -379,7 +379,7 @@ describe('CortexStore — utility', () => {
     expect(result).toBe(2);
   });
 
-  it('returns counts for core and v2 tables', () => {
+  it('returns counts for core, v2, and current-truth tables', () => {
     const counts = store.getTableCounts();
     expect(counts.sessions).toBe(0);
     expect(counts.command_runs).toBe(0);
@@ -387,6 +387,9 @@ describe('CortexStore — utility', () => {
     expect(counts.branch_snapshots).toBe(0);
     expect(counts.project_snapshots).toBe(0);
     expect(counts.memory_items).toBe(0);
+    expect(counts.memory_item_semantics).toBe(0);
+    expect(counts.current_app_graphs).toBe(0);
+    expect(counts.memory_references).toBe(0);
     expect(counts.retrieval_log).toBe(0);
   });
 

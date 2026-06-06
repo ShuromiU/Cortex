@@ -290,6 +290,91 @@ describe('buildFullState - notes and events', () => {
     expect(state).not.toContain('old deploy key was missing');
   });
 
+  it('excludes stale current-session notes that only point at missing files', () => {
+    const store = makeStore();
+    const session = store.createSession({
+      focus: 'activity',
+      worktreePath: '/repo',
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+    });
+    store.upsertCurrentAppGraph({
+      scopeKey: 'project:/repo',
+      scopeType: 'project',
+      worktreePath: '/repo',
+      files: ['components/board/TaskCardNoteLog.tsx'],
+    });
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'activity',
+      content: 'Old activity UI lives in components/board/ExpandedTaskCard.tsx.',
+    });
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'activity',
+      content: 'Current activity UI lives in components/board/TaskCardNoteLog.tsx.',
+    });
+
+    const state = buildFullState(store);
+
+    expect(state).toContain('Current activity UI lives');
+    expect(state).not.toContain('Old activity UI lives');
+  });
+
+  it('refills the state working set after filtering stale notes', () => {
+    const store = makeStore();
+    const session = store.createSession({
+      focus: 'activity',
+      worktreePath: '/repo',
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+    });
+    store.upsertCurrentAppGraph({
+      scopeKey: 'project:/repo',
+      scopeType: 'project',
+      worktreePath: '/repo',
+      files: ['src/current.ts'],
+    });
+
+    for (let i = 0; i < 12; i++) {
+      store.upsertMemoryItem({
+        id: `stale-${i}`,
+        sessionId: session.id,
+        scopeType: 'project',
+        scopeKey: 'project:/repo',
+        kind: 'note:decision',
+        sourceTable: 'notes',
+        sourceId: `stale-${i}`,
+        subject: 'activity',
+        text: `decision: stale high score uses src/missing-${i}.ts.`,
+        state: 'pinned',
+        importance: 5,
+        createdAt: `2026-01-01T00:00:${String(i).padStart(2, '0')}.000Z`,
+      });
+    }
+    store.upsertMemoryItem({
+      id: 'valid-lower-score',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+      kind: 'note:decision',
+      sourceTable: 'notes',
+      sourceId: 'valid-lower-score',
+      subject: 'activity',
+      text: 'decision: valid lower score uses src/current.ts.',
+      state: 'warm',
+      importance: 0.1,
+      createdAt: '2026-06-06T00:01:00.000Z',
+    });
+
+    const state = buildFullState(store);
+
+    expect(state).toContain('valid lower score uses src/current.ts');
+    expect(state).not.toContain('stale high score');
+  });
+
   it('prioritizes current-session notes before older broad working context without duplicating them', () => {
     vi.useFakeTimers();
     try {

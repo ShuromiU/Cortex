@@ -7,6 +7,7 @@ Persistent working memory for coding agents.
 - Sessions are branch/worktree-aware.
 - `memory_items` is the canonical search/retrieval layer.
 - Default state starts with current-session load-bearing notes, then uses the scored working set.
+- Cortex tracks a lightweight current app graph and validates file/path references extracted from memory before treating old notes as current.
 - Memory decays through `hot`, `warm`, `cold`, `archived`; recalled/touched memory is reinforced.
 - Note-backed recall, brief, state, and reflex output includes compact UTC timestamps.
 - Retrieval quality can be benchmarked with fixture suites, and optional semantic retrieval is gated by `CORTEX_SEMANTIC_MODE=off|shadow|rank`.
@@ -24,7 +25,10 @@ Persistent working memory for coding agents.
 - `src/db/store.ts` — canonical persistence/query surface
 - `src/memory/items.ts` — memory-item text/state shaping
 - `src/memory/hotness.ts` — decay/reinforcement scoring
+- `src/memory/references.ts` — file/path reference extraction from memory text
 - `src/query/retrieval.ts` — retrieval/reranking
+- `src/query/reference-validation.ts` — current-checkout validation and stale-reference scoring
+- `src/query/validate-memory.ts` — diagnostic memory validation reports
 - `src/query/reflex.ts` — focus-shift memory reflex for hook `additionalContext`
 - `src/query/state.ts` — startup/default working-set rendering
 - `src/query/recall.ts` — `cortex_recall` search
@@ -42,6 +46,7 @@ Persistent working memory for coding agents.
 - `cortex_route` / `cortex route` are the cold-callable capability map.
 - `cortex_state` should show current-session load-bearing notes first, then the current working set, not a full historical dump.
 - `cortex_recall` and `cortex_brief` should search notes, snapshots, summaries, and command/episode memory.
+- Retrieval should rank current-valid memories above memories pointing at missing files, and stale memories should be labeled rather than silently trusted.
 - Note renderers should preserve `Kind [YYYY-MM-DD HH:mmZ]: ...` timestamp format for agent-readable chronology.
 - Retrieval should expose score breakdowns for quality evaluation and respect temporal terms such as latest/current, old/history, resolved, and when.
 - Semantic ranking must remain optional; `off` is default, `shadow` must not change returned results, and `rank` must be tested with deterministic fake providers.
@@ -62,7 +67,8 @@ Available tools:
 - `cortex_state` — explicit state: current-session load-bearing notes, top-scored notes, branch snapshot, last-session tail.
 - `cortex_note(kind, content, ...)` — durable memory. `kind` is one of `decision` (include `alternatives`), `insight`, `blocker`, `intent`, `focus`. Reserve for load-bearing items; skip routine progress.
 - `cortex_suggest_notes` — review proposed load-bearing notes from the current session without writing them.
-- `cortex_recall(topic)` — explicit search over notes/snapshots/summaries/episodes when prior work may matter.
+- `cortex_validate_memory(topic?)` — audit retrieved or recent memories against the current checkout without deleting notes.
+- `cortex_recall(topic)` — explicit search over notes/snapshots/summaries/episodes when prior work may matter; use proactively for familiar non-trivial areas, recurring bugs, resumed features, and systems with prior decisions.
 - `cortex_brief(topic)` — compact topical context to paste into a subagent prompt. Call it yourself; don't ask subagents to call it.
 - `cortex_summarize` — checkpoint a dense session so the next one resumes gracefully.
 - `cortex_disengage` — turn capture and reflex off for the current session.

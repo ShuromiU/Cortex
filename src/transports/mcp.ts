@@ -18,9 +18,11 @@ import { recall } from '../query/recall.js';
 import { brief } from '../query/brief.js';
 import { buildSessionSummary } from '../query/summarize.js';
 import { ensureScopedSession, syncBranchSnapshotForSession } from '../scope/runtime.js';
+import { refreshCurrentAppGraph } from '../scope/app-graph.js';
 import { estimateTokens } from '../query/retrieval.js';
 import { formatMemoryTimestamp } from '../query/render.js';
 import { suggestNotes } from '../query/suggest-notes.js';
+import { validateMemory } from '../query/validate-memory.js';
 
 let engagementPath: string | null = null;
 
@@ -78,8 +80,9 @@ export function renderCortexRoute(): string {
   return [
     'Cortex route: ambient memory for coding agents.',
     'Default behavior: ambient capture is enabled at session start, and the reflex may whisper short prior context on focus shifts.',
-    'Use cortex_recall(topic) for explicit search when a topic feels familiar or prior work may matter.',
+    'Use cortex_recall(topic) proactively before non-trivial work in a familiar area, recurring bug, resumed feature, or system with prior decisions.',
     'Use cortex_state for a broader working set when resuming dense work, and cortex_brief(topic) before delegating with context.',
+    'Use cortex_validate_memory(topic) when retrieved notes mention files/plans and you need to check them against the current checkout.',
     'Use cortex_note for durable decisions, blockers, and non-obvious insights; use cortex_disengage to silence capture and reflex.',
   ].join('\n');
 }
@@ -100,6 +103,14 @@ function ensureSession(store: CortexStore, cwd: string): string {
   return ensureScopedSession(store, cwd).id;
 }
 
+function refreshCurrentGraphQuietly(store: CortexStore, cwd: string): void {
+  try {
+    refreshCurrentAppGraph(store, cwd);
+  } catch {
+    // Current-truth refresh is advisory and should not block MCP tools.
+  }
+}
+
 export const TOOL_DEFINITIONS = [
   {
     name: 'cortex_route',
@@ -112,7 +123,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'cortex_state',
-    description: 'Load the broader Cortex working set when you explicitly need more context than ambient reflex whispers provide. Returns top-scored notes, recent decisions, branch snapshot, and the last-session tail.',
+    description: 'Load the broader Cortex working set when you explicitly need more context than ambient reflex whispers provide, especially after context loss, dense resumptions, or unclear current direction. Returns current-valid notes first, recent decisions, branch snapshot, and the last-session tail.',
     inputSchema: {
       type: 'object' as const,
       properties: {},
@@ -149,7 +160,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'cortex_recall',
-    description: 'Pull evidence from prior sessions on a topic before re-investigating familiar ground, revisiting recurring bugs or tests, or proposing changes in an area with history. Returns past decisions, insights, episodes, and command outcomes with scope context. Faster than re-reading old files and catches decisions that live only in memory.',
+    description: 'Pull evidence from prior sessions on a topic before re-investigating familiar ground, revisiting recurring bugs or tests, proposing changes in an area with history, or touching a system where prior decisions may matter. Returns current-valid memories first and labels stale file references because repo truth beats memory.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -225,6 +236,20 @@ export const TOOL_DEFINITIONS = [
       required: [],
     },
   },
+  {
+    name: 'cortex_validate_memory',
+    description: 'Audit Cortex memories against the current checkout without deleting notes. Use when retrieved memory mentions files, plans, or app state that may be stale; returns current/stale status and missing references.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        topic: {
+          type: 'string',
+          description: 'Optional topic to validate. Defaults to recent memory.',
+        },
+      },
+      required: [],
+    },
+  },
 ] as const;
 
 export function handleToolCall(
@@ -239,6 +264,7 @@ export function handleToolCall(
 
     case 'cortex_state': {
       const session = ensureScopedSession(store, cwd);
+      refreshCurrentGraphQuietly(store, cwd);
       writeEngagement('enabled', 'true');
       writeEngagement('state_called', 'true');
       const output = buildFullState(store);
@@ -253,6 +279,7 @@ export function handleToolCall(
 
     case 'cortex_note': {
       const sessionId = ensureSession(store, cwd);
+      refreshCurrentGraphQuietly(store, cwd);
       const kind = args['kind'] as InsertNoteOpts['kind'];
       const content = args['content'] as string;
       const subject = args['subject'] as string | undefined;
@@ -281,6 +308,7 @@ export function handleToolCall(
 
     case 'cortex_recall': {
       const session = ensureScopedSession(store, cwd);
+      refreshCurrentGraphQuietly(store, cwd);
       const topic = args['topic'] as string;
       const output = recall(store, topic);
       store.insertLedgerEntry({
@@ -294,6 +322,7 @@ export function handleToolCall(
 
     case 'cortex_brief': {
       const session = ensureScopedSession(store, cwd);
+      refreshCurrentGraphQuietly(store, cwd);
       const topic = args['topic'] as string;
       const forAgent = args['for'] as string | undefined;
       const output = brief(store, topic, forAgent);
@@ -308,13 +337,22 @@ export function handleToolCall(
 
     case 'cortex_suggest_notes': {
       const session = ensureScopedSession(store, cwd);
+      refreshCurrentGraphQuietly(store, cwd);
       const sessionId = (args['sessionId'] as string | undefined) ?? session.id;
       const suggestions = suggestNotes(store, sessionId);
       return JSON.stringify({ session_id: sessionId, suggestions }, null, 2);
     }
 
+    case 'cortex_validate_memory': {
+      ensureScopedSession(store, cwd);
+      refreshCurrentGraphQuietly(store, cwd);
+      const topic = args['topic'] as string | undefined;
+      return JSON.stringify(validateMemory(store, topic), null, 2);
+    }
+
     case 'cortex_engage': {
       const session = ensureScopedSession(store, cwd);
+      refreshCurrentGraphQuietly(store, cwd);
       writeEngagement('enabled', 'true');
       writeEngagement('state_called', 'true');
       const output = buildFullState(store);
@@ -336,6 +374,7 @@ export function handleToolCall(
       const what = args['what'] as string | undefined;
       const summary = buildSessionSummary(store, what);
       const sessionId = ensureSession(store, cwd);
+      refreshCurrentGraphQuietly(store, cwd);
       writeSessionSummary(store, sessionId, summary);
       syncBranchSnapshotForSession(store, sessionId);
       return summary;

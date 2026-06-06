@@ -6,8 +6,9 @@ import {
   noteImportance,
   memoryStateForNote,
 } from '../memory/items.js';
+import { extractMemoryReferences } from '../memory/references.js';
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const CORE_TABLES = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -161,6 +162,30 @@ CREATE TABLE IF NOT EXISTS retrieval_log (
 );
 `;
 
+const V3_TABLES = `
+CREATE TABLE IF NOT EXISTS current_app_graphs (
+  scope_key     TEXT PRIMARY KEY,
+  scope_type    TEXT NOT NULL DEFAULT 'project',
+  git_root      TEXT,
+  worktree_path TEXT,
+  branch_ref    TEXT,
+  head_oid      TEXT,
+  files_json    TEXT NOT NULL DEFAULT '[]',
+  file_count    INTEGER NOT NULL DEFAULT 0,
+  updated_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS memory_references (
+  id              TEXT PRIMARY KEY,
+  memory_item_id  TEXT NOT NULL REFERENCES memory_items(id) ON DELETE CASCADE,
+  reference_type  TEXT NOT NULL,
+  raw_reference   TEXT NOT NULL,
+  normalized_path TEXT NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'unknown',
+  checked_at      TEXT
+);
+`;
+
 const V2_FTS = `
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts
 USING fts5(
@@ -213,6 +238,9 @@ CREATE INDEX IF NOT EXISTS idx_memory_items_kind ON memory_items(kind, state);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_source ON memory_items(source_table, source_id)
   WHERE source_table IS NOT NULL AND source_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memory_item_semantics_hash ON memory_item_semantics(source_hash);
+CREATE INDEX IF NOT EXISTS idx_current_app_graphs_updated ON current_app_graphs(updated_at);
+CREATE INDEX IF NOT EXISTS idx_memory_references_item ON memory_references(memory_item_id);
+CREATE INDEX IF NOT EXISTS idx_memory_references_status ON memory_references(status);
 CREATE INDEX IF NOT EXISTS idx_retrieval_log_session ON retrieval_log(session_id, created_at);
 `;
 
@@ -262,6 +290,12 @@ interface CommandRunRow {
   files_touched_json: string | null;
 }
 
+interface MemoryItemReferenceBackfillRow {
+  id: string;
+  subject: string | null;
+  text: string;
+}
+
 interface EpisodeRow {
   id: string;
   session_id: string | null;
@@ -298,6 +332,7 @@ export function openDatabase(dbPath: string): Database.Database {
 export function applySchema(db: Database.Database): void {
   db.exec(CORE_TABLES);
   db.exec(V2_TABLES);
+  db.exec(V3_TABLES);
   db.exec(V2_FTS);
   ensureSessionScopeColumns(db);
   db.exec(INDEXES);
@@ -487,6 +522,7 @@ function backfillV2Artifacts(db: Database.Database, rootPath: string): void {
   backfillEpisodes(db);
   backfillProjectSnapshots(db, rootPath);
   backfillMemoryItems(db, rootPath);
+  backfillMemoryReferences(db);
   ensureMemoryItemsFts(db);
 }
 
@@ -807,6 +843,50 @@ function backfillMemoryItems(db: Database.Database, rootPath: string): void {
         failing ? 0.7 : 0.35,
         commandRun.timestamp,
       );
+    }
+  });
+
+  tx();
+}
+
+function backfillMemoryReferences(db: Database.Database): void {
+  if (!tableExists(db, 'memory_items') || !tableExists(db, 'memory_references')) {
+    return;
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT mi.id, mi.subject, mi.text
+       FROM memory_items mi
+       LEFT JOIN memory_references mr ON mr.memory_item_id = mi.id
+       WHERE mr.id IS NULL
+       ORDER BY mi.created_at ASC, mi.rowid ASC`,
+    )
+    .all() as MemoryItemReferenceBackfillRow[];
+  const insert = db.prepare(
+    `INSERT INTO memory_references (
+       id,
+       memory_item_id,
+       reference_type,
+       raw_reference,
+       normalized_path,
+       status,
+       checked_at
+     )
+     VALUES (?, ?, ?, ?, ?, 'unknown', NULL)`,
+  );
+
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      for (const ref of extractMemoryReferences(row.subject, row.text)) {
+        insert.run(
+          crypto.randomUUID(),
+          row.id,
+          ref.referenceType,
+          ref.rawReference,
+          ref.normalizedPath,
+        );
+      }
     }
   });
 

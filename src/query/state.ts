@@ -3,6 +3,7 @@ import { consolidateLevel1, renderCompressed } from '../capture/consolidate.js';
 import { selectWorkingMemoryItems } from '../memory/hotness.js';
 import { deriveProjectScopeKey } from '../scope/keys.js';
 import { getPreferredScope } from './scope.js';
+import { validateMemoryReferences } from './reference-validation.js';
 import {
   formatMemoryTimestamp,
   humanizeMemoryKind,
@@ -86,8 +87,10 @@ function resolveWorkingSet(store: CortexStore, limit: number): ParsedMemoryItem[
     store,
     scopeKeys,
     preferredScope?.scopeKey ?? projectScopeKey(store),
-    limit,
-  );
+    Math.max(limit * 4, limit + 20),
+  )
+    .filter(item => !validateMemoryReferences(store, item).stale)
+    .slice(0, limit);
 }
 
 function projectScopeKey(store: CortexStore): string {
@@ -125,13 +128,13 @@ function renderUsagePolicy(mode: UsagePolicyMode): string[] {
     case 'resume':
       return [
         'Cortex is ambient: prior context may surface automatically as short reflex whispers on focus shifts.',
-        'Use cortex_recall(topic), cortex_state, or cortex_brief only when you need more than the whisper; keep notes load-bearing.',
+        'Use cortex_recall(topic) proactively before non-trivial familiar work; use cortex_state for broad resumptions and cortex_brief before delegation.',
       ];
 
     case 'selective':
       return [
         'Cortex is ambient: no startup ritual is required, and silence is normal when no high-confidence memory matches.',
-        'Use cortex_route for help, cortex_recall(topic) for explicit search, and cortex_note for durable decisions, blockers, and insights.',
+        'Use cortex_route for help, cortex_recall(topic) when prior work may matter, and cortex_note for durable decisions, blockers, and insights.',
       ];
   }
 
@@ -262,6 +265,7 @@ function resolveCurrentSessionNotes(
     .map(note => store.getMemoryItemBySource('notes', note.id))
     .filter((item): item is ParsedMemoryItem => item !== undefined)
     .filter(item => item.state !== 'archived' && item.state !== 'cold')
+    .filter(item => !validateMemoryReferences(store, item).stale)
     .sort((left, right) => right.created_at.localeCompare(left.created_at))
     .slice(0, 5);
 }

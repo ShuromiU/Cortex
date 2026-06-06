@@ -1,4 +1,5 @@
 import type { ParsedMemoryItem } from '../db/store.js';
+import type { MemoryReferenceValidation } from './reference-validation.js';
 
 function titleCase(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
@@ -56,6 +57,13 @@ export function formatMemoryTimestamp(createdAt: string): string | null {
   return `${parsed.toISOString().slice(0, 16).replace('T', ' ')}Z`;
 }
 
+function renderReferenceLabel(item: ParsedMemoryItem): string {
+  const validation = (item as ParsedMemoryItem & {
+    reference_validation?: MemoryReferenceValidation;
+  }).reference_validation;
+  return validation?.label ? ` [${validation.label}]` : '';
+}
+
 export function renderMemoryLine(item: ParsedMemoryItem, maxLines = 3): string {
   if (item.kind.startsWith('note:')) {
     const label = humanizeMemoryKind(item.kind);
@@ -68,18 +76,18 @@ export function renderMemoryLine(item: ParsedMemoryItem, maxLines = 3): string {
     const resolved = item.text.toLowerCase().includes('status: resolved') ? ' (resolved)' : '';
     const timestamp = formatMemoryTimestamp(item.created_at);
     const timestampPart = timestamp ? ` [${timestamp}]` : '';
-    return `${label}${timestampPart}: ${subject}${content}${resolved}`;
+    return `${label}${timestampPart}: ${subject}${content}${resolved}${renderReferenceLabel(item)}`;
   }
 
   if (item.kind === 'session_state' || item.kind === 'episode:session_summary') {
-    return `[session state] ${renderMemorySnippet(item.text, maxLines)}`;
+    return `[session state] ${renderMemorySnippet(item.text, maxLines)}${renderReferenceLabel(item)}`;
   }
 
   if (item.kind === 'project_snapshot') {
-    return `[project state] ${renderMemorySnippet(item.text, maxLines)}`;
+    return `[project state] ${renderMemorySnippet(item.text, maxLines)}${renderReferenceLabel(item)}`;
   }
 
   const label = humanizeMemoryKind(item.kind);
   const subject = item.subject ? `[${item.subject}] ` : '';
-  return `${label}: ${subject}${renderMemorySnippet(item.text, maxLines)}`;
+  return `${label}: ${subject}${renderMemorySnippet(item.text, maxLines)}${renderReferenceLabel(item)}`;
 }

@@ -14,6 +14,7 @@ import {
   noteImportance,
   type MemoryItemState,
 } from '../memory/items.js';
+import { extractMemoryReferences, type ExtractedMemoryReference } from '../memory/references.js';
 
 // ── Row types (raw DB rows) ───────────────────────────────────────────
 
@@ -179,6 +180,52 @@ export interface MemoryItemSemanticRow {
   embedding_json: string;
   source_hash: string;
   updated_at: string;
+}
+
+export interface CurrentAppGraphRow {
+  scope_key: string;
+  scope_type: string;
+  git_root: string | null;
+  worktree_path: string | null;
+  branch_ref: string | null;
+  head_oid: string | null;
+  files_json: string;
+  file_count: number;
+  updated_at: string;
+}
+
+export interface ParsedCurrentAppGraph {
+  scope_key: string;
+  scope_type: string;
+  git_root: string | null;
+  worktree_path: string | null;
+  branch_ref: string | null;
+  head_oid: string | null;
+  files: string[];
+  file_count: number;
+  updated_at: string;
+}
+
+export type MemoryReferenceStatus = 'exists' | 'missing' | 'unknown' | 'external';
+
+export interface MemoryReferenceRow {
+  id: string;
+  memory_item_id: string;
+  reference_type: string;
+  raw_reference: string;
+  normalized_path: string;
+  status: MemoryReferenceStatus;
+  checked_at: string | null;
+}
+
+export interface ParsedMemoryReference {
+  id: string;
+  memory_item_id: string;
+  reference_type: string;
+  raw_reference: string;
+  normalized_path: string;
+  status: MemoryReferenceStatus;
+  checked_at: string | null;
 }
 
 export interface ParsedMemoryItem {
@@ -372,6 +419,22 @@ export interface UpsertMemoryItemSemanticOpts {
   updatedAt?: string;
 }
 
+export interface UpsertCurrentAppGraphOpts {
+  scopeKey: string;
+  scopeType: string;
+  gitRoot?: string | null;
+  worktreePath?: string | null;
+  branchRef?: string | null;
+  headOid?: string | null;
+  files: string[];
+  updatedAt?: string;
+}
+
+export interface UpsertMemoryReferenceOpts extends ExtractedMemoryReference {
+  status?: MemoryReferenceStatus;
+  checkedAt?: string | null;
+}
+
 export interface InsertRetrievalLogOpts {
   id?: string;
   sessionId?: string | null;
@@ -400,6 +463,9 @@ export interface TableCounts {
   branch_snapshots: number;
   project_snapshots: number;
   memory_items: number;
+  memory_item_semantics: number;
+  current_app_graphs: number;
+  memory_references: number;
   retrieval_log: number;
 }
 
@@ -496,6 +562,33 @@ export function parseMemoryItemSemanticRow(row: MemoryItemSemanticRow): ParsedMe
     embedding: parseJsonNumberArray(row.embedding_json),
     source_hash: row.source_hash,
     updated_at: row.updated_at,
+  };
+}
+
+export function parseCurrentAppGraphRow(row: CurrentAppGraphRow): ParsedCurrentAppGraph {
+  const files = parseJsonStringArray(row.files_json);
+  return {
+    scope_key: row.scope_key,
+    scope_type: row.scope_type,
+    git_root: row.git_root,
+    worktree_path: row.worktree_path,
+    branch_ref: row.branch_ref,
+    head_oid: row.head_oid,
+    files,
+    file_count: row.file_count,
+    updated_at: row.updated_at,
+  };
+}
+
+export function parseMemoryReferenceRow(row: MemoryReferenceRow): ParsedMemoryReference {
+  return {
+    id: row.id,
+    memory_item_id: row.memory_item_id,
+    reference_type: row.reference_type,
+    raw_reference: row.raw_reference,
+    normalized_path: row.normalized_path,
+    status: row.status,
+    checked_at: row.checked_at,
   };
 }
 
@@ -940,6 +1033,9 @@ export class CortexStore {
       branch_snapshots: count('branch_snapshots'),
       project_snapshots: count('project_snapshots'),
       memory_items: count('memory_items'),
+      memory_item_semantics: count('memory_item_semantics'),
+      current_app_graphs: count('current_app_graphs'),
+      memory_references: count('memory_references'),
       retrieval_log: count('retrieval_log'),
     };
   }
@@ -1535,6 +1631,11 @@ export class CortexStore {
         createdAt,
       );
 
+    this.replaceMemoryReferences(
+      id,
+      extractMemoryReferences(opts.subject, opts.text),
+    );
+
     return this.getMemoryItem(id)!;
   }
 
@@ -1589,6 +1690,150 @@ export class CortexStore {
       .prepare('SELECT * FROM memory_item_semantics WHERE memory_item_id = ?')
       .get(memoryItemId) as MemoryItemSemanticRow | undefined;
     return row ? parseMemoryItemSemanticRow(row) : undefined;
+  }
+
+  upsertCurrentAppGraph(opts: UpsertCurrentAppGraphOpts): ParsedCurrentAppGraph {
+    const updatedAt = opts.updatedAt ?? new Date().toISOString();
+    const files = Array.from(new Set(opts.files)).sort();
+
+    this.db
+      .prepare(
+        `INSERT INTO current_app_graphs (
+           scope_key,
+           scope_type,
+           git_root,
+           worktree_path,
+           branch_ref,
+           head_oid,
+           files_json,
+           file_count,
+           updated_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(scope_key) DO UPDATE SET
+           scope_type = excluded.scope_type,
+           git_root = excluded.git_root,
+           worktree_path = excluded.worktree_path,
+           branch_ref = excluded.branch_ref,
+           head_oid = excluded.head_oid,
+           files_json = excluded.files_json,
+           file_count = excluded.file_count,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        opts.scopeKey,
+        opts.scopeType,
+        opts.gitRoot ?? null,
+        opts.worktreePath ?? null,
+        opts.branchRef ?? null,
+        opts.headOid ?? null,
+        JSON.stringify(files),
+        files.length,
+        updatedAt,
+      );
+
+    return this.getCurrentAppGraph(opts.scopeKey)!;
+  }
+
+  getCurrentAppGraph(scopeKey: string): ParsedCurrentAppGraph | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM current_app_graphs WHERE scope_key = ?')
+      .get(scopeKey) as CurrentAppGraphRow | undefined;
+    return row ? parseCurrentAppGraphRow(row) : undefined;
+  }
+
+  replaceMemoryReferences(
+    memoryItemId: string,
+    references: UpsertMemoryReferenceOpts[],
+  ): ParsedMemoryReference[] {
+    const deleteExisting = this.db.prepare(
+      'DELETE FROM memory_references WHERE memory_item_id = ?',
+    );
+    const insert = this.db.prepare(
+      `INSERT INTO memory_references (
+         id,
+         memory_item_id,
+         reference_type,
+         raw_reference,
+         normalized_path,
+         status,
+         checked_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+
+    const tx = this.db.transaction((refs: UpsertMemoryReferenceOpts[]) => {
+      deleteExisting.run(memoryItemId);
+      for (const ref of refs) {
+        insert.run(
+          crypto.randomUUID(),
+          memoryItemId,
+          ref.referenceType,
+          ref.rawReference,
+          ref.normalizedPath,
+          ref.status ?? 'unknown',
+          ref.checkedAt ?? null,
+        );
+      }
+    });
+
+    tx(references);
+    return this.getMemoryReferences(memoryItemId);
+  }
+
+  getMemoryReferences(memoryItemId: string): ParsedMemoryReference[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_references
+         WHERE memory_item_id = ?
+         ORDER BY rowid ASC`,
+      )
+      .all(memoryItemId) as MemoryReferenceRow[];
+    return rows.map(parseMemoryReferenceRow);
+  }
+
+  getMemoryReferencesForItems(memoryItemIds: string[]): Map<string, ParsedMemoryReference[]> {
+    const byId = new Map<string, ParsedMemoryReference[]>();
+    if (memoryItemIds.length === 0) {
+      return byId;
+    }
+
+    const placeholders = memoryItemIds.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_references
+         WHERE memory_item_id IN (${placeholders})
+         ORDER BY rowid ASC`,
+      )
+      .all(...memoryItemIds) as MemoryReferenceRow[];
+
+    for (const row of rows.map(parseMemoryReferenceRow)) {
+      const refs = byId.get(row.memory_item_id) ?? [];
+      refs.push(row);
+      byId.set(row.memory_item_id, refs);
+    }
+    return byId;
+  }
+
+  updateMemoryReferenceStatuses(
+    updates: Array<{ id: string; status: MemoryReferenceStatus; checkedAt?: string }>,
+  ): void {
+    if (updates.length === 0) {
+      return;
+    }
+
+    const stmt = this.db.prepare(
+      `UPDATE memory_references
+       SET status = ?, checked_at = ?
+       WHERE id = ?`,
+    );
+    const tx = this.db.transaction((items: Array<{ id: string; status: MemoryReferenceStatus; checkedAt?: string }>) => {
+      const now = new Date().toISOString();
+      for (const update of items) {
+        stmt.run(update.status, update.checkedAt ?? now, update.id);
+      }
+    });
+    tx(updates);
   }
 
   getMemoryItemBySource(sourceTable: string, sourceId: string): ParsedMemoryItem | undefined {
@@ -1723,6 +1968,10 @@ export class CortexStore {
            last_accessed_at = ?,
            state = CASE
              WHEN state IN ('pinned', 'archived') THEN state
+             WHEN EXISTS (
+               SELECT 1 FROM memory_references
+               WHERE memory_item_id = memory_items.id AND status = 'missing'
+             ) THEN state
              WHEN lower(text) LIKE '%status: resolved%' THEN 'cold'
              ELSE 'hot'
            END

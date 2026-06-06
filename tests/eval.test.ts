@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
-import { applySchema, initializeMeta } from '../src/db/schema.js';
+import { applySchema, initializeMeta, SCHEMA_VERSION } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import { evaluateStore, estimateTokens } from '../src/eval/harness.js';
 
@@ -38,7 +38,7 @@ describe('evaluation harness', () => {
     });
 
     const result = evaluateStore(store, ['auth']);
-    expect(result.schema_version).toBe(2);
+    expect(result.schema_version).toBe(SCHEMA_VERSION);
     expect(result.tables.sessions).toBe(1);
     expect(result.header.chars).toBeGreaterThan(0);
     expect(result.full_state.chars).toBeGreaterThan(0);

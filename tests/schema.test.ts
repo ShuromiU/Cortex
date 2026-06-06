@@ -81,6 +81,8 @@ describe('Schema', () => {
     expect(names).toContain('project_snapshots');
     expect(names).toContain('memory_items');
     expect(names).toContain('memory_item_semantics');
+    expect(names).toContain('current_app_graphs');
+    expect(names).toContain('memory_references');
     expect(names).toContain('memory_items_fts');
     expect(names).toContain('retrieval_log');
   });
@@ -113,6 +115,9 @@ describe('Schema', () => {
     expect(names).toContain('idx_memory_items_kind');
     expect(names).toContain('idx_memory_items_source');
     expect(names).toContain('idx_memory_item_semantics_hash');
+    expect(names).toContain('idx_current_app_graphs_updated');
+    expect(names).toContain('idx_memory_references_item');
+    expect(names).toContain('idx_memory_references_status');
     expect(names).toContain('idx_retrieval_log_session');
   });
 
@@ -301,7 +306,7 @@ describe('Schema', () => {
 
     const result = ensureCortexSchema(db, '/legacy/root');
     expect(result.migrated).toBe(true);
-    expect(getSchemaVersion(db)).toBe(2);
+    expect(getSchemaVersion(db)).toBe(3);
 
     const sessionColumns = db
       .prepare('PRAGMA table_info(sessions)')

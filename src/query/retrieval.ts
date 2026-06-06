@@ -6,6 +6,11 @@ import type {
 } from '../db/store.js';
 import { deriveProjectScopeKey } from '../scope/keys.js';
 import { getPreferredScope, type PreferredScope } from './scope.js';
+import {
+  referenceValidationScore,
+  validateMemoryReferences,
+  type MemoryReferenceValidation,
+} from './reference-validation.js';
 
 const TOKEN_PATTERN = /[a-z0-9][a-z0-9._/-]*/gi;
 const TOKEN_SPLIT_PATTERN = /[._/-]+/g;
@@ -92,6 +97,8 @@ export interface RetrievedMemoryItem extends ParsedMemoryItem {
   lexical_score: number;
   semantic_score: number | null;
   semantic_rank_applied: boolean;
+  reference_validation: MemoryReferenceValidation;
+  current_truth_bonus: number;
   temporal_bonus: number;
   scope_bonus: number;
   kind_bonus: number;
@@ -138,7 +145,7 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-interface TemporalIntent {
+export interface TemporalIntent {
   preferRecent: boolean;
   preferOld: boolean;
   preferResolved: boolean;
@@ -302,6 +309,7 @@ function lexicalScore(
 }
 
 function rerankCandidate(
+  store: CortexStore,
   item: SearchMemoryItemResult | ParsedMemoryItem,
   context: RetrievalContext,
   semanticScore: number | null = null,
@@ -320,6 +328,11 @@ function rerankCandidate(
   const temporal = temporalBonus(parsed, context.temporalIntent);
   const hotness = hotnessBonus(parsed);
   const access = Math.min(parsed.access_count * 0.15, 1.5);
+  const referenceValidation = validateMemoryReferences(store, parsed);
+  const currentTruth = referenceValidationScore(
+    referenceValidation,
+    context.temporalIntent.preferOld,
+  );
   const score =
     textScore +
     scope +
@@ -328,6 +341,7 @@ function rerankCandidate(
     temporal +
     hotness +
     access +
+    currentTruth +
     parsed.importance * 3 +
     ftsBonus('fts_rank' in item ? item.fts_rank : null) +
     (semanticRankApplied && semanticScore !== null ? semanticScore * 30 : 0);
@@ -338,6 +352,8 @@ function rerankCandidate(
     lexical_score: textScore,
     semantic_score: semanticScore,
     semantic_rank_applied: semanticRankApplied,
+    reference_validation: referenceValidation,
+    current_truth_bonus: currentTruth,
     temporal_bonus: temporal,
     scope_bonus: scope,
     kind_bonus: kind,
@@ -386,6 +402,7 @@ function retrieveSemanticCandidates(
 }
 
 function mergeRankedSemanticCandidates(
+  store: CortexStore,
   lexicalCandidates: RetrievedMemoryItem[],
   semanticCandidates: SemanticMemoryItemResult[],
   context: RetrievalContext,
@@ -404,7 +421,7 @@ function mergeRankedSemanticCandidates(
     const existing = byId.get(semantic.id);
     byId.set(
       semantic.id,
-      rerankCandidate(existing ?? semantic, context, semantic.semantic_score, true),
+      rerankCandidate(store, existing ?? semantic, context, semantic.semantic_score, true),
     );
   }
 
@@ -459,7 +476,7 @@ export function retrieveMemory(
   if (context.queryText) {
     candidates = store
       .searchMemoryItems(context.queryText, Math.max(limit * 5, 20))
-      .map(item => rerankCandidate(item, context));
+      .map(item => rerankCandidate(store, item, context));
   }
 
   if (candidates.length === 0) {
@@ -472,15 +489,16 @@ export function retrieveMemory(
       const combined = `${item.subject ?? ''}\n${item.text}`.toLowerCase();
       return context.tokens.some(token => combined.includes(token));
     });
-    candidates = filtered.map(item => rerankCandidate(item, context));
+    candidates = filtered.map(item => rerankCandidate(store, item, context));
   }
 
   const semanticMatches = retrieveSemanticCandidates(store, context, limit, options);
   const semanticCandidates = semanticMatches.map(item =>
-    rerankCandidate(item, context, item.semantic_score, false),
+    rerankCandidate(store, item, context, item.semantic_score, false),
   );
   if (resolveSemanticMode(options) === 'rank') {
     candidates = mergeRankedSemanticCandidates(
+      store,
       candidates,
       semanticMatches,
       context,

@@ -33,7 +33,9 @@ import {
   renderCortexRoute,
 } from './mcp.js';
 import { ensureScopedSession, syncBranchSnapshotForSession } from '../scope/runtime.js';
+import { refreshCurrentAppGraph } from '../scope/app-graph.js';
 import { suggestNotes } from '../query/suggest-notes.js';
+import { validateMemory } from '../query/validate-memory.js';
 
 function findDbPath(startDir: string): string {
   return path.join(startDir, '.cortex.db');
@@ -49,6 +51,14 @@ function openCortexDb(startDir: string): { store: CortexStore; dbPath: string } 
 
 function ensureSession(store: CortexStore, cwd: string): string {
   return ensureScopedSession(store, cwd).id;
+}
+
+function refreshCurrentGraphQuietly(store: CortexStore, cwd: string): void {
+  try {
+    refreshCurrentAppGraph(store, cwd);
+  } catch {
+    // Current-truth refresh should never block memory access.
+  }
 }
 
 function parseTopics(raw?: string): string[] {
@@ -186,6 +196,7 @@ export function createProgram(): Command {
       }
 
       ensureScopedSession(store, process.cwd());
+      refreshCurrentGraphQuietly(store, process.cwd());
 
       const engPath = deriveEngagementPath(process.cwd());
       try {
@@ -224,6 +235,7 @@ export function createProgram(): Command {
 
       const { store } = openCortexDb(process.cwd());
       const session = ensureScopedSession(store, process.cwd());
+      refreshCurrentGraphQuietly(store, process.cwd());
       const output = reflectMemory(store, {
         event: opts.event,
         prompt: opts.prompt,
@@ -342,6 +354,18 @@ export function createProgram(): Command {
       const sessionId = opts.session ?? session.id;
       const suggestions = suggestNotes(store, sessionId);
       process.stdout.write(`${JSON.stringify({ session_id: sessionId, suggestions }, null, 2)}\n`);
+    });
+
+  program
+    .command('validate-memory')
+    .description('Audit retrieved memory against the current checkout without deleting notes')
+    .option('--topic <text>', 'Topic to validate. Defaults to recent memory')
+    .action((opts: { topic?: string }) => {
+      const { store } = openCortexDb(process.cwd());
+      ensureScopedSession(store, process.cwd());
+      refreshCurrentGraphQuietly(store, process.cwd());
+      const report = validateMemory(store, opts.topic);
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     });
 
   program

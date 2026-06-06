@@ -24,8 +24,8 @@ function createStore(): { store: CortexStore; sessionId: string } {
 // ── TOOL_DEFINITIONS ──────────────────────────────────────────────────
 
 describe('TOOL_DEFINITIONS', () => {
-  it('defines exactly 9 tools', () => {
-    expect(TOOL_DEFINITIONS).toHaveLength(9);
+  it('defines exactly 10 tools', () => {
+    expect(TOOL_DEFINITIONS).toHaveLength(10);
   });
 
   it('has cortex_route tool', () => {
@@ -140,6 +140,14 @@ describe('TOOL_DEFINITIONS', () => {
     expect(tool!.inputSchema.required).toHaveLength(0);
     const sessionProp = (tool!.inputSchema.properties as Record<string, unknown>)['sessionId'];
     expect(sessionProp).toBeDefined();
+  });
+
+  it('has cortex_validate_memory tool with optional topic', () => {
+    const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_validate_memory');
+    expect(tool).toBeDefined();
+    expect(tool!.inputSchema.required).toHaveLength(0);
+    const topicProp = (tool!.inputSchema.properties as Record<string, unknown>)['topic'];
+    expect(topicProp).toBeDefined();
   });
 });
 
@@ -302,6 +310,31 @@ describe('handleToolCall', () => {
         evidence: [expect.stringContaining('Decided to use semantic shadow mode')],
       }),
     ]);
+  });
+
+  it('cortex_validate_memory reports missing references without deleting notes', () => {
+    store.upsertCurrentAppGraph({
+      scopeKey: 'project:default',
+      scopeType: 'project',
+      worktreePath: '/repo',
+      files: ['src/current.ts'],
+    });
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'files',
+      content: 'Old file was src/missing.ts.',
+    });
+    const before = store.getActiveNotes(sessionId);
+
+    const result = handleToolCall(store, 'cortex_validate_memory', { topic: 'old file' });
+    const parsed = JSON.parse(result) as {
+      memories: Array<{ status: string; missing_references: string[] }>;
+    };
+
+    expect(store.getActiveNotes(sessionId)).toEqual(before);
+    expect(parsed.memories[0]?.status).toBe('stale');
+    expect(parsed.memories[0]?.missing_references).toEqual(['src/missing.ts']);
   });
 
   // cortex_brief

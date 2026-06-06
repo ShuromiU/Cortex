@@ -226,6 +226,92 @@ describe('retrieval', () => {
     expect(retrieval.results[0]?.id).toBe('resolved-deploy-blocker');
   });
 
+  it('demotes stale notes whose referenced files are missing from the current app graph', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const session = store.createSession({
+      worktreePath: '/repo',
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+    });
+    store.upsertCurrentAppGraph({
+      scopeKey: 'project:/repo',
+      scopeType: 'project',
+      worktreePath: '/repo',
+      files: ['components/board/TaskCardNoteLog.tsx'],
+    });
+
+    store.upsertMemoryItem({
+      id: 'old-notes-portal',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+      kind: 'note:decision',
+      sourceTable: 'notes',
+      sourceId: 'old-notes-portal',
+      subject: 'notes portal',
+      text: 'decision: Activity notes portal used components/board/ExpandedTaskCard.tsx and components/board/TaskCardPeekStrip.tsx.',
+      state: 'hot',
+      importance: 1,
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    store.upsertMemoryItem({
+      id: 'current-activity-tab',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+      kind: 'note:decision',
+      sourceTable: 'notes',
+      sourceId: 'current-activity-tab',
+      subject: 'activity tab',
+      text: 'decision: Activity notes now live in components/board/TaskCardNoteLog.tsx.',
+      state: 'warm',
+      importance: 0.6,
+      createdAt: '2026-01-02T00:00:00.000Z',
+    });
+
+    const retrieval = retrieveMemory(store, 'Activity notes portal task card', 2);
+
+    expect(retrieval.results[0]?.id).toBe('current-activity-tab');
+    expect(retrieval.results.find(item => item.id === 'old-notes-portal')?.reference_validation.stale).toBe(true);
+  });
+
+  it('allows historical queries to return stale notes but marks them as stale', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const session = store.createSession({
+      worktreePath: '/repo',
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+    });
+    store.upsertCurrentAppGraph({
+      scopeKey: 'project:/repo',
+      scopeType: 'project',
+      worktreePath: '/repo',
+      files: ['components/board/TaskCardNoteLog.tsx'],
+    });
+    store.upsertMemoryItem({
+      id: 'old-notes-portal-history',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: 'project:/repo',
+      kind: 'note:decision',
+      sourceTable: 'notes',
+      sourceId: 'old-notes-portal-history',
+      subject: 'notes portal',
+      text: 'decision: Previous Activity notes portal used components/board/ExpandedTaskCard.tsx.',
+      state: 'warm',
+      importance: 1,
+      createdAt: '2025-01-01T00:00:00.000Z',
+    });
+
+    const output = recall(store, 'old Activity notes portal');
+
+    expect(output).toContain('Previous Activity notes portal');
+    expect(output).toContain('Stale references: missing components/board/ExpandedTaskCard.tsx');
+    expect(store.getMemoryItem('old-notes-portal-history')?.state).toBe('warm');
+  });
+
   it('keeps returned ranking lexical in shadow semantic mode', () => {
     const db = createTestDb();
     const store = new CortexStore(db);

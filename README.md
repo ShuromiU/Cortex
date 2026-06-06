@@ -18,7 +18,7 @@ Now:
 - command failures and test cycles captured as durable episodes
 - hot/warm/cold decay with reinforcement from actual use
 - default state built from a scored working set, not “all active notes”
-- timestamped note output, fixture-backed retrieval evaluation, and optional semantic shadow/rank retrieval
+- timestamped note output, current-checkout reference validation, fixture-backed retrieval evaluation, and optional semantic shadow/rank retrieval
 
 ## Core Behavior
 
@@ -30,6 +30,8 @@ Now:
 - `cortex_brief(topic)` returns a smaller, agent-friendly subset.
 - `cortex_state` shows current-session load-bearing notes first, then branch snapshots and the scored working set.
 - Note-backed outputs include compact UTC timestamps, for example `Decision [2026-06-06 05:18Z]: [auth] use OIDC`.
+- Cortex tracks a lightweight current app graph for the active scope and validates file/path references extracted from memory.
+- Missing file references demote retrieved memories and render as `Stale references: missing ...`; historical queries can still surface them as history.
 - Branch snapshot summaries prefer session summaries, notes, and file/test/agent activity over raw command-only hook noise.
 - touched and recalled memory stays hot; ignored memory decays out of the default state.
 - resolved notes stay cold and do not trigger hook reflex whispers.
@@ -195,6 +197,7 @@ The wrapper calls `cortex inject-header --quiet` for SessionStart and `dist/tran
 | `cortex_recall` | Retrieve evidence for a topic from memory |
 | `cortex_brief` | Return a smaller topical brief, optionally for an agent |
 | `cortex_suggest_notes` | Suggest load-bearing notes from the current session without writing them |
+| `cortex_validate_memory` | Audit memories against the current checkout without deleting notes |
 | `cortex_engage` | Re-enable Cortex if it was disengaged |
 | `cortex_disengage` | Disable Cortex hooks for the current session |
 | `cortex_summarize` | Force a session summary/checkpoint |
@@ -214,6 +217,7 @@ cortex consolidate
 cortex evaluate
 cortex evaluate --suite quality-suite.json --compare previous-eval.json
 cortex suggest-notes
+cortex validate-memory --topic "Activity notes portal"
 cortex serve
 cortex log read
 cortex log edit
@@ -232,6 +236,8 @@ Cortex stores:
 - `branch_snapshots` and `project_snapshots` for restore points
 - `memory_items` as the canonical retrieval/search layer
 - `memory_item_semantics` for optional summaries, concepts/entities, and JSON-safe embeddings keyed by `memory_items.id`
+- `current_app_graphs` for the current checkout's file inventory by scope
+- `memory_references` for file/path references extracted from memory items
 
 Retrieval is hybrid:
 - FTS over `memory_items`
@@ -239,6 +245,7 @@ Retrieval is hybrid:
 - recency/importance/access reinforcement
 - hot/warm/cold decay
 - temporal intent handling for prompts like `latest`, `old`, `resolved`, and `when`
+- current-checkout reference validation so repo-valid memories beat memories pointing at deleted files or missing plans
 - optional semantic shadow/rank candidates when a semantic provider is configured
 
 ## Reliability Evaluation
@@ -267,10 +274,11 @@ The quality report includes `top1_hit`, `recall_at_3`, `noise_count`, `stale_cou
 Cortex should feel ambient. Let hooks capture activity and let the reflex stay silent unless it has high-confidence prior context.
 
 - Use `cortex_route` when you need the capability map.
-- Use `cortex_recall(topic)` or `cortex_state` only when you explicitly need more context than the reflex surfaced.
+- Use `cortex_recall(topic)` proactively before non-trivial work in familiar areas, recurring bugs, resumed features, or systems with prior decisions; use `cortex_state` when you need the broader working set.
 - Use `cortex_brief(topic)` before dispatching a subagent when topic history matters.
 - Use `cortex_note(decision, alternatives=[...])`, `cortex_note(insight)`, or `cortex_note(blocker)` for load-bearing memory only.
 - Use `cortex_suggest_notes` / `cortex suggest-notes` to review possible load-bearing notes before explicitly saving them.
+- Use `cortex_validate_memory` / `cortex validate-memory --topic ...` when a memory mentions files, plans, or app structure that may have changed.
 - Use `cortex_summarize` at the end of a dense work session so the next one resumes gracefully.
 
 Anti-patterns: don't add startup rituals to agent instructions, don't note routine acknowledgments, don't tell subagents to call `cortex_brief` themselves, don't re-call `cortex_state` multiple times per session, and don't summarize throwaway sessions.
