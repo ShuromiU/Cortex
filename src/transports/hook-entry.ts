@@ -12,7 +12,21 @@ import {
 } from '../capture/hooks.js';
 import { reflectMemory, type ReflexEvent } from '../query/reflex.js';
 import { ensureScopedSession } from '../scope/runtime.js';
-import { configureEngagementPath, readEngagement } from './mcp.js';
+import { configureEngagementPath, readEngagement, writeEngagement } from './mcp.js';
+
+const CORTEX_CONSULTED_KEY = 'cortex_consulted';
+const VISIBILITY_HINT_SURFACED_KEY = 'visibility_hint_surfaced';
+const VISIBILITY_HINT_CONTEXT =
+  'Cortex is available: for resumed/familiar work, call cortex_recall(topic); for broad state, call cortex_state.';
+
+function toPromptHookJson(additionalContext: string): string {
+  return JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'UserPromptSubmit',
+      additionalContext,
+    },
+  });
+}
 
 export type HookAction =
   | 'post'
@@ -86,6 +100,26 @@ function isEnabled(cwd: string, options: HookRuntimeOptions): boolean {
 
   configureEngagementPath(cwd);
   return readEngagement()['enabled'] === 'true';
+}
+
+function renderPromptVisibilityHint(cwd: string): string {
+  configureEngagementPath(cwd);
+  const engagement = readEngagement();
+  if (engagement['enabled'] === 'false') {
+    return '';
+  }
+  if (engagement[CORTEX_CONSULTED_KEY] === 'true') {
+    return '';
+  }
+  if (engagement['state_called'] === 'true') {
+    return '';
+  }
+  if (engagement[VISIBILITY_HINT_SURFACED_KEY] === 'true') {
+    return '';
+  }
+
+  writeEngagement(VISIBILITY_HINT_SURFACED_KEY, 'true');
+  return toPromptHookJson(VISIBILITY_HINT_CONTEXT);
 }
 
 function toolInput(payload: Record<string, unknown>): Record<string, unknown> {
@@ -229,6 +263,10 @@ function reflectFromPayload(
   if (action === 'reflect-prompt') {
     event = 'prompt';
     prompt = firstString(payload['prompt'], payload['message'], payload['user_prompt']);
+    const hint = renderPromptVisibilityHint(cwd);
+    if (hint) {
+      return hint;
+    }
   } else if (action === 'reflect-edit') {
     event = 'edit';
     file = extractFile(input) ?? firstString(payload['file']);
