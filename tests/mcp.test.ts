@@ -1,8 +1,17 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { applySchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
-import { TOOL_DEFINITIONS, handleToolCall, createMcpServer } from '../src/transports/mcp.js';
+import {
+  TOOL_DEFINITIONS,
+  handleToolCall,
+  createMcpServer,
+  configureEngagementPath,
+  readEngagement,
+} from '../src/transports/mcp.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -169,6 +178,15 @@ describe('handleToolCall', () => {
     expect(result).toContain('ambient capture');
     expect(result).toContain('reflex');
     expect(result).toContain('cortex_recall');
+  });
+
+  it('cortex_route marks Cortex as consulted for hook visibility suppression', () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-mcp-cwd-'));
+    configureEngagementPath(cwd);
+
+    handleToolCall(store, 'cortex_route', {}, cwd);
+
+    expect(readEngagement()['cortex_consulted']).toBe('true');
   });
 
   // cortex_state

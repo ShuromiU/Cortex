@@ -6,6 +6,7 @@ import Database from 'better-sqlite3';
 import { applySchema, initializeMeta } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import { handleHookPayload } from '../src/transports/hook-entry.js';
+import { configureEngagementPath, handleToolCall, writeEngagement } from '../src/transports/mcp.js';
 
 function createTestStore(): { store: CortexStore; sessionId: string } {
   const db = new Database(':memory:');
@@ -27,9 +28,20 @@ function createTestStore(): { store: CortexStore; sessionId: string } {
   return { store, sessionId: session.id };
 }
 
+function parseAdditionalContext(raw: string): string {
+  if (!raw) {
+    return '';
+  }
+  const parsed = JSON.parse(raw) as {
+    hookSpecificOutput?: { additionalContext?: string };
+  };
+  return parsed.hookSpecificOutput?.additionalContext ?? '';
+}
+
 describe('handleHookPayload', () => {
-  it('keeps UserPromptSubmit prompt reflex silent even when prompt text matches memory', () => {
+  it('emits prompt visibility guidance without leaking matching memory facts', () => {
     const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-cwd-'));
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-reflex-'));
 
     store.insertNote({
@@ -43,8 +55,72 @@ describe('handleHookPayload', () => {
       store,
       'reflect-prompt',
       JSON.stringify({ prompt: 'Can we implement the living brain reflex?' }),
-      '/repo',
+      cwd,
       { sessionId, stateDir, requireEngagement: false },
+    );
+    const context = parseAdditionalContext(output);
+
+    expect(context).toContain('Cortex is available');
+    expect(context).toContain('cortex_recall(topic)');
+    expect(context).toContain('cortex_state');
+    expect(context).not.toContain('living brain reflex should stay whisper-only');
+  });
+
+  it('emits prompt visibility guidance only once per engagement state', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-cwd-'));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-reflex-'));
+
+    const first = handleHookPayload(
+      store,
+      'reflect-prompt',
+      JSON.stringify({ prompt: 'Resume the dashboard work' }),
+      cwd,
+      { sessionId, stateDir, requireEngagement: false },
+    );
+    const second = handleHookPayload(
+      store,
+      'reflect-prompt',
+      JSON.stringify({ prompt: 'Continue the dashboard work' }),
+      cwd,
+      { sessionId, stateDir, requireEngagement: false },
+    );
+
+    expect(parseAdditionalContext(first)).toContain('Cortex is available');
+    expect(second).toBe('');
+  });
+
+  it('does not emit prompt visibility guidance after Cortex was explicitly consulted', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-cwd-'));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-reflex-'));
+
+    handleToolCall(store, 'cortex_route', {}, cwd);
+
+    const output = handleHookPayload(
+      store,
+      'reflect-prompt',
+      JSON.stringify({ prompt: 'Resume the dashboard work' }),
+      cwd,
+      { sessionId, stateDir, requireEngagement: false },
+    );
+
+    expect(output).toBe('');
+  });
+
+  it('keeps prompt visibility guidance silent when Cortex is disengaged', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-cwd-'));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-reflex-'));
+    configureEngagementPath(cwd);
+    writeEngagement('enabled', 'false');
+
+    const output = handleHookPayload(
+      store,
+      'reflect-prompt',
+      JSON.stringify({ prompt: 'Resume the dashboard work' }),
+      cwd,
+      { sessionId, stateDir },
     );
 
     expect(output).toBe('');
