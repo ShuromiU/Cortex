@@ -6,7 +6,7 @@ Persistent working memory for coding agents.
 - Cortex is now retrieval-first, not transcript-first.
 - Sessions are branch/worktree-aware.
 - `memory_items` is the canonical search/retrieval layer.
-- Default state is a scored working set, not "all active notes".
+- Default state starts with current-session load-bearing notes, then uses the scored working set.
 - Memory decays through `hot`, `warm`, `cold`, `archived`; recalled/touched memory is reinforced.
 
 ## What Matters In This Repo
@@ -37,12 +37,13 @@ Persistent working memory for coding agents.
 - `inject-header --quiet` is wired to SessionStart for ambient capture. It creates a scoped session and flips the engagement file to `enabled=true` without dumping a large header.
 - `cortex reflect` is hook-facing and emits short `additionalContext` only for high-confidence remembered focus shifts; silence is the default.
 - `cortex_route` / `cortex route` are the cold-callable capability map.
-- `cortex_state` should show the current working set, not a full historical dump.
+- `cortex_state` should show current-session load-bearing notes first, then the current working set, not a full historical dump.
 - `cortex_recall` and `cortex_brief` should search notes, snapshots, summaries, and command/episode memory.
 - Branch switches should restore the matching snapshot.
+- Branch snapshot summaries should not be raw command-only hook activity.
 - Stale notes should decay out of the default state unless reinforced by actual retrieval/use.
 - Resolved notes should remain cold even when retrieved, and should not trigger reflex `additionalContext`.
-- Prompt reflex should stay silent for vague continuation prompts unless distinctive terms strongly match memory.
+- Prompt reflex should stay silent for UserPromptSubmit regardless of prompt text.
 
 ## When To Use Cortex
 
@@ -52,7 +53,7 @@ Available tools:
 
 - `cortex_route` — compact capability map and routing guidance.
 - `cortex_engage` — re-enable Cortex capture after `cortex_disengage`.
-- `cortex_state` — explicit working set: top-scored notes, decisions, branch snapshot, last-session tail.
+- `cortex_state` — explicit state: current-session load-bearing notes, top-scored notes, branch snapshot, last-session tail.
 - `cortex_note(kind, content, ...)` — durable memory. `kind` is one of `decision` (include `alternatives`), `insight`, `blocker`, `intent`, `focus`. Reserve for load-bearing items; skip routine progress.
 - `cortex_recall(topic)` — explicit search over notes/snapshots/summaries/episodes when prior work may matter.
 - `cortex_brief(topic)` — compact topical context to paste into a subagent prompt. Call it yourself; don't ask subagents to call it.

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { applySchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
+import { handleCmdEvent } from '../src/capture/hooks.js';
 import { buildHeader, buildFullState } from '../src/query/state.js';
 import { ensureScopedSession } from '../src/scope/runtime.js';
 import { deriveBranchScopeKey } from '../src/scope/keys.js';
@@ -68,6 +69,30 @@ describe('scope runtime', () => {
     expect(snapshot?.recent_files).toContain('src/payments.ts');
     expect(snapshot?.intents[0]).toContain('Finish the payments branch flow');
     expect(snapshot?.blockers[0]).toContain('Webhook signature mismatch');
+  });
+
+  it('does not use command-only activity as the branch snapshot summary', () => {
+    const store = new CortexStore(createTestDb());
+    const payments = branchScope('feature/payments');
+
+    const session = ensureScopedSession(store, '/repo', {
+      resolveScope: () => payments,
+    });
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'intent',
+      subject: 'payments',
+      content: 'Resume Stripe payment intent refactor',
+    });
+
+    handleCmdEvent(store, session.id, {});
+    handleCmdEvent(store, session.id, {});
+
+    const snapshot = store.getBranchSnapshot(payments.scopeKey);
+    expect(snapshot).toBeDefined();
+    expect(snapshot?.summary).toContain('Resume Stripe payment intent refactor');
+    expect(snapshot?.summary).not.toContain('Command (cmd): exit ?');
+    expect(snapshot?.summary).not.toContain('Command (git): exit ?');
   });
 
   it('restores the matching branch state without leaking notes from another branch', () => {

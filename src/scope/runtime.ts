@@ -47,8 +47,9 @@ function summarizeScope(store: CortexStore, scopeKey: string): string {
 
   for (const session of scopedSessions) {
     const compressed = consolidateLevel1(store, session.id);
-    if (compressed.length > 0) {
-      return renderCompressed(compressed);
+    const nonCommandEvents = compressed.filter(event => event.type !== 'cmd');
+    if (nonCommandEvents.length > 0) {
+      return renderCompressed(nonCommandEvents);
     }
   }
 

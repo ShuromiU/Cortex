@@ -132,7 +132,7 @@ describe('reflectMemory', () => {
     expect(result).toBe('');
   });
 
-  it('surfaces prompt memory when the prompt includes distinctive matching terms', () => {
+  it('stays silent for prompt text even when distinctive terms match memory', () => {
     const { store, sessionId } = createTestStore();
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-'));
 
@@ -150,8 +150,7 @@ describe('reflectMemory', () => {
       stateDir,
     });
 
-    expect(result).not.toBe('');
-    expect(parseHookJson(result)).toContain('pulse all-project hub foundation fix');
+    expect(result).toBe('');
   });
 
   it('does not surface resolved blocker notes for matching command anchors', () => {

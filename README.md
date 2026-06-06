@@ -27,9 +27,11 @@ Now:
 - `cortex_route` / `cortex route` provide the cold-callable capability map.
 - `cortex_recall(topic)` searches notes, summaries, snapshots, and command/episode memory.
 - `cortex_brief(topic)` returns a smaller, agent-friendly subset.
+- `cortex_state` shows current-session load-bearing notes first, then branch snapshots and the scored working set.
+- Branch snapshot summaries prefer session summaries, notes, and file/test/agent activity over raw command-only hook noise.
 - touched and recalled memory stays hot; ignored memory decays out of the default state.
 - resolved notes stay cold and do not trigger hook reflex whispers.
-- vague prompt hooks stay silent unless the prompt includes distinctive matching terms.
+- UserPromptSubmit prompt hooks stay silent; edit and command reflexes still require high-confidence prior context.
 
 ## Install
 
@@ -185,7 +187,7 @@ The wrapper calls `cortex inject-header --quiet` for SessionStart and `dist/tran
 | Tool | Purpose |
 |------|---------|
 | `cortex_route` | Explain ambient memory behavior and route to the right Cortex tool |
-| `cortex_state` | Return the current scored working set |
+| `cortex_state` | Return current-session notes first, then the scored working set |
 | `cortex_note` | Record an `insight`, `decision`, `intent`, `blocker`, or `focus` |
 | `cortex_recall` | Retrieve evidence for a topic from memory |
 | `cortex_brief` | Return a smaller topical brief, optionally for an agent |

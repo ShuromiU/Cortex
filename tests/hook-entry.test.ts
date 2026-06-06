@@ -28,7 +28,7 @@ function createTestStore(): { store: CortexStore; sessionId: string } {
 }
 
 describe('handleHookPayload', () => {
-  it('emits prompt reflex additionalContext from UserPromptSubmit JSON', () => {
+  it('keeps UserPromptSubmit prompt reflex silent even when prompt text matches memory', () => {
     const { store, sessionId } = createTestStore();
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-reflex-'));
 
@@ -47,8 +47,7 @@ describe('handleHookPayload', () => {
       { sessionId, stateDir, requireEngagement: false },
     );
 
-    expect(output).toContain('"additionalContext"');
-    expect(output).toContain('whisper-only');
+    expect(output).toBe('');
   });
 
   it('logs shell command payloads through PostToolUse capture', () => {

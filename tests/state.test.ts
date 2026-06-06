@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { applySchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
@@ -199,12 +199,14 @@ describe('buildFullState - notes and events', () => {
 
   it('renders active notes grouped by kind in correct order', () => {
     const store = makeStore();
-    const session = store.createSession();
+    const session = store.createSession({ focus: 'prior work' });
 
     store.insertNote({ sessionId: session.id, kind: 'insight', content: 'CSS vars are useful' });
     store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'auth', content: 'use JWT' });
     store.insertNote({ sessionId: session.id, kind: 'intent', subject: 'refactor', content: 'extract helpers' });
     store.insertNote({ sessionId: session.id, kind: 'blocker', subject: 'deploy', content: 'missing env var' });
+    store.endSession(session.id);
+    store.createSession({ focus: 'current work' });
 
     const state = buildFullState(store);
     const intentIdx = state.indexOf('Intents:');
@@ -246,6 +248,84 @@ describe('buildFullState - notes and events', () => {
     const state = buildFullState(store);
     expect(state).toContain('use JWT');
     expect(state).not.toContain('use sessions');
+  });
+
+  it('prioritizes current-session notes before older broad working context without duplicating them', () => {
+    vi.useFakeTimers();
+    try {
+      const store = makeStore();
+
+      vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+      const older = store.createSession({
+        focus: 'repo-b',
+        scopeType: 'project',
+        scopeKey: 'project:default',
+      });
+      for (let i = 0; i < 8; i++) {
+        const note = store.insertNote({
+          sessionId: older.id,
+          kind: 'intent',
+          subject: `repo-b-${i}`,
+          content: `older stored Repo-B intent ${i}`,
+        });
+        const item = store.getMemoryItemBySource('notes', note.id)!;
+        store.upsertMemoryItem({
+          id: item.id,
+          sessionId: item.session_id,
+          scopeType: item.scope_type,
+          scopeKey: item.scope_key,
+          kind: item.kind,
+          sourceTable: item.source_table,
+          sourceId: item.source_id,
+          subject: item.subject,
+          text: item.text,
+          state: 'pinned',
+          importance: 1,
+          accessCount: item.access_count,
+          lastAccessedAt: item.last_accessed_at,
+          createdAt: item.created_at,
+        });
+      }
+      store.endSession(older.id);
+
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      const current = store.createSession({
+        focus: 'landing',
+        scopeType: 'branch',
+        scopeKey: 'branch:landing-proof',
+        branchRef: 'landing-proof',
+      });
+      store.upsertBranchSnapshot({
+        scopeKey: 'branch:landing-proof',
+        branchRef: 'landing-proof',
+        focus: 'old Repo-B cleanup',
+        summary: 'Older Repo-B branch snapshot should stay below current notes.',
+        intents: ['older stored Repo-B snapshot intent'],
+        updatedAt: '2025-12-31T00:00:00.000Z',
+      });
+
+      vi.setSystemTime(new Date('2026-01-01T00:00:01.000Z'));
+      store.insertNote({
+        sessionId: current.id,
+        kind: 'decision',
+        subject: 'landing',
+        content: 'landing proof cleanup pushed',
+      });
+
+      const state = buildFullState(store);
+      const currentIdx = state.indexOf('landing proof cleanup pushed');
+      const snapshotIdx = state.indexOf('Older Repo-B branch snapshot');
+      const olderIntentIdx = state.indexOf('older stored Repo-B intent 0');
+
+      expect(currentIdx).toBeGreaterThanOrEqual(0);
+      expect(snapshotIdx).toBeGreaterThanOrEqual(0);
+      expect(olderIntentIdx).toBeGreaterThanOrEqual(0);
+      expect(currentIdx).toBeLessThan(snapshotIdx);
+      expect(currentIdx).toBeLessThan(olderIntentIdx);
+      expect(state.match(/landing proof cleanup pushed/g)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

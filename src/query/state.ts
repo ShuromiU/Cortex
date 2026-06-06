@@ -5,6 +5,14 @@ import { deriveProjectScopeKey } from '../scope/keys.js';
 import { getPreferredScope } from './scope.js';
 import { renderMemoryLine, renderMemorySnippet } from './render.js';
 
+const LOAD_BEARING_NOTE_KINDS = new Set([
+  'intent',
+  'focus',
+  'decision',
+  'blocker',
+  'insight',
+]);
+
 export function formatTokens(n: number): string {
   if (n >= 1000) {
     const k = n / 1000;
@@ -228,6 +236,37 @@ function renderWorkingNotes(items: ParsedMemoryItem[]): string[] {
   return sections;
 }
 
+function noteDedupeKey(item: ParsedMemoryItem): string {
+  return item.source_table === 'notes' && item.source_id
+    ? `notes:${item.source_id}`
+    : item.id;
+}
+
+function resolveCurrentSessionNotes(
+  store: CortexStore,
+  sessionId: string | null | undefined,
+): ParsedMemoryItem[] {
+  if (!sessionId) {
+    return [];
+  }
+
+  return store.getActiveNotes(sessionId)
+    .filter(note => LOAD_BEARING_NOTE_KINDS.has(note.kind))
+    .map(note => store.getMemoryItemBySource('notes', note.id))
+    .filter((item): item is ParsedMemoryItem => item !== undefined)
+    .filter(item => item.state !== 'archived' && item.state !== 'cold')
+    .sort((left, right) => right.created_at.localeCompare(left.created_at))
+    .slice(0, 5);
+}
+
+function renderCurrentSessionNotes(items: ParsedMemoryItem[]): string | null {
+  if (items.length === 0) {
+    return null;
+  }
+
+  return `Current session:\n${items.map(renderNoteBullet).join('\n')}`;
+}
+
 function renderEvidenceSection(items: ParsedMemoryItem[]): string | null {
   const evidence = items
     .filter(item =>
@@ -419,7 +458,19 @@ export function buildFullState(store: CortexStore): string {
   const sections: string[] = [];
   const preferredScope = getPreferredScope(store);
   const workingSet = resolveWorkingSet(store, 12);
-  const workingNotes = workingSet.filter(item => item.kind.startsWith('note:'));
+  const currentSessionNotes = resolveCurrentSessionNotes(
+    store,
+    preferredScope?.session.id,
+  );
+  const currentSessionNoteKeys = new Set(currentSessionNotes.map(noteDedupeKey));
+  const workingNotes = workingSet.filter(item =>
+    item.kind.startsWith('note:') && !currentSessionNoteKeys.has(noteDedupeKey(item)),
+  );
+
+  const currentSessionSection = renderCurrentSessionNotes(currentSessionNotes);
+  if (currentSessionSection) {
+    sections.push(currentSessionSection);
+  }
 
   if (preferredScope?.scopeKey) {
     const snapshot = store.getBranchSnapshot(preferredScope.scopeKey);
