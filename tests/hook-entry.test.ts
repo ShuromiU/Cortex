@@ -39,7 +39,7 @@ function parseAdditionalContext(raw: string): string {
 }
 
 describe('handleHookPayload', () => {
-  it('emits prompt visibility guidance without leaking matching memory facts', () => {
+  it('emits prompt consult gate without leaking matching memory facts', () => {
     const { store, sessionId } = createTestStore();
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-cwd-'));
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-reflex-'));
@@ -54,19 +54,19 @@ describe('handleHookPayload', () => {
     const output = handleHookPayload(
       store,
       'reflect-prompt',
-      JSON.stringify({ prompt: 'Can we implement the living brain reflex?' }),
+      JSON.stringify({ prompt: 'Resume the living brain reflex implementation' }),
       cwd,
       { sessionId, stateDir, requireEngagement: false },
     );
     const context = parseAdditionalContext(output);
 
-    expect(context).toContain('Cortex is available');
+    expect(context).toContain('Cortex consult required');
     expect(context).toContain('cortex_recall(topic)');
     expect(context).toContain('cortex_state');
     expect(context).not.toContain('living brain reflex should stay whisper-only');
   });
 
-  it('emits prompt visibility guidance only once per engagement state', () => {
+  it('repeats prompt consult gate until Cortex is consulted', () => {
     const { store, sessionId } = createTestStore();
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-cwd-'));
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-reflex-'));
@@ -86,11 +86,39 @@ describe('handleHookPayload', () => {
       { sessionId, stateDir, requireEngagement: false },
     );
 
-    expect(parseAdditionalContext(first)).toContain('Cortex is available');
-    expect(second).toBe('');
+    expect(parseAdditionalContext(first)).toContain('Cortex consult required');
+    expect(parseAdditionalContext(second)).toContain('Cortex consult required');
   });
 
-  it('does not emit prompt visibility guidance after Cortex was explicitly consulted', () => {
+  it('repeats consult gate before shell commands when a prompt gate was ignored', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-cwd-'));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-reflex-'));
+
+    handleHookPayload(
+      store,
+      'reflect-prompt',
+      JSON.stringify({ prompt: 'Continue the dashboard fix' }),
+      cwd,
+      { sessionId, stateDir, requireEngagement: false },
+    );
+
+    const output = handleHookPayload(
+      store,
+      'reflect-pre',
+      JSON.stringify({
+        tool_name: 'functions.shell_command',
+        tool_input: { command: 'npm run test' },
+      }),
+      cwd,
+      { sessionId, stateDir, requireEngagement: false },
+    );
+
+    expect(parseAdditionalContext(output)).toContain('Cortex consult required');
+    expect(parseAdditionalContext(output)).toContain('cortex_recall(topic)');
+  });
+
+  it('does not emit prompt consult gate after Cortex was explicitly consulted', () => {
     const { store, sessionId } = createTestStore();
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-cwd-'));
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-reflex-'));
@@ -108,7 +136,7 @@ describe('handleHookPayload', () => {
     expect(output).toBe('');
   });
 
-  it('keeps prompt visibility guidance silent when Cortex is disengaged', () => {
+  it('keeps prompt consult gate silent when Cortex is disengaged', () => {
     const { store, sessionId } = createTestStore();
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-cwd-'));
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-reflex-'));
@@ -121,6 +149,22 @@ describe('handleHookPayload', () => {
       JSON.stringify({ prompt: 'Resume the dashboard work' }),
       cwd,
       { sessionId, stateDir },
+    );
+
+    expect(output).toBe('');
+  });
+
+  it('keeps trivial new-work prompts silent when no scope history exists', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-cwd-'));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-reflex-'));
+
+    const output = handleHookPayload(
+      store,
+      'reflect-prompt',
+      JSON.stringify({ prompt: 'What is the current time?' }),
+      cwd,
+      { sessionId, stateDir, requireEngagement: false },
     );
 
     expect(output).toBe('');

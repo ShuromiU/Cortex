@@ -15,14 +15,18 @@ import { ensureScopedSession } from '../scope/runtime.js';
 import { configureEngagementPath, readEngagement, writeEngagement } from './mcp.js';
 
 const CORTEX_CONSULTED_KEY = 'cortex_consulted';
-const VISIBILITY_HINT_SURFACED_KEY = 'visibility_hint_surfaced';
-const VISIBILITY_HINT_CONTEXT =
-  'Cortex is available: for resumed/familiar work, call cortex_recall(topic); for broad state, call cortex_state.';
+const CONSULT_GATE_REQUIRED_KEY = 'consult_gate_required';
+const CONSULT_GATE_REASON_KEY = 'consult_gate_reason';
+const CONSULT_GATE_SURFACED_COUNT_KEY = 'consult_gate_surfaced_count';
+const CONSULT_GATE_CONTEXT =
+  'Cortex consult required: this looks like memory-relevant work. Call cortex_recall(topic) before planning or tool work; use cortex_state for broad state or cortex_route for the capability map. Use cortex_disengage only for throwaway work.';
+const MEMORY_RELEVANT_PROMPT_PATTERN =
+  /\b(resume|resumed|resuming|continue|continuing|again|earlier|previous|prior|follow[- ]?up|pick up|fix|debug|bug|error|failure|failing|broken|regression|implement|plan|multi[- ]?step|decision|remember|memory|refactor)\b/i;
 
-function toPromptHookJson(additionalContext: string): string {
+function toHookJson(hookEventName: 'UserPromptSubmit' | 'PreToolUse', additionalContext: string): string {
   return JSON.stringify({
     hookSpecificOutput: {
-      hookEventName: 'UserPromptSubmit',
+      hookEventName,
       additionalContext,
     },
   });
@@ -102,7 +106,52 @@ function isEnabled(cwd: string, options: HookRuntimeOptions): boolean {
   return readEngagement()['enabled'] === 'true';
 }
 
-function renderPromptVisibilityHint(cwd: string): string {
+function hasPriorScopeSessions(store: CortexStore): boolean {
+  const session = store.getCurrentSession() ?? store.getRecentSessions(1)[0];
+  if (!session) {
+    return false;
+  }
+
+  const scopeCount = session.scope_key
+    ? store.getSessionCountByScope(session.scope_key)
+    : store.getSessionCount();
+  return scopeCount > 1;
+}
+
+function promptGateReason(prompt: string | undefined): string | undefined {
+  if (!prompt) {
+    return undefined;
+  }
+  return MEMORY_RELEVANT_PROMPT_PATTERN.test(prompt)
+    ? 'prompt indicates resumed, debugging, implementation, or decision-heavy work'
+    : undefined;
+}
+
+function isGateableToolName(name: string): boolean {
+  return (
+    name === 'Bash' ||
+    name === 'shell_command' ||
+    name.endsWith('.shell_command') ||
+    name === 'Edit' ||
+    name === 'Write' ||
+    name === 'apply_patch' ||
+    name.endsWith('.apply_patch') ||
+    name === 'Agent'
+  );
+}
+
+function incrementConsultGateCount(engagement: Record<string, string>): void {
+  const surfaced = Number.parseInt(engagement[CONSULT_GATE_SURFACED_COUNT_KEY] ?? '0', 10);
+  const next = Number.isFinite(surfaced) ? surfaced + 1 : 1;
+  writeEngagement(CONSULT_GATE_SURFACED_COUNT_KEY, String(next));
+}
+
+function renderConsultGate(
+  store: CortexStore,
+  cwd: string,
+  hookEventName: 'UserPromptSubmit' | 'PreToolUse',
+  reason: string | undefined,
+): string {
   configureEngagementPath(cwd);
   const engagement = readEngagement();
   if (engagement['enabled'] === 'false') {
@@ -114,12 +163,21 @@ function renderPromptVisibilityHint(cwd: string): string {
   if (engagement['state_called'] === 'true') {
     return '';
   }
-  if (engagement[VISIBILITY_HINT_SURFACED_KEY] === 'true') {
+
+  const existingReason = engagement[CONSULT_GATE_REQUIRED_KEY] === 'true'
+    ? engagement[CONSULT_GATE_REASON_KEY]
+    : undefined;
+  const resolvedReason = existingReason ?? reason ?? (
+    hasPriorScopeSessions(store) ? 'current scope has prior Cortex sessions' : undefined
+  );
+  if (!resolvedReason) {
     return '';
   }
 
-  writeEngagement(VISIBILITY_HINT_SURFACED_KEY, 'true');
-  return toPromptHookJson(VISIBILITY_HINT_CONTEXT);
+  writeEngagement(CONSULT_GATE_REQUIRED_KEY, 'true');
+  writeEngagement(CONSULT_GATE_REASON_KEY, resolvedReason);
+  incrementConsultGateCount(engagement);
+  return toHookJson(hookEventName, CONSULT_GATE_CONTEXT);
 }
 
 function toolInput(payload: Record<string, unknown>): Record<string, unknown> {
@@ -263,9 +321,9 @@ function reflectFromPayload(
   if (action === 'reflect-prompt') {
     event = 'prompt';
     prompt = firstString(payload['prompt'], payload['message'], payload['user_prompt']);
-    const hint = renderPromptVisibilityHint(cwd);
-    if (hint) {
-      return hint;
+    const gate = renderConsultGate(store, cwd, 'UserPromptSubmit', promptGateReason(prompt));
+    if (gate) {
+      return gate;
     }
   } else if (action === 'reflect-edit') {
     event = 'edit';
@@ -278,6 +336,12 @@ function reflectFromPayload(
     desc = firstString(input['description'], input['desc'], payload['desc']);
   } else {
     const name = toolName(payload);
+    if (isGateableToolName(name)) {
+      const gate = renderConsultGate(store, cwd, 'PreToolUse', undefined);
+      if (gate) {
+        return gate;
+      }
+    }
     if (name === 'Bash' || name === 'shell_command' || name.endsWith('.shell_command')) {
       event = 'cmd';
       cmd = extractCommand(input);

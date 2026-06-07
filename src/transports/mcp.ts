@@ -26,9 +26,11 @@ import { validateMemory } from '../query/validate-memory.js';
 
 let engagementPath: string | null = null;
 const CORTEX_CONSULTED_KEY = 'cortex_consulted';
+const CONSULT_GATE_REQUIRED_KEY = 'consult_gate_required';
 
 function markCortexConsulted(): void {
   writeEngagement(CORTEX_CONSULTED_KEY, 'true');
+  writeEngagement(CONSULT_GATE_REQUIRED_KEY, 'false');
 }
 
 export function deriveEngagementPath(dir: string): string {
@@ -358,6 +360,9 @@ export function handleToolCall(
       ensureScopedSession(store, cwd);
       refreshCurrentGraphQuietly(store, cwd);
       const topic = args['topic'] as string | undefined;
+      if (topic) {
+        markCortexConsulted();
+      }
       return JSON.stringify(validateMemory(store, topic), null, 2);
     }
 

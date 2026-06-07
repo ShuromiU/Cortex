@@ -39,6 +39,7 @@ Persistent working memory for coding agents.
 - `src/transports/cli.ts` — `inject-header`, `route`, `reflect`, CLI logging, evaluation
 - `src/transports/hook-entry.ts` — JSON hook bridge for Codex/Claude wrappers
 - `src/transports/mcp.ts` — MCP tools used by Claude
+- `~/.codex/AGENTS.md` — global Codex guidance that must stay aligned with Cortex consult policy for new projects outside this repo
 
 ## Expected Behavior
 - `inject-header --quiet` is wired to SessionStart for ambient capture. It creates a scoped session and flips the engagement file to `enabled=true` without dumping a large header.
@@ -55,11 +56,12 @@ Persistent working memory for coding agents.
 - Branch snapshot summaries and recent-session tails should not be raw command-only hook activity.
 - Stale notes should decay out of the default state unless reinforced by actual retrieval/use.
 - Resolved notes should remain cold even when retrieved, and should not trigger reflex `additionalContext`.
-- Prompt hooks may emit a once-per-session route-level Cortex hint, but prompt reflex should not inject memory facts from UserPromptSubmit text.
+- Prompt and PreToolUse hooks repeat a fact-silent Cortex consult gate for memory-relevant work until route/state/recall/brief/engage or topic-based validate-memory is called.
+- Prompt reflex should not inject memory facts from UserPromptSubmit text.
 
 ## When To Use Cortex
 
-**Cortex is ambient.** The system manages capture and short reflex whispers. Do not add model-side rituals such as "always call `cortex_state` first"; use explicit tools only when the current task needs more memory than the ambient whisper provides.
+**Cortex is ambient for trivial new work.** For non-trivial familiar work, recurring bugs, resumed features, and systems with prior decisions, consult Cortex before planning or tool use. This is not an always-call-`cortex_state` ritual: prefer `cortex_recall(topic)` for a known area, `cortex_state` for broad resumptions, and `cortex_route` when you need the capability map.
 
 Available tools:
 
@@ -68,7 +70,7 @@ Available tools:
 - `cortex_state` — explicit state: current-session load-bearing notes, top-scored notes, branch snapshot, last-session tail; empty state returns next-step guidance.
 - `cortex_note(kind, content, ...)` — durable memory. `kind` is one of `decision` (include `alternatives`), `insight`, `blocker`, `intent`, `focus`. Reserve for load-bearing items; skip routine progress.
 - `cortex_suggest_notes` — review proposed load-bearing notes from the current session without writing them.
-- `cortex_validate_memory(topic?)` — audit retrieved or recent memories against the current checkout without deleting notes.
+- `cortex_validate_memory(topic?)` — audit retrieved or recent memories against the current checkout without deleting notes. A topic-based call counts as Cortex consultation for hook gate suppression.
 - `cortex_recall(topic)` — explicit search over notes/snapshots/summaries/episodes when prior work may matter; use proactively for familiar non-trivial areas, recurring bugs, resumed features, and systems with prior decisions.
 - `cortex_brief(topic)` — compact topical context to paste into a subagent prompt. Call it yourself; don't ask subagents to call it.
 - `cortex_summarize` — checkpoint a dense session so the next one resumes gracefully.

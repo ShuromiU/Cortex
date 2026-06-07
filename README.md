@@ -36,7 +36,8 @@ Now:
 - Branch snapshot summaries and recent-session tails prefer notes and file/test/agent activity over raw command-only hook noise.
 - touched and recalled memory stays hot; ignored memory decays out of the default state.
 - resolved notes stay cold and do not trigger hook reflex whispers.
-- UserPromptSubmit prompt hooks may emit a once-per-session route-level Cortex hint, but do not inject memory facts from prompt text; edit and command reflexes still require high-confidence prior context.
+- UserPromptSubmit and PreToolUse hooks repeat a fact-silent Cortex consult gate for memory-relevant work until `cortex_route`, `cortex_recall(topic)`, `cortex_state`, `cortex_brief`, `cortex_engage`, or topic-based `cortex_validate_memory` is called.
+- Prompt hooks do not inject memory facts from prompt text; edit and command reflexes still require high-confidence prior context.
 - Optional semantic retrieval is controlled by `CORTEX_SEMANTIC_MODE=off|shadow|rank`; default is `off`.
 
 ## Install
@@ -186,7 +187,9 @@ command = 'cmd.exe /d /s /c call "C:/Users/dev/.codex/cortex-hooks/cortex-hook.c
 timeout = 15
 ```
 
-The wrapper calls `cortex inject-header --quiet` for SessionStart and `dist/transports/hook-entry.js` for hook JSON parsing. If Codex asks to trust the new hook entries, approve them through Codex's normal trusted-hash flow.
+The wrapper calls `cortex inject-header --quiet` for SessionStart and `dist/transports/hook-entry.js` for hook JSON parsing. The hook bridge owns the consult gate policy; the wrapper should stay a thin passthrough. If Codex asks to trust the new hook entries, approve them through Codex's normal trusted-hash flow.
+
+For new projects, keep the global `~/.codex/AGENTS.md` Cortex section aligned with this consult policy. Codex loads that global guidance outside this repo, while the global hooks above enforce the same fact-silent gate for Cortex-enabled workspaces.
 
 ## MCP Tools
 
@@ -272,7 +275,7 @@ The quality report includes `top1_hit`, `recall_at_3`, `noise_count`, `stale_cou
 
 ## Recommended Usage
 
-Cortex should feel ambient. Let hooks capture activity and let the reflex stay silent unless it has high-confidence prior context.
+Cortex should feel ambient for trivial new work, but non-trivial familiar or resumed work should consult Cortex before planning or tool use. Hooks repeat a short consult gate for memory-relevant work until an explicit consultation tool is called.
 
 - Use `cortex_route` when you need the capability map.
 - Use `cortex_recall(topic)` proactively before non-trivial work in familiar areas, recurring bugs, resumed features, or systems with prior decisions; use `cortex_state` when you need the broader working set.

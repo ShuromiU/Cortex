@@ -2,8 +2,8 @@
 
 ## Working Rules
 
-- Cortex is ambient memory. SessionStart quietly enables capture, and the reflex may surface short prior context without a model ritual.
-- Use `cortex_route` when you need the Cortex capability map. Use `cortex_recall` proactively before non-trivial work in familiar areas, recurring bugs, resumed features, or systems with prior decisions. Use `cortex_state` when you need the broader working set, and `cortex_brief` before delegation when topic history matters.
+- Cortex is ambient memory. SessionStart quietly enables capture, and the reflex may surface short prior context without a model ritual for trivial new work.
+- Consult Cortex before non-trivial familiar or resumed work, recurring bugs, app/debugging sessions, or systems with prior decisions. Use `cortex_recall` for a known topic, `cortex_state` for the broader working set, `cortex_route` for the capability map, and `cortex_brief` before delegation when topic history matters.
 - Use `cortex_validate_memory` when retrieved notes mention files, plans, or app structure that may be stale; repo truth beats memory.
 - Write `cortex_note` entries for real decisions, blockers, and non-obvious discoveries.
 

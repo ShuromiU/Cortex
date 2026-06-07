@@ -127,19 +127,19 @@ function renderUsagePolicy(mode: UsagePolicyMode): string[] {
     case 'fresh':
       return [
         'Cortex is ambient: capture is on after SessionStart, and reflex whispers only when prior context is high-confidence.',
-        'Use cortex_route for memory capabilities; keep cortex_note for durable decisions, blockers, and non-obvious discoveries.',
+        'Consult Cortex before non-trivial familiar or resumed work: use cortex_recall(topic), cortex_state for broad state, or cortex_route for memory capabilities.',
       ];
 
     case 'resume':
       return [
         'Cortex is ambient: prior context may surface automatically as short reflex whispers on focus shifts.',
-        'Use cortex_recall(topic) proactively before non-trivial familiar work; use cortex_state for broad resumptions and cortex_brief before delegation.',
+        'Consult Cortex before non-trivial familiar or resumed work: use cortex_recall(topic) before planning or tool work, cortex_state for broad resumptions, and cortex_brief before delegation.',
       ];
 
     case 'selective':
       return [
-        'Cortex is ambient: no startup ritual is required, and silence is normal when no high-confidence memory matches.',
-        'Use cortex_route for help, cortex_recall(topic) when prior work may matter, and cortex_note for durable decisions, blockers, and insights.',
+        'Cortex is ambient: trivial new work can proceed quietly, and silence is normal when no high-confidence memory matches.',
+        'Consult Cortex before non-trivial familiar or resumed work: use cortex_route for help, cortex_recall(topic) when prior work may matter, and cortex_note for durable decisions, blockers, and insights.',
       ];
   }
 

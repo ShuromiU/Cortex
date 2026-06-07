@@ -194,6 +194,38 @@ describe('handleToolCall', () => {
     expect(readEngagement()['cortex_consulted']).toBe('true');
   });
 
+  it('consultation tools mark Cortex as consulted for hook gate suppression', () => {
+    for (const [toolName, args] of [
+      ['cortex_route', {}],
+      ['cortex_state', {}],
+      ['cortex_recall', { topic: 'testing' }],
+      ['cortex_brief', { topic: 'testing' }],
+      ['cortex_engage', {}],
+      ['cortex_validate_memory', { topic: 'testing' }],
+    ] as const) {
+      cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-mcp-cwd-'));
+
+      callTool(toolName, args);
+
+      expect(readEngagement()['cortex_consulted']).toBe('true');
+    }
+  });
+
+  it('non-consultation tools do not mark Cortex as consulted', () => {
+    for (const [toolName, args] of [
+      ['cortex_note', { kind: 'insight', content: 'Routine note check' }],
+      ['cortex_suggest_notes', {}],
+      ['cortex_summarize', {}],
+      ['cortex_validate_memory', {}],
+    ] as const) {
+      cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-mcp-cwd-'));
+
+      callTool(toolName, args);
+
+      expect(readEngagement()['cortex_consulted']).toBeUndefined();
+    }
+  });
+
   // cortex_state
 
   it('cortex_state returns a string (cognitive state)', () => {

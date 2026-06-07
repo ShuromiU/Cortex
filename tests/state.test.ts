@@ -37,6 +37,7 @@ describe('buildHeader - empty', () => {
     expect(header).toContain('Cortex: ambient memory active | no prior sessions yet');
     expect(header).toContain('Cortex is ambient');
     expect(header).toContain('cortex_route');
+    expect(header).toContain('Consult Cortex before non-trivial familiar or resumed work');
     expect(header).not.toContain('Start with cortex_state');
   });
 });
@@ -59,6 +60,7 @@ describe('buildHeader - provisional (unconsolidated sessions)', () => {
     expect(header).toContain('1 session');
     expect(header).toContain('Cortex is ambient');
     expect(header).toContain('cortex_recall(topic)');
+    expect(header).toContain('Consult Cortex before non-trivial familiar or resumed work');
     expect(header).not.toContain('Start with cortex_state');
   });
 
