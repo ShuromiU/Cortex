@@ -57,11 +57,52 @@ export function formatMemoryTimestamp(createdAt: string): string | null {
   return `${parsed.toISOString().slice(0, 16).replace('T', ' ')}Z`;
 }
 
-function renderReferenceLabel(item: ParsedMemoryItem): string {
-  const validation = (item as ParsedMemoryItem & {
+function getReferenceValidation(
+  item: ParsedMemoryItem,
+): MemoryReferenceValidation | undefined {
+  return (item as ParsedMemoryItem & {
     reference_validation?: MemoryReferenceValidation;
   }).reference_validation;
+}
+
+function renderReferenceLabel(item: ParsedMemoryItem): string {
+  const validation = getReferenceValidation(item);
   return validation?.label ? ` [${validation.label}]` : '';
+}
+
+/** Compact relative age: 'today', 'Nd ago', or the ISO date past 30 days. */
+export function formatAgeLabel(createdAt: string): string | null {
+  const parsed = Date.parse(createdAt);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  const days = Math.floor((Date.now() - parsed) / (24 * 60 * 60 * 1000));
+  if (days <= 0) {
+    return 'today';
+  }
+  if (days <= 30) {
+    return `${days}d ago`;
+  }
+  return new Date(parsed).toISOString().slice(0, 10);
+}
+
+/** One-word trust summary of an item's file references. */
+export function describeValidity(item: ParsedMemoryItem): string {
+  const validation = getReferenceValidation(item);
+  if (!validation || validation.references.length === 0) {
+    return 'no file refs';
+  }
+  if (validation.missing > 0) {
+    return 'stale refs';
+  }
+  if (validation.moved > 0) {
+    return 'refs moved';
+  }
+  if (validation.exists > 0) {
+    return 'refs OK';
+  }
+  return 'refs unverified';
 }
 
 export function renderMemoryLine(item: ParsedMemoryItem, maxLines = 3): string {

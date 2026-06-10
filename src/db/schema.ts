@@ -8,7 +8,7 @@ import {
 } from '../memory/items.js';
 import { extractMemoryReferences } from '../memory/references.js';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const CORE_TABLES = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -186,6 +186,18 @@ CREATE TABLE IF NOT EXISTS memory_references (
 );
 `;
 
+const V4_TABLES = `
+CREATE TABLE IF NOT EXISTS file_renames (
+  id          TEXT PRIMARY KEY,
+  scope_key   TEXT NOT NULL,
+  old_path    TEXT NOT NULL,
+  new_path    TEXT NOT NULL,
+  head_oid    TEXT,
+  detected_at TEXT NOT NULL,
+  UNIQUE (scope_key, old_path)
+);
+`;
+
 const V2_FTS = `
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts
 USING fts5(
@@ -235,6 +247,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_command_runs_event ON command_runs(event_i
 CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_memory_items_scope ON memory_items(scope_key, state, created_at);
 CREATE INDEX IF NOT EXISTS idx_memory_items_kind ON memory_items(kind, state);
+CREATE INDEX IF NOT EXISTS idx_memory_items_state_created ON memory_items(state, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_file_renames_scope_old ON file_renames(scope_key, old_path);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_source ON memory_items(source_table, source_id)
   WHERE source_table IS NOT NULL AND source_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memory_item_semantics_hash ON memory_item_semantics(source_hash);
@@ -333,8 +347,10 @@ export function applySchema(db: Database.Database): void {
   db.exec(CORE_TABLES);
   db.exec(V2_TABLES);
   db.exec(V3_TABLES);
+  db.exec(V4_TABLES);
   db.exec(V2_FTS);
   ensureSessionScopeColumns(db);
+  ensureMemoryReferenceColumns(db);
   db.exec(INDEXES);
 }
 
@@ -459,6 +475,10 @@ function ensureColumn(
   }
 
   db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${definition}`);
+}
+
+function ensureMemoryReferenceColumns(db: Database.Database): void {
+  ensureColumn(db, 'memory_references', 'moved_to', 'moved_to TEXT');
 }
 
 function ensureSessionScopeColumns(db: Database.Database): void {

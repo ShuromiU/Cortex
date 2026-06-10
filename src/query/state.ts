@@ -60,12 +60,12 @@ function renderHeaderSnapshot(snapshot: BranchSnapshotRow): string {
   return lines.join('\n');
 }
 
-function resolveProjectScopeKey(store: CortexStore): string {
+export function resolveProjectScopeKey(store: CortexStore): string {
   const rootPath = store.getMeta('root_path');
   return rootPath ? deriveProjectScopeKey(rootPath) : 'project:default';
 }
 
-function resolveWorkingScopeKeys(store: CortexStore): string[] {
+export function resolveWorkingScopeKeys(store: CortexStore): string[] {
   const preferredScope = getPreferredScope(store);
   const scopeKeys: string[] = [];
 
@@ -296,17 +296,39 @@ function renderCurrentSessionNotes(items: ParsedMemoryItem[]): string | null {
   return `Current session:\n${items.map(renderNoteBullet).join('\n')}`;
 }
 
-function renderEvidenceSection(items: ParsedMemoryItem[]): string | null {
-  const evidence = items
-    .filter(item =>
-      item.kind === 'episode:command_failure' ||
-      item.kind === 'episode:test_cycle' ||
-      item.kind === 'episode:session_summary' ||
-      item.kind === 'session_state' ||
-      item.kind === 'command_run',
-    )
-    .slice(0, 4);
+function normalizeEvidenceKey(text: string): string {
+  const firstLine = text
+    .split('\n')
+    .map(line => line.trim())
+    .find(line => line.length > 0);
+  return (firstLine ?? '').toLowerCase();
+}
 
+function renderEvidenceSection(items: ParsedMemoryItem[]): string | null {
+  const candidates = items.filter(item =>
+    item.kind === 'episode:command_failure' ||
+    item.kind === 'episode:test_cycle' ||
+    item.kind === 'episode:session_summary' ||
+    item.kind === 'session_state' ||
+    item.kind === 'command_run',
+  );
+
+  // session_state rows and episode:session_summary items can carry the same
+  // summary text; keep one, preferring the episode form.
+  const byKey = new Map<string, ParsedMemoryItem>();
+  for (const item of candidates) {
+    const key = normalizeEvidenceKey(item.text);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, item);
+      continue;
+    }
+    if (existing.kind === 'session_state' && item.kind === 'episode:session_summary') {
+      byKey.set(key, item);
+    }
+  }
+
+  const evidence = Array.from(byKey.values()).slice(0, 4);
   if (evidence.length === 0) {
     return null;
   }
@@ -483,7 +505,17 @@ function buildProvisionalHeader(
   return withUsagePolicy(lines, 'resume');
 }
 
-export function buildFullState(store: CortexStore): string {
+export interface BuildFullStateOptions {
+  /** Estimated-token cap; lower-priority sections drop from the bottom. */
+  budget?: number;
+}
+
+export const DEFAULT_FULL_STATE_BUDGET = 800;
+
+export function buildFullState(
+  store: CortexStore,
+  options: BuildFullStateOptions = {},
+): string {
   const sections: string[] = [];
   const preferredScope = getPreferredScope(store);
   const workingSet = resolveWorkingSet(store, 12);
@@ -504,7 +536,10 @@ export function buildFullState(store: CortexStore): string {
   if (preferredScope?.scopeKey) {
     const snapshot = store.getBranchSnapshot(preferredScope.scopeKey);
     if (snapshot) {
-      sections.push(`Branch snapshot:\n${renderSnapshotSection(snapshot)}`);
+      const renderedSnapshot = renderSnapshotSection(snapshot);
+      if (renderedSnapshot) {
+        sections.push(`Branch snapshot:\n${renderedSnapshot}`);
+      }
     }
   }
 
@@ -539,5 +574,28 @@ export function buildFullState(store: CortexStore): string {
     return EMPTY_FULL_STATE_FALLBACK;
   }
 
-  return sections.join('\n\n');
+  // Sections are already priority-ordered; enforce the budget from the bottom.
+  const budget = options.budget ?? DEFAULT_FULL_STATE_BUDGET;
+  const kept: string[] = [];
+  let used = 0;
+  let dropped = 0;
+  for (const section of sections) {
+    const cost = estimateSectionTokens(section);
+    if (kept.length > 0 && used + cost > budget) {
+      dropped++;
+      continue;
+    }
+    kept.push(section);
+    used += cost;
+  }
+
+  if (dropped > 0) {
+    kept.push(`…${dropped} section${dropped === 1 ? '' : 's'} trimmed (cortex_recall(topic) for more)`);
+  }
+
+  return kept.join('\n\n');
+}
+
+function estimateSectionTokens(text: string): number {
+  return Math.ceil(text.length / 4);
 }

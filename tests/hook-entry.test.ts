@@ -60,13 +60,13 @@ describe('handleHookPayload', () => {
     );
     const context = parseAdditionalContext(output);
 
-    expect(context).toContain('Cortex consult required');
+    expect(context).toContain('Cortex may have prior context');
     expect(context).toContain('cortex_recall(topic)');
     expect(context).toContain('cortex_state');
     expect(context).not.toContain('living brain reflex should stay whisper-only');
   });
 
-  it('repeats prompt consult gate until Cortex is consulted', () => {
+  it('fires the prompt consult gate at most once per session', () => {
     const { store, sessionId } = createTestStore();
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-cwd-'));
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-reflex-'));
@@ -86,22 +86,14 @@ describe('handleHookPayload', () => {
       { sessionId, stateDir, requireEngagement: false },
     );
 
-    expect(parseAdditionalContext(first)).toContain('Cortex consult required');
-    expect(parseAdditionalContext(second)).toContain('Cortex consult required');
+    expect(parseAdditionalContext(first)).toContain('Cortex may have prior context');
+    expect(second).toBe('');
   });
 
-  it('repeats consult gate before shell commands when a prompt gate was ignored', () => {
+  it('does not gate PreToolUse tool calls', () => {
     const { store, sessionId } = createTestStore();
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-cwd-'));
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-reflex-'));
-
-    handleHookPayload(
-      store,
-      'reflect-prompt',
-      JSON.stringify({ prompt: 'Continue the dashboard fix' }),
-      cwd,
-      { sessionId, stateDir, requireEngagement: false },
-    );
 
     const output = handleHookPayload(
       store,
@@ -114,8 +106,8 @@ describe('handleHookPayload', () => {
       { sessionId, stateDir, requireEngagement: false },
     );
 
-    expect(parseAdditionalContext(output)).toContain('Cortex consult required');
-    expect(parseAdditionalContext(output)).toContain('cortex_recall(topic)');
+    expect(output === '' || !output.includes('Cortex may have prior context')).toBe(true);
+    expect(output).not.toContain('consult');
   });
 
   it('does not emit prompt consult gate after Cortex was explicitly consulted', () => {
@@ -190,5 +182,108 @@ describe('handleHookPayload', () => {
     expect(runs[0]?.command_summary).toBe('npm run test');
     expect(runs[0]?.exit_code).toBe(1);
     expect(runs[0]?.stderr_tail).toContain('hook entry test');
+  });
+});
+
+describe('end-of-turn nudge', () => {
+  it('stays silent when no agent ran this turn', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-eot-'));
+
+    const output = handleHookPayload(
+      store,
+      'end-of-turn',
+      JSON.stringify({}),
+      cwd,
+      { sessionId, requireEngagement: false },
+    );
+
+    expect(output).toBe('');
+  });
+
+  it('stays silent when an agent ran but no high-confidence suggestions exist', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-eot-'));
+
+    const output = handleHookPayload(
+      store,
+      'end-of-turn',
+      JSON.stringify({ agent_used: true }),
+      cwd,
+      { sessionId, requireEngagement: false },
+    );
+
+    expect(output).toBe('');
+  });
+
+  it('blocks once with embedded suggestions when an agent ran and candidates exist', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-eot-'));
+
+    store.insertEpisode({
+      sessionId,
+      kind: 'message',
+      summary: 'Decided to route all retrieval through the reference validator.',
+    });
+
+    const output = handleHookPayload(
+      store,
+      'end-of-turn',
+      JSON.stringify({ agent_used: true }),
+      cwd,
+      { sessionId, requireEngagement: false },
+    );
+
+    const parsed = JSON.parse(output) as { decision?: string; reason?: string };
+    expect(parsed.decision).toBe('block');
+    expect(parsed.reason).toContain('- decision: ');
+    expect(parsed.reason).toContain('reference validator');
+    expect(parsed.reason).toContain('cortex_note');
+  });
+
+  it('respects the stop_hook_active loop guard', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-eot-'));
+
+    store.insertEpisode({
+      sessionId,
+      kind: 'message',
+      summary: 'Decided to route all retrieval through the reference validator.',
+    });
+
+    const output = handleHookPayload(
+      store,
+      'end-of-turn',
+      JSON.stringify({ agent_used: true, stop_hook_active: true }),
+      cwd,
+      { sessionId, requireEngagement: false },
+    );
+
+    expect(output).toBe('');
+  });
+
+  it('can be disabled with CORTEX_STOP_NUDGE=off', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-eot-'));
+
+    store.insertEpisode({
+      sessionId,
+      kind: 'message',
+      summary: 'Decided to route all retrieval through the reference validator.',
+    });
+
+    process.env['CORTEX_STOP_NUDGE'] = 'off';
+    try {
+      const output = handleHookPayload(
+        store,
+        'end-of-turn',
+        JSON.stringify({ agent_used: true }),
+        cwd,
+        { sessionId, requireEngagement: false },
+      );
+      expect(output).toBe('');
+    } finally {
+      delete process.env['CORTEX_STOP_NUDGE'];
+    }
   });
 });

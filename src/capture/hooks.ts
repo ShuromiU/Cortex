@@ -93,22 +93,31 @@ function writeCommandEpisodes(
     const summary = safeSummary
       ? `${category} failed: ${safeSummary} (exit ${exitCode})`
       : `${category} failed with exit ${exitCode}`;
-    store.insertEpisode({
-      id: `command_failure:${eventId}`,
-      sessionId,
-      kind: 'command_failure',
-      summary,
-      target: filesTouched?.[0] ?? null,
-      metadata: {
-        category,
-        exit_code: exitCode,
-        command_summary: safeSummary ?? null,
-        files_touched: filesTouched ?? [],
-        stdout_tail: stdoutTail ?? null,
-        stderr_tail: stderrTail ?? null,
-        event_id: eventId,
-      },
-    });
+
+    // The same failure repeating within a day folds into one episode with an
+    // occurrence counter instead of stacking duplicate rows.
+    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const existing = store.findRecentEpisodeBySummary('command_failure', summary, dayAgo);
+    if (existing) {
+      store.bumpEpisodeOccurrence(existing.id, summary);
+    } else {
+      store.insertEpisode({
+        id: `command_failure:${eventId}`,
+        sessionId,
+        kind: 'command_failure',
+        summary,
+        target: filesTouched?.[0] ?? null,
+        metadata: {
+          category,
+          exit_code: exitCode,
+          command_summary: safeSummary ?? null,
+          files_touched: filesTouched ?? [],
+          stdout_tail: stdoutTail ?? null,
+          stderr_tail: stderrTail ?? null,
+          event_id: eventId,
+        },
+      });
+    }
   }
 
   if (category === 'test' && exitCode === 0) {

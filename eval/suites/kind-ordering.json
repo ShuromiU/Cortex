@@ -1,0 +1,43 @@
+{
+  "_comment": "Kind-weight ordering lock: a load-bearing decision must outrank a fresher failure episode and a much fresher raw command run on the same terms. Must pass at baseline and stay green through the kind-weight unification (Phase 1.2).",
+  "seed": {
+    "scope": { "type": "branch", "key": "eval/kind-ordering" },
+    "focus": "jwt refresh",
+    "items": [
+      {
+        "id": "jwt-decision",
+        "kind": "note:decision",
+        "subject": "jwt refresh",
+        "text": "Decision: rotate jwt refresh tokens server-side after renewal. Alternatives: client cookie rotation rejected for XSS exposure.",
+        "state": "hot",
+        "importance": 2.5,
+        "age_days": 3
+      },
+      {
+        "id": "jwt-failure-episode",
+        "kind": "episode:command_failure",
+        "subject": "jwt spec timeout",
+        "text": "Test failure: jwt refresh rotation spec timed out waiting for the token endpoint stub.",
+        "state": "hot",
+        "importance": 2.2,
+        "age_days": 1
+      },
+      {
+        "id": "jwt-cmd-run",
+        "kind": "command_run",
+        "subject": null,
+        "text": "Command (test): npm test -- jwt refresh rotation (exit 1)",
+        "state": "warm",
+        "importance": 0.6,
+        "age_days": 0
+      }
+    ]
+  },
+  "fixtures": [
+    {
+      "topic": "jwt refresh rotation",
+      "expected_top": "jwt-decision",
+      "allowed": ["jwt-failure-episode"]
+    }
+  ]
+}

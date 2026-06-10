@@ -1,0 +1,71 @@
+{
+  "_comment": "Output budget guard: recall output for a topic with many verbose matches must stay within the fixture token budget. Green at baseline (single-line recall); must STAY green once recall becomes multi-evidence (Phase 1.5).",
+  "seed": {
+    "scope": { "type": "branch", "key": "eval/budget" },
+    "focus": "migration plan",
+    "items": [
+      {
+        "id": "migration-decision",
+        "kind": "note:decision",
+        "subject": "store migration plan",
+        "text": "Decision: migrate store persistence in three passes — schema first behind a version gate, then dual-write memory items and notes for one release, then cut reads over and drop the legacy tables. Alternatives: single big-bang migration rejected because rollback would lose captured episodes.",
+        "state": "hot",
+        "importance": 2.5,
+        "age_days": 1
+      },
+      {
+        "id": "migration-blocker",
+        "kind": "note:blocker",
+        "subject": "migration blocker",
+        "text": "Blocker: the store migration dual-write pass cannot start until the schema version gate lands, because better-sqlite3 prepares statements eagerly and the new columns do not exist on older databases in the wild.",
+        "state": "hot",
+        "importance": 2.0,
+        "age_days": 1
+      },
+      {
+        "id": "migration-insight-1",
+        "kind": "note:insight",
+        "subject": "migration fts rebuild",
+        "text": "Insight: the migration must rebuild the fts index after backfill — triggers only cover incremental writes, so a bulk backfill leaves the fts table empty and recall silently returns nothing for migrated rows.",
+        "state": "hot",
+        "importance": 1.8,
+        "age_days": 2
+      },
+      {
+        "id": "migration-insight-2",
+        "kind": "note:insight",
+        "subject": "migration wal checkpoint",
+        "text": "Insight: long migration transactions hold the wal file open and inflate it past 100mb; checkpoint between passes keeps the database file size stable on developer machines.",
+        "state": "warm",
+        "importance": 1.8,
+        "age_days": 5
+      },
+      {
+        "id": "migration-episode",
+        "kind": "episode:test_cycle",
+        "subject": "migration test cycle",
+        "text": "Test cycle: migration suite failed twice on foreign key cascade order, passed after moving the memory_references backfill behind the memory_items insert.",
+        "state": "warm",
+        "importance": 1.8,
+        "age_days": 3
+      },
+      {
+        "id": "migration-cmd",
+        "kind": "command_run",
+        "subject": null,
+        "text": "Command (build): npm run build && node scripts/migrate.js --dry-run (exit 0)",
+        "state": "warm",
+        "importance": 0.6,
+        "age_days": 1
+      }
+    ]
+  },
+  "fixtures": [
+    {
+      "topic": "store migration plan",
+      "expected_top": "migration-decision",
+      "allowed": ["migration-blocker"],
+      "max_output_tokens": 220
+    }
+  ]
+}

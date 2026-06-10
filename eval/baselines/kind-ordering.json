@@ -1,0 +1,131 @@
+{
+  "quality": {
+    "fixtures": [
+      {
+        "topic": "jwt refresh rotation",
+        "expected_top": "jwt-decision",
+        "top_result_id": "jwt-decision",
+        "top1_hit": true,
+        "recall_at_3": 1,
+        "noise_count": 0,
+        "stale_count": 0,
+        "output": {
+          "chars": 412,
+          "est_tokens": 103,
+          "preview": "Most relevant — Decision [jwt refresh] (3d ago, no file refs)\nDecision [2026-06-07 16:12Z]: [jwt refresh] rotate jwt refresh tokens server-side after renewal. Alternatives: client cookie rotation rejected for XSS exposure.\nCommand failure: [jwt spec timeout] Test failure: jwt refresh rotation spec timed out waiting for"
+        },
+        "token_budget": {
+          "max_tokens": null,
+          "actual_tokens": 103,
+          "passed": true
+        },
+        "output_assertions": {
+          "contains_missed": [],
+          "excludes_violated": [],
+          "passed": true
+        },
+        "score_breakdown": [
+          {
+            "id": "jwt-decision",
+            "subject": "jwt refresh",
+            "text_preview": "Decision: rotate jwt refresh tokens server-side after renewal. Alternatives: client cookie rotation rejected for XSS exposure.",
+            "scores": {
+              "retrieval_score": 42.999995390126195,
+              "lexical_score": 19.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 3,
+              "exact_phrase": false,
+              "fts_rank": -0.000005307327437126341
+            }
+          },
+          {
+            "id": "jwt-failure-episode",
+            "subject": "jwt spec timeout",
+            "text_preview": "Test failure: jwt refresh rotation spec timed out waiting for the token endpoint stub.",
+            "scores": {
+              "retrieval_score": 42.89999628936663,
+              "lexical_score": 20.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 3,
+              "exact_phrase": true,
+              "fts_rank": -0.00000427203366500177
+            }
+          },
+          {
+            "id": "jwt-cmd-run",
+            "subject": null,
+            "text_preview": "Command (test): npm test -- jwt refresh rotation (exit 1)",
+            "scores": {
+              "retrieval_score": 32.899996325208306,
+              "lexical_score": 17.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 1.2,
+              "recency_bonus": 2.2,
+              "hotness_bonus": 1.2,
+              "access_bonus": 0,
+              "token_hits": 3,
+              "exact_phrase": true,
+              "fts_rank": -0.000004230769230769231
+            }
+          }
+        ],
+        "passed": true
+      }
+    ],
+    "top1_hit": 1,
+    "recall_at_3": 1,
+    "noise_count": 0,
+    "stale_count": 0,
+    "output_tokens": 103
+  },
+  "generated_at": "2026-06-10T16:12:40.753Z",
+  "schema_version": 4,
+  "tables": {
+    "sessions": 1,
+    "events": 0,
+    "notes": 0,
+    "state": 0,
+    "token_ledger": 0,
+    "command_runs": 0,
+    "episodes": 0,
+    "branch_snapshots": 0,
+    "project_snapshots": 0,
+    "memory_items": 3,
+    "memory_item_semantics": 0,
+    "current_app_graphs": 0,
+    "memory_references": 0,
+    "retrieval_log": 1,
+    "file_renames": 0
+  },
+  "header": {
+    "chars": 559,
+    "est_tokens": 140,
+    "preview": "Cortex: jwt refresh | 1 session on project\nHot: Decision [2026-06-07 16:12Z]: [jwt refresh] rotate jwt refresh tokens server-side after renewal. Alternatives… | Command failure: [jwt spec timeout] Test failure: jwt refresh rotation spec timed out waiting for the token e…\nCortex is ambient: prior context may surface aut"
+  },
+  "full_state": {
+    "chars": 316,
+    "est_tokens": 79,
+    "preview": "Decisions:\n- Decision [2026-06-07 16:12Z]: [jwt refresh] rotate jwt refresh tokens server-side after renewal. Alternatives: client cookie rotation rejected for XSS exposure.\n\nRecent evidence:\n- Command failure: [jwt spec timeout] Test failure: jwt refresh rotation spec timed out waiting for the token endpoint stub."
+  },
+  "topics": [
+    {
+      "topic": "jwt refresh",
+      "output": {
+        "chars": 412,
+        "est_tokens": 103,
+        "preview": "Most relevant — Decision [jwt refresh] (3d ago, no file refs)\nDecision [2026-06-07 16:12Z]: [jwt refresh] rotate jwt refresh tokens server-side after renewal. Alternatives: client cookie rotation rejected for XSS exposure.\nCommand failure: [jwt spec timeout] Test failure: jwt refresh rotation spec timed out waiting for"
+      }
+    }
+  ]
+}

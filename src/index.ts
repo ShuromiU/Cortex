@@ -20,11 +20,15 @@ export { buildHeader, buildFullState } from './query/state.js';
 export { recall } from './query/recall.js';
 export { brief } from './query/brief.js';
 export { buildRetrievalContext, retrieveMemory, logRetrieval, type RetrievedMemoryItem, type RetrievalContext, type RetrievalResult, type RetrieveMemoryOptions, type SemanticMode, type SemanticProvider } from './query/retrieval.js';
-export { validateMemoryReferences, referenceValidationScore, type MemoryReferenceValidation } from './query/reference-validation.js';
+export { validateMemoryReferences, referenceValidationScore, ReferenceValidator, type MemoryReferenceValidation, type MovedReference } from './query/reference-validation.js';
 export { validateMemory, type MemoryValidationReport, type MemoryValidationReportItem } from './query/validate-memory.js';
 export { suggestNotes, type SuggestedNote, type SuggestedNoteKind } from './query/suggest-notes.js';
 export { buildSessionSummary } from './query/summarize.js';
+export { buildSessionBrief, type SessionBriefOptions } from './query/session-brief.js';
+export { flushSpool, appendSpoolEntry, deriveSpoolPath, spoolSizeBytes, type SpoolEntry, type SpoolFlushResult } from './capture/spool.js';
+export { runGc, shouldAutoGc, type GcOptions, type GcReport } from './db/gc.js';
 export { estimateTokens, buildTextMetric, evaluateStore, evaluateDatabase, type TextMetric, type TopicEvaluation, type EvaluationResult, type EvaluationOptions, type QualityComparison, type QualityEvaluation, type QualityFixture, type QualityFixtureEvaluation, type QualityScoreBreakdown } from './eval/harness.js';
+export { seedStoreFromScenario, createSeededStore, type EvaluationScenario, type ScenarioMemoryItem, type ScenarioAppGraph, type SeededStore } from './eval/seed.js';
 // Transports
 export { createMcpServer, startServer, handleToolCall, TOOL_DEFINITIONS, deriveEngagementPath } from './transports/mcp.js';
 export { createProgram } from './transports/cli.js';

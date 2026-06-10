@@ -7,8 +7,12 @@ import Database from 'better-sqlite3';
 import { applySchema, initializeMeta } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import { extractMemoryReferences } from '../src/memory/references.js';
-import { refreshCurrentAppGraph } from '../src/scope/app-graph.js';
-import { validateMemoryReferences } from '../src/query/reference-validation.js';
+import { detectGitRenames, refreshCurrentAppGraph } from '../src/scope/app-graph.js';
+import {
+  ReferenceValidator,
+  referenceValidationScore,
+  validateMemoryReferences,
+} from '../src/query/reference-validation.js';
 
 function createTestDb(rootPath: string): Database.Database {
   const db = new Database(':memory:');
@@ -136,5 +140,237 @@ describe('memory references', () => {
     ]);
     expect(validation.stale).toBe(true);
     expect(validation.missing).toBe(1);
+  });
+
+  it('resolves renamed references to moved status via the rename map', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-moved-'));
+    const store = new CortexStore(createTestDb(root));
+    const session = store.createSession({
+      worktreePath: root,
+      scopeType: 'project',
+      scopeKey: `project:${root}`,
+    });
+    store.upsertCurrentAppGraph({
+      scopeKey: session.scope_key!,
+      scopeType: 'project',
+      worktreePath: root,
+      files: ['src/db/queries/reads.ts', 'src/db/schema.ts'],
+    });
+    store.insertFileRenames({
+      scopeKey: session.scope_key!,
+      renames: [{ oldPath: 'src/db/reads.ts', newPath: 'src/db/queries/reads.ts' }],
+    });
+    const item = store.upsertMemoryItem({
+      id: 'memory-with-moved-ref',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: session.scope_key!,
+      kind: 'note:decision',
+      sourceTable: 'notes',
+      sourceId: 'memory-with-moved-ref',
+      subject: 'reads',
+      text: 'decision: keep read queries in src/db/reads.ts isolated.',
+      state: 'hot',
+      importance: 2,
+    });
+
+    const validation = validateMemoryReferences(store, item);
+
+    expect(validation.moved).toBe(1);
+    expect(validation.missing).toBe(0);
+    expect(validation.stale).toBe(false);
+    expect(validation.movedReferences).toEqual([
+      { from: 'src/db/reads.ts', to: 'src/db/queries/reads.ts' },
+    ]);
+    expect(validation.label).toContain('moved: src/db/reads.ts → src/db/queries/reads.ts');
+    expect(referenceValidationScore(validation, false)).toBe(3);
+
+    const persisted = store.getMemoryReferences(item.id);
+    const movedRef = persisted.find(ref => ref.normalized_path === 'src/db/reads.ts');
+    expect(movedRef?.status).toBe('moved');
+    expect(movedRef?.moved_to).toBe('src/db/queries/reads.ts');
+  });
+
+  it('falls back to unique basename matches and refuses ambiguous ones', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-basename-'));
+    const store = new CortexStore(createTestDb(root));
+    const session = store.createSession({
+      worktreePath: root,
+      scopeType: 'project',
+      scopeKey: `project:${root}`,
+    });
+    store.upsertCurrentAppGraph({
+      scopeKey: session.scope_key!,
+      scopeType: 'project',
+      worktreePath: root,
+      files: ['src/new-home/unique.ts', 'src/a/dupe.ts', 'src/b/dupe.ts'],
+    });
+    const item = store.upsertMemoryItem({
+      id: 'memory-basename-refs',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: session.scope_key!,
+      kind: 'note:insight',
+      sourceTable: 'notes',
+      sourceId: 'memory-basename-refs',
+      subject: 'moves',
+      text: 'insight: src/old-home/unique.ts and src/old/dupe.ts moved during the refactor.',
+      state: 'warm',
+      importance: 1,
+    });
+
+    const validation = validateMemoryReferences(store, item);
+    const byPath = new Map(
+      validation.references.map(ref => [ref.normalized_path, ref]),
+    );
+
+    expect(byPath.get('src/old-home/unique.ts')?.status).toBe('moved');
+    expect(byPath.get('src/old-home/unique.ts')?.moved_to).toBe('src/new-home/unique.ts');
+    expect(byPath.get('src/old/dupe.ts')?.status).toBe('missing');
+  });
+
+  it('follows rename chains across successive moves', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-chain-'));
+    const store = new CortexStore(createTestDb(root));
+    store.insertFileRenames({
+      scopeKey: 'project:chain',
+      renames: [{ oldPath: 'src/a.ts', newPath: 'src/b.ts' }],
+    });
+    store.insertFileRenames({
+      scopeKey: 'project:chain',
+      renames: [{ oldPath: 'src/b.ts', newPath: 'src/c/final.ts' }],
+    });
+
+    expect(store.resolveFileRename('project:chain', 'src/a.ts')).toBe('src/c/final.ts');
+    expect(store.resolveFileRename('project:chain', 'src/b.ts')).toBe('src/c/final.ts');
+    expect(store.resolveFileRename('project:chain', 'src/none.ts')).toBeNull();
+  });
+
+  it('applies graduated, capped penalties instead of burying stale memory', () => {
+    const validationWith = (missing: number): Parameters<typeof referenceValidationScore>[0] => ({
+      references: Array.from({ length: missing }, (_, i) => ({
+        id: `ref-${i}`,
+        memory_item_id: 'item',
+        reference_type: 'file',
+        raw_reference: `src/gone-${i}.ts`,
+        normalized_path: `src/gone-${i}.ts`,
+        status: 'missing' as const,
+        checked_at: null,
+        moved_to: null,
+      })),
+      exists: 0,
+      missing,
+      moved: 0,
+      unknown: 0,
+      external: 0,
+      stale: missing > 0,
+      missingReferences: Array.from({ length: missing }, (_, i) => `src/gone-${i}.ts`),
+      movedReferences: [],
+      label: null,
+    });
+
+    expect(referenceValidationScore(validationWith(1), false)).toBe(-5);
+    expect(referenceValidationScore(validationWith(3), false)).toBe(-7);
+    expect(referenceValidationScore(validationWith(8), false)).toBe(-8);
+    expect(referenceValidationScore(validationWith(1), true)).toBe(-1.5);
+    expect(referenceValidationScore(validationWith(8), true)).toBe(-12);
+  });
+
+  it('batches reference status writes until flush', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-batch-'));
+    const store = new CortexStore(createTestDb(root));
+    const session = store.createSession({
+      worktreePath: root,
+      scopeType: 'project',
+      scopeKey: `project:${root}`,
+    });
+    store.upsertCurrentAppGraph({
+      scopeKey: session.scope_key!,
+      scopeType: 'project',
+      worktreePath: root,
+      files: ['src/alive.ts'],
+    });
+    const item = store.upsertMemoryItem({
+      id: 'memory-batched-refs',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: session.scope_key!,
+      kind: 'note:decision',
+      sourceTable: 'notes',
+      sourceId: 'memory-batched-refs',
+      subject: 'batch',
+      text: 'decision: src/alive.ts stays, src/gone.ts is removed.',
+      state: 'hot',
+      importance: 2,
+    });
+
+    const validator = new ReferenceValidator(store);
+    const validation = validator.validate(item);
+    expect(validation.missing).toBe(1);
+
+    // Statuses are computed in-memory but not yet persisted.
+    const beforeFlush = store.getMemoryReferences(item.id);
+    expect(beforeFlush.every(ref => ref.status === 'unknown')).toBe(true);
+
+    // Repeat validation hits the per-item cache (no duplicate queued writes).
+    validator.validate(item);
+    validator.flush();
+
+    const afterFlush = new Map(
+      store.getMemoryReferences(item.id).map(ref => [ref.normalized_path, ref.status]),
+    );
+    expect(afterFlush.get('src/alive.ts')).toBe('exists');
+    expect(afterFlush.get('src/gone.ts')).toBe('missing');
+  });
+
+  it('records git renames when the app graph head changes', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-rename-git-'));
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src', 'before.ts'), 'export const v = 1;\n');
+    childProcess.execFileSync('git', ['init'], { cwd: root, stdio: 'ignore' });
+    childProcess.execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+    childProcess.execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: root });
+    childProcess.execFileSync('git', ['add', '.'], { cwd: root });
+    childProcess.execFileSync('git', ['commit', '-m', 'initial'], { cwd: root, stdio: 'ignore' });
+    const firstHead = childProcess
+      .execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' })
+      .trim();
+
+    const store = new CortexStore(createTestDb(root));
+    const scopeKey = `project:${root}`;
+    refreshCurrentAppGraph(store, root, {
+      scopeKey,
+      scopeType: 'project',
+      worktreePath: root,
+      headOid: firstHead,
+    });
+
+    fs.mkdirSync(path.join(root, 'src', 'moved'), { recursive: true });
+    childProcess.execFileSync(
+      'git',
+      ['mv', 'src/before.ts', 'src/moved/after.ts'],
+      { cwd: root, stdio: 'ignore' },
+    );
+    childProcess.execFileSync('git', ['commit', '-m', 'move'], { cwd: root, stdio: 'ignore' });
+    const secondHead = childProcess
+      .execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' })
+      .trim();
+
+    expect(detectGitRenames(root, firstHead, secondHead)).toEqual([
+      { oldPath: 'src/before.ts', newPath: 'src/moved/after.ts' },
+    ]);
+
+    refreshCurrentAppGraph(store, root, {
+      scopeKey,
+      scopeType: 'project',
+      worktreePath: root,
+      headOid: secondHead,
+    });
+
+    const renames = store.getFileRenames(scopeKey);
+    expect(renames).toHaveLength(1);
+    expect(renames[0]!.old_path).toBe('src/before.ts');
+    expect(renames[0]!.new_path).toBe('src/moved/after.ts');
+    expect(store.resolveFileRename(scopeKey, 'src/before.ts')).toBe('src/moved/after.ts');
   });
 });

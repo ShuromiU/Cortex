@@ -4,6 +4,7 @@ import { CortexStore as Store } from '../db/store.js';
 import { buildHeader, buildFullState } from '../query/state.js';
 import { recall } from '../query/recall.js';
 import { retrieveMemory, type RetrievedMemoryItem } from '../query/retrieval.js';
+import { createSeededStore, type EvaluationScenario } from './seed.js';
 
 export interface TextMetric {
   chars: number;
@@ -23,6 +24,10 @@ export interface QualityFixture {
   forbidden?: string[];
   max_output_tokens?: number;
   fresh_after?: string;
+  /** Substrings that must appear in the rendered recall output (e.g. staleness labels). */
+  expect_output_contains?: string[];
+  /** Substrings that must not appear in the rendered recall output. */
+  expect_output_excludes?: string[];
 }
 
 export interface QualityScoreBreakdown {
@@ -58,6 +63,11 @@ export interface QualityFixtureEvaluation {
     actual_tokens: number;
     passed: boolean;
   };
+  output_assertions: {
+    contains_missed: string[];
+    excludes_violated: string[];
+    passed: boolean;
+  };
   score_breakdown: QualityScoreBreakdown[];
   passed: boolean;
 }
@@ -82,6 +92,8 @@ export interface QualityComparison {
 export interface EvaluationOptions {
   fixtures?: QualityFixture[];
   compareTo?: EvaluationResult;
+  /** Hermetic seed: evaluate against an in-memory store built from this scenario. */
+  scenario?: EvaluationScenario;
 }
 
 export interface EvaluationResult {
@@ -186,7 +198,24 @@ function evaluateQualityFixture(
   const retrieval = retrieveMemory(store, fixture.topic, 8);
   const top3 = retrieval.results.slice(0, 3);
   const topResult = retrieval.results[0] ?? null;
-  const output = buildTextMetric(recall(store, fixture.topic));
+  const outputText = recall(
+    store,
+    fixture.topic,
+    fixture.max_output_tokens !== undefined ? { budget: fixture.max_output_tokens } : {},
+  );
+  const output = buildTextMetric(outputText);
+  const loweredOutput = outputText.toLowerCase();
+  const containsMissed = (fixture.expect_output_contains ?? []).filter(
+    needle => !loweredOutput.includes(needle.toLowerCase()),
+  );
+  const excludesViolated = (fixture.expect_output_excludes ?? []).filter(
+    needle => loweredOutput.includes(needle.toLowerCase()),
+  );
+  const outputAssertions = {
+    contains_missed: containsMissed,
+    excludes_violated: excludesViolated,
+    passed: containsMissed.length === 0 && excludesViolated.length === 0,
+  };
   const allowed = fixture.allowed ?? [];
   const forbidden = fixture.forbidden ?? [];
   const relevantRefs = Array.from(new Set([fixture.expected_top, ...allowed]));
@@ -224,8 +253,15 @@ function evaluateQualityFixture(
     stale_count: staleCount,
     output,
     token_budget: tokenBudget,
+    output_assertions: outputAssertions,
     score_breakdown: retrieval.results.map(buildScoreBreakdown),
-    passed: top1Hit && recallAt3 === 1 && noiseCount === 0 && staleCount === 0 && tokenBudget.passed,
+    passed:
+      top1Hit &&
+      recallAt3 === 1 &&
+      noiseCount === 0 &&
+      staleCount === 0 &&
+      tokenBudget.passed &&
+      outputAssertions.passed,
   };
 }
 
@@ -309,6 +345,11 @@ export function evaluateDatabase(
   requestedTopics: string[],
   options?: EvaluationOptions,
 ): EvaluationResult {
+  if (options?.scenario) {
+    const { store } = createSeededStore(options.scenario, rootPath);
+    return evaluateStore(store, requestedTopics, undefined, options);
+  }
+
   const db = openDatabase(dbPath);
   ensureCortexSchema(db, rootPath);
   const store = new Store(db);

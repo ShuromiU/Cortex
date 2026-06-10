@@ -66,7 +66,9 @@ describe('recall — finds notes matching topic', () => {
     store.insertNote({ sessionId: session.id, kind: 'insight', content: 'auth is good' });
 
     const result = recall(store, 'kubernetes');
-    expect(result).toBe('No matches for "kubernetes".');
+    expect(result).toBe(
+      'No matches for "kubernetes". Try a broader topic, or cortex_state for the working set.',
+    );
   });
 
   it('excludes superseded notes (only shows active and resolved)', () => {
@@ -122,7 +124,9 @@ describe('recall — finds notes matching topic', () => {
     store.insertState({ layer: 'project', content: 'auth project' });
 
     const result = recall(store, 'blockchain');
-    expect(result).toBe('No matches for "blockchain".');
+    expect(result).toBe(
+      'No matches for "blockchain". Try a broader topic, or cortex_state for the working set.',
+    );
   });
 
   it('subject match scores higher than content match — subject results appear first', () => {
@@ -260,5 +264,83 @@ describe('brief — scoped briefing', () => {
 
     const result = brief(store, 'api');
     expect(result.length).toBeLessThan(400);
+  });
+});
+
+// ── answer shape, budgets, and score detail ───────────────────────────
+
+describe('recall — answer shape and budgets', () => {
+  it('leads with a synthesized most-relevant line', () => {
+    const store = makeStore();
+    const session = store.createSession();
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'cache policy',
+      content: 'cache invalidation uses tags',
+    });
+
+    const result = recall(store, 'cache invalidation');
+    const lines = result.split('\n');
+    expect(lines[0]).toMatch(/^Most relevant — Decision \[cache policy\] \(today, /);
+    expect(lines[1]).toContain('cache invalidation uses tags');
+  });
+
+  it('enforces the output token budget by dropping evidence from the bottom', () => {
+    const store = makeStore();
+    const session = store.createSession();
+    for (let i = 0; i < 8; i++) {
+      store.insertNote({
+        sessionId: session.id,
+        kind: 'insight',
+        subject: `cache shard ${i}`,
+        content: `cache shard ${i} eviction follows the segmented lru policy with per-tenant quotas and warmup batches`,
+      });
+    }
+
+    const full = recall(store, 'cache eviction');
+    const budgeted = recall(store, 'cache eviction', { budget: 80 });
+
+    expect(budgeted.length).toBeLessThan(full.length);
+    expect(Math.ceil(budgeted.length / 4)).toBeLessThanOrEqual(80 + 30);
+    expect(budgeted).toContain('trimmed (raise budget or refine topic)');
+    // The top evidence line always survives the budget.
+    expect(budgeted.split('\n')[1]).toContain('cache shard');
+  });
+
+  it('appends score breakdowns when detail is scores', () => {
+    const store = makeStore();
+    const session = store.createSession();
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'queue',
+      content: 'queue retries use jitter',
+    });
+
+    const plain = recall(store, 'queue retries');
+    const detailed = recall(store, 'queue retries', { detail: 'scores' });
+
+    expect(plain).not.toContain('(score ');
+    expect(detailed).toContain('(score ');
+    expect(detailed).toContain('lex ');
+    expect(detailed).toContain('truth ');
+  });
+
+  it('brief respects an output budget', () => {
+    const store = makeStore();
+    const session = store.createSession();
+    for (let i = 0; i < 5; i++) {
+      store.insertNote({
+        sessionId: session.id,
+        kind: 'insight',
+        subject: `worker pool ${i}`,
+        content: `worker pool ${i} drains gracefully on deploy with a thirty second linger before hard kill`,
+      });
+    }
+
+    const budgeted = brief(store, 'worker pool drain', undefined, { budget: 60 });
+    expect(budgeted).toContain('trimmed');
+    expect(budgeted.split('\n').some(line => line.startsWith('Insight ['))).toBe(true);
   });
 });

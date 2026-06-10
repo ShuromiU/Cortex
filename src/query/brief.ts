@@ -1,6 +1,14 @@
 import type { CortexStore } from '../db/store.js';
 import { renderMemoryLine } from './render.js';
 import { logRetrieval, retrieveMemory } from './retrieval.js';
+import {
+  assembleBudgeted,
+  buildLeadLine,
+  renderScoreDetail,
+  type RecallOptions,
+} from './recall.js';
+
+export const DEFAULT_BRIEF_BUDGET = 450;
 
 const KIND_PRIORITY: Record<string, number> = {
   'note:decision': 0,
@@ -13,25 +21,30 @@ function compareBriefOrder(leftKind: string, rightKind: string): number {
   return (KIND_PRIORITY[leftKind] ?? 99) - (KIND_PRIORITY[rightKind] ?? 99);
 }
 
-export function brief(store: CortexStore, topic: string, forAgent?: string): string {
-  const retrieval = retrieveMemory(store, topic, 5);
-  const lines: string[] = [];
+export function brief(
+  store: CortexStore,
+  topic: string,
+  forAgent?: string,
+  options: RecallOptions = {},
+): string {
+  const retrieval = retrieveMemory(store, topic, options.limit ?? 5);
+  const header: string[] = [];
 
   if (forAgent) {
-    lines.push(`Briefing for ${forAgent}:`);
+    header.push(`Briefing for ${forAgent}:`);
   }
 
   if (retrieval.context.preferredScope && retrieval.context.preferredScope.scopeType !== 'project') {
-    lines.push(`Scope: ${retrieval.context.preferredScope.scopeLabel}`);
+    header.push(`Scope: ${retrieval.context.preferredScope.scopeLabel}`);
   }
 
   if (retrieval.context.focus) {
-    lines.push(`Focus: ${retrieval.context.focus}`);
+    header.push(`Focus: ${retrieval.context.focus}`);
   }
 
   if (retrieval.results.length === 0) {
-    lines.push(`No context found for "${topic}".`);
-    const renderedEmpty = lines.join('\n');
+    header.push(`No context found for "${topic}".`);
+    const renderedEmpty = header.join('\n');
     logRetrieval(store, retrieval, renderedEmpty);
     return renderedEmpty;
   }
@@ -44,9 +57,20 @@ export function brief(store: CortexStore, topic: string, forAgent?: string): str
     return right.retrieval_score - left.retrieval_score;
   });
 
-  lines.push(...ordered.map(item => renderMemoryLine(item, 2)));
+  const detail = options.detail ?? 'none';
+  const evidence = ordered.map(
+    item =>
+      `${renderMemoryLine(item, 2)}${detail === 'scores' ? renderScoreDetail(item) : ''}`,
+  );
 
-  const rendered = lines.join('\n');
+  const lead = [...header, buildLeadLine(ordered[0]!)].join('\n');
+  const rendered = assembleBudgeted(
+    lead,
+    evidence,
+    options.budget ?? DEFAULT_BRIEF_BUDGET,
+    dropped => `…${dropped} more trimmed (raise budget or refine topic)`,
+  );
+
   logRetrieval(store, retrieval, rendered);
   return rendered;
 }

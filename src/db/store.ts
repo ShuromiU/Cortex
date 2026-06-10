@@ -206,7 +206,7 @@ export interface ParsedCurrentAppGraph {
   updated_at: string;
 }
 
-export type MemoryReferenceStatus = 'exists' | 'missing' | 'unknown' | 'external';
+export type MemoryReferenceStatus = 'exists' | 'missing' | 'moved' | 'unknown' | 'external';
 
 export interface MemoryReferenceRow {
   id: string;
@@ -216,6 +216,7 @@ export interface MemoryReferenceRow {
   normalized_path: string;
   status: MemoryReferenceStatus;
   checked_at: string | null;
+  moved_to: string | null;
 }
 
 export interface ParsedMemoryReference {
@@ -226,6 +227,16 @@ export interface ParsedMemoryReference {
   normalized_path: string;
   status: MemoryReferenceStatus;
   checked_at: string | null;
+  moved_to: string | null;
+}
+
+export interface FileRenameRow {
+  id: string;
+  scope_key: string;
+  old_path: string;
+  new_path: string;
+  head_oid: string | null;
+  detected_at: string;
 }
 
 export interface ParsedMemoryItem {
@@ -467,6 +478,7 @@ export interface TableCounts {
   current_app_graphs: number;
   memory_references: number;
   retrieval_log: number;
+  file_renames: number;
 }
 
 // ── Helper functions ──────────────────────────────────────────────────
@@ -589,6 +601,7 @@ export function parseMemoryReferenceRow(row: MemoryReferenceRow): ParsedMemoryRe
     normalized_path: row.normalized_path,
     status: row.status,
     checked_at: row.checked_at,
+    moved_to: row.moved_to ?? null,
   };
 }
 
@@ -1037,6 +1050,7 @@ export class CortexStore {
       current_app_graphs: count('current_app_graphs'),
       memory_references: count('memory_references'),
       retrieval_log: count('retrieval_log'),
+      file_renames: count('file_renames'),
     };
   }
 
@@ -1189,6 +1203,55 @@ export class CortexStore {
     return episode;
   }
 
+  /** Newest episode of a kind whose summary matches the base text (with or without a repeat suffix). */
+  findRecentEpisodeBySummary(
+    kind: string,
+    baseSummary: string,
+    sinceIso: string,
+  ): ParsedEpisode | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM episodes
+         WHERE kind = ?
+           AND created_at >= ?
+           AND (summary = ? OR summary LIKE ?)
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .get(kind, sinceIso, baseSummary, `${baseSummary} (seen %`) as EpisodeRow | undefined;
+    return row ? parseEpisodeRow(row) : undefined;
+  }
+
+  /**
+   * Fold a repeated occurrence into an existing episode: bump the counter,
+   * refresh recency, and keep one searchable row instead of N duplicates.
+   * The repeat count is itself retrieval signal.
+   */
+  bumpEpisodeOccurrence(id: string, baseSummary: string): ParsedEpisode | undefined {
+    const episode = this.getEpisode(id);
+    if (!episode) {
+      return undefined;
+    }
+
+    const metadata = { ...(episode.metadata ?? {}) } as Record<string, unknown>;
+    const previous = typeof metadata['occurrences'] === 'number' ? metadata['occurrences'] : 1;
+    const occurrences = previous + 1;
+    metadata['occurrences'] = occurrences;
+    metadata['last_occurred_at'] = new Date().toISOString();
+
+    const summary = `${baseSummary} (seen ${occurrences}x)`;
+    this.db
+      .prepare(
+        `UPDATE episodes
+         SET summary = ?, metadata_json = ?, created_at = ?
+         WHERE id = ?`,
+      )
+      .run(summary, JSON.stringify(metadata), new Date().toISOString(), id);
+
+    this.syncMemoryItemForEpisode(id);
+    return this.getEpisode(id);
+  }
+
   getEpisode(id: string): ParsedEpisode | undefined {
     const row = this.db
       .prepare('SELECT * FROM episodes WHERE id = ?')
@@ -1336,6 +1399,18 @@ export class CortexStore {
       .prepare('UPDATE notes SET status = ? WHERE id = ?')
       .run(status, id);
     this.syncMemoryItemForNote(id);
+  }
+
+  findActiveNoteBySubject(subject: string): ParsedNote | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM notes
+         WHERE status = 'active' AND subject = ? COLLATE NOCASE
+         ORDER BY timestamp DESC
+         LIMIT 1`,
+      )
+      .get(subject) as NoteRow | undefined;
+    return row ? parseNoteRow(row) : undefined;
   }
 
   markConflict(id: string): void {
@@ -1816,7 +1891,7 @@ export class CortexStore {
   }
 
   updateMemoryReferenceStatuses(
-    updates: Array<{ id: string; status: MemoryReferenceStatus; checkedAt?: string }>,
+    updates: Array<{ id: string; status: MemoryReferenceStatus; checkedAt?: string; movedTo?: string | null }>,
   ): void {
     if (updates.length === 0) {
       return;
@@ -1824,16 +1899,86 @@ export class CortexStore {
 
     const stmt = this.db.prepare(
       `UPDATE memory_references
-       SET status = ?, checked_at = ?
+       SET status = ?, checked_at = ?, moved_to = ?
        WHERE id = ?`,
     );
-    const tx = this.db.transaction((items: Array<{ id: string; status: MemoryReferenceStatus; checkedAt?: string }>) => {
-      const now = new Date().toISOString();
-      for (const update of items) {
-        stmt.run(update.status, update.checkedAt ?? now, update.id);
+    const tx = this.db.transaction(
+      (items: Array<{ id: string; status: MemoryReferenceStatus; checkedAt?: string; movedTo?: string | null }>) => {
+        const now = new Date().toISOString();
+        for (const update of items) {
+          stmt.run(update.status, update.checkedAt ?? now, update.movedTo ?? null, update.id);
+        }
+      },
+    );
+    tx(updates);
+  }
+
+  // ── File renames ──────────────────────────────────────────────────
+
+  insertFileRenames(opts: {
+    scopeKey: string;
+    renames: Array<{ oldPath: string; newPath: string }>;
+    headOid?: string | null;
+    detectedAt?: string;
+  }): number {
+    if (opts.renames.length === 0) {
+      return 0;
+    }
+
+    const stmt = this.db.prepare(
+      `INSERT INTO file_renames (id, scope_key, old_path, new_path, head_oid, detected_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (scope_key, old_path)
+       DO UPDATE SET new_path = excluded.new_path,
+                     head_oid = excluded.head_oid,
+                     detected_at = excluded.detected_at`,
+    );
+    const detectedAt = opts.detectedAt ?? new Date().toISOString();
+    const tx = this.db.transaction((renames: Array<{ oldPath: string; newPath: string }>) => {
+      for (const rename of renames) {
+        if (rename.oldPath === rename.newPath) {
+          continue;
+        }
+        stmt.run(
+          crypto.randomUUID(),
+          opts.scopeKey,
+          rename.oldPath,
+          rename.newPath,
+          opts.headOid ?? null,
+          detectedAt,
+        );
       }
     });
-    tx(updates);
+    tx(opts.renames);
+    return opts.renames.length;
+  }
+
+  /** Follow the rename chain for a path within a scope (a -> b -> c resolves to c). */
+  resolveFileRename(scopeKey: string, oldPath: string, maxHops = 5): string | null {
+    const stmt = this.db.prepare(
+      `SELECT new_path FROM file_renames WHERE scope_key = ? AND old_path = ?`,
+    );
+
+    let current = oldPath;
+    let resolved: string | null = null;
+    for (let hop = 0; hop < maxHops; hop++) {
+      const row = stmt.get(scopeKey, current) as { new_path: string } | undefined;
+      if (!row || row.new_path === current) {
+        break;
+      }
+      resolved = row.new_path;
+      current = row.new_path;
+    }
+
+    return resolved;
+  }
+
+  getFileRenames(scopeKey: string): FileRenameRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM file_renames WHERE scope_key = ? ORDER BY detected_at ASC, rowid ASC`,
+      )
+      .all(scopeKey) as FileRenameRow[];
   }
 
   getMemoryItemBySource(sourceTable: string, sourceId: string): ParsedMemoryItem | undefined {

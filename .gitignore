@@ -4,6 +4,10 @@ dist/
 *.db-shm
 *.db-wal
 .cortex.db
+.cortex.state
+.cortex.spool.jsonl
+.cortex.spool.jsonl.processing
+.cortex.agent-used
 .claude/
 .codex/
 .refcertify/

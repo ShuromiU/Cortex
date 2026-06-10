@@ -1,0 +1,113 @@
+{
+  "quality": {
+    "fixtures": [
+      {
+        "topic": "testing flakes",
+        "expected_top": "flake-teardown-insight",
+        "top_result_id": "flake-teardown-insight",
+        "top1_hit": true,
+        "recall_at_3": 1,
+        "noise_count": 0,
+        "stale_count": 0,
+        "output": {
+          "chars": 371,
+          "est_tokens": 93,
+          "preview": "Most relevant — Insight [store teardown flake] (2d ago, no file refs)\nInsight [2026-06-08 16:12Z]: [store teardown flake] the vitest test flake comes from store teardown — the db handle stays open on Windows runners, so rmdir fails intermittently.\nInsight [2026-06-08 16:12Z]: [workspace setup] testing setup uses vitest"
+        },
+        "token_budget": {
+          "max_tokens": null,
+          "actual_tokens": 93,
+          "passed": true
+        },
+        "output_assertions": {
+          "contains_missed": [],
+          "excludes_violated": [],
+          "passed": true
+        },
+        "score_breakdown": [
+          {
+            "id": "flake-teardown-insight",
+            "subject": "store teardown flake",
+            "text_preview": "Insight: the vitest test flake comes from store teardown — the db handle stays open on Windows runners, so rmdir fails intermittently.",
+            "scores": {
+              "retrieval_score": 34.409144660560194,
+              "lexical_score": 15,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 2,
+              "exact_phrase": false,
+              "fts_rank": -0.9743660280276151
+            }
+          },
+          {
+            "id": "testing-setup-insight",
+            "subject": "workspace setup",
+            "text_preview": "Insight: testing setup uses vitest workspaces so integration suites share one config.",
+            "scores": {
+              "retrieval_score": 25.999998841882153,
+              "lexical_score": 6,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 1,
+              "exact_phrase": false,
+              "fts_rank": -0.0000013333333333333334
+            }
+          }
+        ],
+        "passed": true
+      }
+    ],
+    "top1_hit": 1,
+    "recall_at_3": 1,
+    "noise_count": 0,
+    "stale_count": 0,
+    "output_tokens": 93
+  },
+  "generated_at": "2026-06-10T16:12:40.449Z",
+  "schema_version": 4,
+  "tables": {
+    "sessions": 1,
+    "events": 0,
+    "notes": 0,
+    "state": 0,
+    "token_ledger": 0,
+    "command_runs": 0,
+    "episodes": 0,
+    "branch_snapshots": 0,
+    "project_snapshots": 0,
+    "memory_items": 3,
+    "memory_item_semantics": 0,
+    "current_app_graphs": 0,
+    "memory_references": 0,
+    "retrieval_log": 1,
+    "file_renames": 0
+  },
+  "header": {
+    "chars": 566,
+    "est_tokens": 142,
+    "preview": "Cortex: retrieval stemming | 1 session on project\nHot: Decision [2026-06-07 16:12Z]: [api pagination] cursor pagination for the events api. Alternatives: offset pag… | Insight [2026-06-08 16:12Z]: [workspace setup] testing setup uses vitest workspaces so integration suites sha…\nCortex is ambient: prior context may surf"
+  },
+  "full_state": {
+    "chars": 489,
+    "est_tokens": 123,
+    "preview": "Decisions:\n- Decision [2026-06-07 16:12Z]: [api pagination] cursor pagination for the events api. Alternatives: offset pagination rejected for skew under concurrent writes.\n\nInsights:\n- Insight [2026-06-08 16:12Z]: [workspace setup] testing setup uses vitest workspaces so integration suites share one config.\n- Insight "
+  },
+  "topics": [
+    {
+      "topic": "retrieval stemming",
+      "output": {
+        "chars": 94,
+        "est_tokens": 24,
+        "preview": "No matches for \"retrieval stemming\". Try a broader topic, or cortex_state for the working set."
+      }
+    }
+  ]
+}

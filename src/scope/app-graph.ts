@@ -119,6 +119,57 @@ export function listCurrentAppFiles(worktreePath: string): string[] {
   return Array.from(new Set(files.map(normalizeFilePath))).sort();
 }
 
+/** Parse `git diff --name-status -M` output for R-status (rename) rows. */
+export function detectGitRenames(
+  worktreePath: string,
+  fromOid: string,
+  toOid: string,
+): Array<{ oldPath: string; newPath: string }> {
+  try {
+    const output = childProcess.execFileSync(
+      'git',
+      ['-C', worktreePath, 'diff', '--name-status', '-M70', fromOid, toOid],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+
+    const renames: Array<{ oldPath: string; newPath: string }> = [];
+    for (const line of output.split(/\r?\n/)) {
+      if (!line.startsWith('R')) {
+        continue;
+      }
+      const parts = line.split('\t');
+      if (parts.length < 3) {
+        continue;
+      }
+      const oldPath = normalizeFilePath(parts[1]!.trim());
+      const newPath = normalizeFilePath(parts[2]!.trim());
+      if (oldPath && newPath && oldPath !== newPath) {
+        renames.push({ oldPath, newPath });
+      }
+    }
+    return renames;
+  } catch {
+    return [];
+  }
+}
+
+function recordRenamesOnHeadChange(
+  store: CortexStore,
+  scopeKey: string,
+  worktreePath: string,
+  previousHeadOid: string | null | undefined,
+  nextHeadOid: string | null | undefined,
+): void {
+  if (!previousHeadOid || !nextHeadOid || previousHeadOid === nextHeadOid) {
+    return;
+  }
+
+  const renames = detectGitRenames(worktreePath, previousHeadOid, nextHeadOid);
+  if (renames.length > 0) {
+    store.insertFileRenames({ scopeKey, renames, headOid: nextHeadOid });
+  }
+}
+
 export function refreshCurrentAppGraph(
   store: CortexStore,
   cwd: string,
@@ -127,6 +178,13 @@ export function refreshCurrentAppGraph(
   const scope = resolveScope(cwd, opts);
   const worktreePath = path.resolve(scope.worktreePath);
   const files = opts.files?.map(normalizeFilePath) ?? listCurrentAppFiles(worktreePath);
+
+  const previous = store.getCurrentAppGraph(scope.scopeKey);
+  try {
+    recordRenamesOnHeadChange(store, scope.scopeKey, worktreePath, previous?.head_oid, scope.headOid);
+  } catch {
+    // Rename tracking is best-effort; never block the graph refresh.
+  }
 
   return store.upsertCurrentAppGraph({
     scopeKey: scope.scopeKey,

@@ -1,0 +1,113 @@
+{
+  "quality": {
+    "fixtures": [
+      {
+        "topic": "store split read queries",
+        "expected_top": "moved-ref-decision",
+        "top_result_id": "moved-ref-decision",
+        "top1_hit": true,
+        "recall_at_3": 1,
+        "noise_count": 0,
+        "stale_count": 0,
+        "output": {
+          "chars": 385,
+          "est_tokens": 97,
+          "preview": "Most relevant — Decision [store split] (6d ago, refs moved)\nDecision [2026-06-04 16:12Z]: [store split] keep read queries in src/db/store-reads.ts after the store split so writes stay isolated. [moved: src/db/store-reads.ts → src/db/queries/store-reads.ts]\nInsight [2026-06-08 16:12Z]: [schema split] src/db/schema.ts ow"
+        },
+        "token_budget": {
+          "max_tokens": null,
+          "actual_tokens": 97,
+          "passed": true
+        },
+        "output_assertions": {
+          "contains_missed": [],
+          "excludes_violated": [],
+          "passed": true
+        },
+        "score_breakdown": [
+          {
+            "id": "moved-ref-decision",
+            "subject": "store split",
+            "text_preview": "Decision: keep read queries in src/db/store-reads.ts after the store split so writes stay isolated.",
+            "scores": {
+              "retrieval_score": 45.99999422694001,
+              "lexical_score": 19.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 4,
+              "exact_phrase": false,
+              "fts_rank": -0.000006646503026513022
+            }
+          },
+          {
+            "id": "schema-insight",
+            "subject": "schema split",
+            "text_preview": "Insight: src/db/schema.ts owns migrations; the store split must not duplicate version checks.",
+            "scores": {
+              "retrieval_score": 33.499997200666954,
+              "lexical_score": 10.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 2,
+              "exact_phrase": false,
+              "fts_rank": -0.0000032228564610728063
+            }
+          }
+        ],
+        "passed": true
+      }
+    ],
+    "top1_hit": 1,
+    "recall_at_3": 1,
+    "noise_count": 0,
+    "stale_count": 0,
+    "output_tokens": 97
+  },
+  "generated_at": "2026-06-10T16:12:41.564Z",
+  "schema_version": 4,
+  "tables": {
+    "sessions": 1,
+    "events": 0,
+    "notes": 0,
+    "state": 0,
+    "token_ledger": 0,
+    "command_runs": 0,
+    "episodes": 0,
+    "branch_snapshots": 0,
+    "project_snapshots": 0,
+    "memory_items": 2,
+    "memory_item_semantics": 0,
+    "current_app_graphs": 1,
+    "memory_references": 2,
+    "retrieval_log": 1,
+    "file_renames": 1
+  },
+  "header": {
+    "chars": 558,
+    "est_tokens": 140,
+    "preview": "Cortex: store split | 1 session on project\nHot: Decision [2026-06-04 16:12Z]: [store split] keep read queries in src/db/store-reads.ts after the store split… | Insight [2026-06-08 16:12Z]: [schema split] src/db/schema.ts owns migrations; the store split must not duplic…\nCortex is ambient: prior context may surface auto"
+  },
+  "full_state": {
+    "chars": 288,
+    "est_tokens": 72,
+    "preview": "Decisions:\n- Decision [2026-06-04 16:12Z]: [store split] keep read queries in src/db/store-reads.ts after the store split so writes stay isolated.\n\nInsights:\n- Insight [2026-06-08 16:12Z]: [schema split] src/db/schema.ts owns migrations; the store split must not duplicate version checks."
+  },
+  "topics": [
+    {
+      "topic": "store split",
+      "output": {
+        "chars": 385,
+        "est_tokens": 97,
+        "preview": "Most relevant — Decision [store split] (6d ago, refs moved)\nDecision [2026-06-04 16:12Z]: [store split] keep read queries in src/db/store-reads.ts after the store split so writes stay isolated. [moved: src/db/store-reads.ts → src/db/queries/store-reads.ts]\nInsight [2026-06-08 16:12Z]: [schema split] src/db/schema.ts ow"
+      }
+    }
+  ]
+}

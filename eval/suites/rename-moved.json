@@ -1,0 +1,42 @@
+{
+  "_comment": "Rename tracking: a decision referencing a renamed file must rank as a valid result and carry a [moved:] label via the seeded rename map (old src/db/store-reads.ts -> new src/db/queries/store-reads.ts).",
+  "seed": {
+    "scope": { "type": "branch", "key": "eval/rename-moved" },
+    "focus": "store split",
+    "app_graph": {
+      "head_oid": "eval0000000000000000000000000000000000bb",
+      "files": ["src/db/queries/store-reads.ts", "src/db/store-writes.ts", "src/db/schema.ts"]
+    },
+    "renames": [
+      { "old_path": "src/db/store-reads.ts", "new_path": "src/db/queries/store-reads.ts" }
+    ],
+    "items": [
+      {
+        "id": "moved-ref-decision",
+        "kind": "note:decision",
+        "subject": "store split",
+        "text": "Decision: keep read queries in src/db/store-reads.ts after the store split so writes stay isolated.",
+        "state": "hot",
+        "importance": 2.5,
+        "age_days": 6
+      },
+      {
+        "id": "schema-insight",
+        "kind": "note:insight",
+        "subject": "schema split",
+        "text": "Insight: src/db/schema.ts owns migrations; the store split must not duplicate version checks.",
+        "state": "hot",
+        "importance": 1.8,
+        "age_days": 2
+      }
+    ]
+  },
+  "fixtures": [
+    {
+      "topic": "store split read queries",
+      "expected_top": "moved-ref-decision",
+      "allowed": ["schema-insight"],
+      "expect_output_contains": ["moved:"]
+    }
+  ]
+}

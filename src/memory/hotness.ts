@@ -1,20 +1,6 @@
 import type { CortexStore, ParsedMemoryItem } from '../db/store.js';
 import type { MemoryItemState } from './items.js';
-
-const WORKING_SET_KIND_BONUS: Record<string, number> = {
-  'note:decision': 3.4,
-  'note:intent': 3.1,
-  'note:blocker': 2.8,
-  'note:focus': 2.8,
-  'note:insight': 2.1,
-  'episode:command_failure': 2.6,
-  'episode:test_cycle': 2.3,
-  'episode:session_summary': 1.6,
-  session_state: 1.6,
-  branch_snapshot: 1.4,
-  project_snapshot: 1.0,
-  command_run: 0.6,
-};
+import { workingSetKindBonus } from './kind-weights.js';
 
 const STATE_WEIGHT: Record<MemoryItemState, number> = {
   pinned: 5,
@@ -109,7 +95,7 @@ function stalePenalty(item: ParsedMemoryItem, createdDays: number): number {
 }
 
 function kindBonus(kind: string): number {
-  return WORKING_SET_KIND_BONUS[kind] ?? 0.5;
+  return workingSetKindBonus(kind);
 }
 
 export function computeMemoryHotness(

@@ -33,8 +33,8 @@ function createStore(): { store: CortexStore; sessionId: string } {
 // ── TOOL_DEFINITIONS ──────────────────────────────────────────────────
 
 describe('TOOL_DEFINITIONS', () => {
-  it('defines exactly 10 tools', () => {
-    expect(TOOL_DEFINITIONS).toHaveLength(10);
+  it('defines exactly 11 tools', () => {
+    expect(TOOL_DEFINITIONS).toHaveLength(11);
   });
 
   it('has cortex_route tool', () => {
@@ -209,6 +209,47 @@ describe('handleToolCall', () => {
 
       expect(readEngagement()['cortex_consulted']).toBe('true');
     }
+  });
+
+  it('cortex_resolve marks a note resolved by subject and cools its memory item', () => {
+    const note = store.insertNote({
+      sessionId,
+      kind: 'blocker',
+      subject: 'flaky teardown',
+      content: 'vitest hangs on db teardown',
+    });
+
+    const result = callTool('cortex_resolve', { subject: 'flaky teardown' });
+
+    expect(result).toContain('as resolved');
+    expect(store.getNote(note.id)?.status).toBe('resolved');
+    const item = store.getMemoryItemBySource('notes', note.id);
+    expect(item?.state).toBe('cold');
+  });
+
+  it('cortex_resolve supersedes with replacement content in one step', () => {
+    const note = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'auth transport',
+      content: 'use cookies for auth',
+    });
+
+    const result = callTool('cortex_resolve', {
+      note_id: note.id,
+      status: 'superseded',
+      replacement: 'use bearer tokens for auth',
+    });
+
+    expect(result).toContain('Superseded');
+    expect(store.getNote(note.id)?.status).toBe('superseded');
+    const replacementNote = store.findActiveNoteBySubject('auth transport');
+    expect(replacementNote?.content).toBe('use bearer tokens for auth');
+  });
+
+  it('cortex_resolve reports missing targets without throwing', () => {
+    const result = callTool('cortex_resolve', { subject: 'nothing here' });
+    expect(result).toContain('Error: no active note');
   });
 
   it('non-consultation tools do not mark Cortex as consulted', () => {

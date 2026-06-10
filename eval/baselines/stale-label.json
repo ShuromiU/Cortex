@@ -1,0 +1,149 @@
+{
+  "quality": {
+    "fixtures": [
+      {
+        "topic": "auth login decision",
+        "expected_top": "auth-valid-decision",
+        "top_result_id": "auth-valid-decision",
+        "top1_hit": true,
+        "recall_at_3": 1,
+        "noise_count": 0,
+        "stale_count": 0,
+        "output": {
+          "chars": 656,
+          "est_tokens": 164,
+          "preview": "Most relevant — Decision [auth login flow] (2d ago, refs OK)\nDecision [2026-06-08 16:12Z]: [auth login flow] keep the login flow in src/auth/login.ts with session cookies issued from src/auth/session.ts.\nInsight [2026-06-06 16:12Z]: [auth login throttling] login throttling in src/auth/rate-limit.ts counts per account, "
+        },
+        "token_budget": {
+          "max_tokens": null,
+          "actual_tokens": 164,
+          "passed": true
+        },
+        "output_assertions": {
+          "contains_missed": [],
+          "excludes_violated": [],
+          "passed": true
+        },
+        "score_breakdown": [
+          {
+            "id": "auth-valid-decision",
+            "subject": "auth login flow",
+            "text_preview": "Decision: keep the login flow in src/auth/login.ts with session cookies issued from src/auth/session.ts.",
+            "scores": {
+              "retrieval_score": 45.99999552117551,
+              "lexical_score": 19.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 3,
+              "exact_phrase": false,
+              "fts_rank": -0.0000051564505542590435
+            }
+          },
+          {
+            "id": "auth-rate-limit-insight",
+            "subject": "auth login throttling",
+            "text_preview": "Insight: login throttling in src/auth/rate-limit.ts counts per account, not per ip, so shared-office logins do not trip it.",
+            "scores": {
+              "retrieval_score": 38.49999664352809,
+              "lexical_score": 15.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 2,
+              "exact_phrase": false,
+              "fts_rank": -0.000003864288554576181
+            }
+          },
+          {
+            "id": "auth-stale-decision",
+            "subject": "auth login legacy",
+            "text_preview": "Decision: the legacy login handler lived in src/legacy/login-old.ts before the auth move; kept for context on why redirects double-encode.",
+            "scores": {
+              "retrieval_score": 36.799995686568266,
+              "lexical_score": 19.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 0.2,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 3,
+              "exact_phrase": false,
+              "fts_rank": -0.000004966034130943571
+            }
+          },
+          {
+            "id": "auth-login-cmd",
+            "subject": null,
+            "text_preview": "Command (test): npm test -- auth login session (exit 0)",
+            "scores": {
+              "retrieval_score": 24.09999737720591,
+              "lexical_score": 9.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 1.2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 1.2,
+              "access_bonus": 0,
+              "token_hits": 2,
+              "exact_phrase": false,
+              "fts_rank": -0.000003019607843137255
+            }
+          }
+        ],
+        "passed": true
+      }
+    ],
+    "top1_hit": 1,
+    "recall_at_3": 1,
+    "noise_count": 0,
+    "stale_count": 0,
+    "output_tokens": 164
+  },
+  "generated_at": "2026-06-10T16:12:41.030Z",
+  "schema_version": 4,
+  "tables": {
+    "sessions": 1,
+    "events": 0,
+    "notes": 0,
+    "state": 0,
+    "token_ledger": 0,
+    "command_runs": 0,
+    "episodes": 0,
+    "branch_snapshots": 0,
+    "project_snapshots": 0,
+    "memory_items": 4,
+    "memory_item_semantics": 0,
+    "current_app_graphs": 1,
+    "memory_references": 4,
+    "retrieval_log": 1,
+    "file_renames": 0
+  },
+  "header": {
+    "chars": 558,
+    "est_tokens": 140,
+    "preview": "Cortex: auth login | 1 session on project\nHot: Decision [2026-06-08 16:12Z]: [auth login flow] keep the login flow in src/auth/login.ts with session cookies… | Insight [2026-06-06 16:12Z]: [auth login throttling] login throttling in src/auth/rate-limit.ts counts per ac…\nCortex is ambient: prior context may surface auto"
+  },
+  "full_state": {
+    "chars": 336,
+    "est_tokens": 84,
+    "preview": "Decisions:\n- Decision [2026-06-08 16:12Z]: [auth login flow] keep the login flow in src/auth/login.ts with session cookies issued from src/auth/session.ts.\n\nInsights:\n- Insight [2026-06-06 16:12Z]: [auth login throttling] login throttling in src/auth/rate-limit.ts counts per account, not per ip, so shared-office logins"
+  },
+  "topics": [
+    {
+      "topic": "auth login",
+      "output": {
+        "chars": 656,
+        "est_tokens": 164,
+        "preview": "Most relevant — Decision [auth login flow] (2d ago, refs OK)\nDecision [2026-06-08 16:12Z]: [auth login flow] keep the login flow in src/auth/login.ts with session cookies issued from src/auth/session.ts.\nInsight [2026-06-06 16:12Z]: [auth login throttling] login throttling in src/auth/rate-limit.ts counts per account, "
+      }
+    }
+  ]
+}

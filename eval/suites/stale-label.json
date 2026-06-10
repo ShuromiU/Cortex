@@ -1,0 +1,57 @@
+{
+  "_comment": "Label-not-bury: the stale decision (ref missing from the app graph) must stay reachable in top-3 WITH a [stale:] label instead of being buried by the -18 penalty. Baseline fails recall_at_3 and the output assertion; passes after Phase 1.3 (graduated penalty + labels) and Phase 1.5 (multi-evidence recall output).",
+  "seed": {
+    "scope": { "type": "branch", "key": "eval/stale-label" },
+    "focus": "auth login",
+    "app_graph": {
+      "head_oid": "eval0000000000000000000000000000000000aa",
+      "files": ["src/auth/login.ts", "src/auth/session.ts", "src/auth/rate-limit.ts"]
+    },
+    "items": [
+      {
+        "id": "auth-valid-decision",
+        "kind": "note:decision",
+        "subject": "auth login flow",
+        "text": "Decision: keep the login flow in src/auth/login.ts with session cookies issued from src/auth/session.ts.",
+        "state": "hot",
+        "importance": 2.5,
+        "age_days": 2
+      },
+      {
+        "id": "auth-stale-decision",
+        "kind": "note:decision",
+        "subject": "auth login legacy",
+        "text": "Decision: the legacy login handler lived in src/legacy/login-old.ts before the auth move; kept for context on why redirects double-encode.",
+        "state": "warm",
+        "importance": 2.5,
+        "age_days": 30
+      },
+      {
+        "id": "auth-rate-limit-insight",
+        "kind": "note:insight",
+        "subject": "auth login throttling",
+        "text": "Insight: login throttling in src/auth/rate-limit.ts counts per account, not per ip, so shared-office logins do not trip it.",
+        "state": "hot",
+        "importance": 1.8,
+        "age_days": 4
+      },
+      {
+        "id": "auth-login-cmd",
+        "kind": "command_run",
+        "subject": null,
+        "text": "Command (test): npm test -- auth login session (exit 0)",
+        "state": "warm",
+        "importance": 0.6,
+        "age_days": 1
+      }
+    ]
+  },
+  "fixtures": [
+    {
+      "topic": "auth login decision",
+      "expected_top": "auth-valid-decision",
+      "allowed": ["auth-stale-decision"],
+      "expect_output_contains": ["[stale:"]
+    }
+  ]
+}

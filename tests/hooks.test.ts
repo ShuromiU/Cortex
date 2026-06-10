@@ -238,3 +238,36 @@ describe('hook handlers - integration', () => {
     expect(types).toEqual(['cmd', 'edit', 'read', 'write']);
   });
 });
+
+describe('command failure episode dedup', () => {
+  it('folds the same failure within 24h into one episode with an occurrence counter', () => {
+    const { store, sessionId } = createStore();
+
+    for (let i = 0; i < 3; i++) {
+      handleCmdEvent(store, sessionId, {
+        cmd: 'npm test',
+        exit: '1',
+        stderr: 'FAIL tests/store.test.ts',
+      });
+    }
+
+    const episodes = store
+      .getEpisodesBySession(sessionId)
+      .filter(episode => episode.kind === 'command_failure');
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0]!.summary).toContain('(seen 3x)');
+    expect(episodes[0]!.metadata?.['occurrences']).toBe(3);
+  });
+
+  it('keeps distinct failures as separate episodes', () => {
+    const { store, sessionId } = createStore();
+
+    handleCmdEvent(store, sessionId, { cmd: 'npm test', exit: '1', stderr: 'FAIL a' });
+    handleCmdEvent(store, sessionId, { cmd: 'npm run build', exit: '2', stderr: 'tsc error' });
+
+    const episodes = store
+      .getEpisodesBySession(sessionId)
+      .filter(episode => episode.kind === 'command_failure');
+    expect(episodes).toHaveLength(2);
+  });
+});

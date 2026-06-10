@@ -1,0 +1,185 @@
+{
+  "quality": {
+    "fixtures": [
+      {
+        "topic": "store migration plan",
+        "expected_top": "migration-decision",
+        "top_result_id": "migration-decision",
+        "top1_hit": true,
+        "recall_at_3": 1,
+        "noise_count": 0,
+        "stale_count": 0,
+        "output": {
+          "chars": 709,
+          "est_tokens": 178,
+          "preview": "Most relevant — Decision [store migration plan] (1d ago, no file refs)\nDecision [2026-06-09 16:12Z]: [store migration plan] migrate store persistence in three passes — schema first behind a version gate, then dual-write memory items and notes for one release, then cut reads over and drop the legacy tables. Alternatives"
+        },
+        "token_budget": {
+          "max_tokens": 220,
+          "actual_tokens": 178,
+          "passed": true
+        },
+        "output_assertions": {
+          "contains_missed": [],
+          "excludes_violated": [],
+          "passed": true
+        },
+        "score_breakdown": [
+          {
+            "id": "migration-decision",
+            "subject": "store migration plan",
+            "text_preview": "Decision: migrate store persistence in three passes — schema first behind a version gate, then dual-write memory items and notes for one release, then cut reads",
+            "scores": {
+              "retrieval_score": 46.35542083201683,
+              "lexical_score": 23.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 2,
+              "exact_phrase": true,
+              "fts_rank": -1.1003399061991437
+            }
+          },
+          {
+            "id": "migration-blocker",
+            "subject": "migration blocker",
+            "text_preview": "Blocker: the store migration dual-write pass cannot start until the schema version gate lands, because better-sqlite3 prepares statements eagerly and the new co",
+            "scores": {
+              "retrieval_score": 35.74847480962466,
+              "lexical_score": 15,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2.6,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 2,
+              "exact_phrase": false,
+              "fts_rank": -0.6817544874383519
+            }
+          },
+          {
+            "id": "migration-episode",
+            "subject": "migration test cycle",
+            "text_preview": "Test cycle: migration suite failed twice on foreign key cascade order, passed after moving the memory_references backfill behind the memory_items insert.",
+            "scores": {
+              "retrieval_score": 29.79999828007875,
+              "lexical_score": 9,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2.8,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 1,
+              "exact_phrase": false,
+              "fts_rank": -0.0000019801344743276283
+            }
+          },
+          {
+            "id": "migration-insight-2",
+            "subject": "migration wal checkpoint",
+            "text_preview": "Insight: long migration transactions hold the wal file open and inflate it past 100mb; checkpoint between passes keeps the database file size stable on develope",
+            "scores": {
+              "retrieval_score": 28.999998294155088,
+              "lexical_score": 9,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 1,
+              "exact_phrase": false,
+              "fts_rank": -0.000001963928463170658
+            }
+          },
+          {
+            "id": "migration-insight-1",
+            "subject": "migration fts rebuild",
+            "text_preview": "Insight: the migration must rebuild the fts index after backfill — triggers only cover incremental writes, so a bulk backfill leaves the fts table empty and rec",
+            "scores": {
+              "retrieval_score": 28.999998293308536,
+              "lexical_score": 9,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 1,
+              "exact_phrase": false,
+              "fts_rank": -0.000001964903090623363
+            }
+          },
+          {
+            "id": "migration-cmd",
+            "subject": null,
+            "text_preview": "Command (build): npm run build && node scripts/migrate.js --dry-run (exit 0)",
+            "scores": {
+              "retrieval_score": 15.599998683606167,
+              "lexical_score": 6,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 1.2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 1.2,
+              "access_bonus": 0,
+              "token_hits": 1,
+              "exact_phrase": false,
+              "fts_rank": -0.0000015155555555555558
+            }
+          }
+        ],
+        "passed": true
+      }
+    ],
+    "top1_hit": 1,
+    "recall_at_3": 1,
+    "noise_count": 0,
+    "stale_count": 0,
+    "output_tokens": 178
+  },
+  "generated_at": "2026-06-10T16:12:41.299Z",
+  "schema_version": 4,
+  "tables": {
+    "sessions": 1,
+    "events": 0,
+    "notes": 0,
+    "state": 0,
+    "token_ledger": 0,
+    "command_runs": 0,
+    "episodes": 0,
+    "branch_snapshots": 0,
+    "project_snapshots": 0,
+    "memory_items": 6,
+    "memory_item_semantics": 0,
+    "current_app_graphs": 0,
+    "memory_references": 1,
+    "retrieval_log": 1,
+    "file_renames": 0
+  },
+  "header": {
+    "chars": 562,
+    "est_tokens": 141,
+    "preview": "Cortex: migration plan | 1 session on project\nHot: Decision [2026-06-09 16:12Z]: [store migration plan] migrate store persistence in three passes — schema first… | Blocker [2026-06-09 16:12Z]: [migration blocker] the store migration dual-write pass cannot start until the s…\nCortex is ambient: prior context may surface "
+  },
+  "full_state": {
+    "chars": 1304,
+    "est_tokens": 326,
+    "preview": "Decisions:\n- Decision [2026-06-09 16:12Z]: [store migration plan] migrate store persistence in three passes — schema first behind a version gate, then dual-write memory items and notes for one release, then cut reads over and drop the legacy tables. Alternatives: single big-bang migration rejected because rollback woul"
+  },
+  "topics": [
+    {
+      "topic": "migration plan",
+      "output": {
+        "chars": 1436,
+        "est_tokens": 359,
+        "preview": "Most relevant — Decision [store migration plan] (1d ago, no file refs)\nDecision [2026-06-09 16:12Z]: [store migration plan] migrate store persistence in three passes — schema first behind a version gate, then dual-write memory items and notes for one release, then cut reads over and drop the legacy tables. Alternatives"
+      }
+    }
+  ]
+}

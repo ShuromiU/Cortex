@@ -33,7 +33,13 @@ function markCortexConsulted(): void {
   writeEngagement(CONSULT_GATE_REQUIRED_KEY, 'false');
 }
 
+/** Engagement state lives next to the database; key=value so bash can grep it. */
 export function deriveEngagementPath(dir: string): string {
+  return path.join(dir, '.cortex.state');
+}
+
+/** Pre-move tmpdir location; read-fallback for one release. */
+function deriveLegacyEngagementPath(dir: string): string {
   let normalized = dir.replace(/\\/g, '/').toLowerCase();
   normalized = normalized.replace(/^([a-z]):\//, '/$1/');
   const sanitized = normalized.replace(/[^a-z0-9]/g, '_');
@@ -42,6 +48,19 @@ export function deriveEngagementPath(dir: string): string {
 
 export function configureEngagementPath(dir: string): string {
   engagementPath = deriveEngagementPath(dir);
+
+  // Migrate state written by older versions into the project-local file.
+  try {
+    if (!fs.existsSync(engagementPath)) {
+      const legacyPath = deriveLegacyEngagementPath(dir);
+      if (fs.existsSync(legacyPath)) {
+        fs.copyFileSync(legacyPath, engagementPath);
+      }
+    }
+  } catch {
+    // Migration is best-effort.
+  }
+
   return engagementPath;
 }
 
@@ -77,7 +96,19 @@ export function writeEngagement(key: string, value: string): void {
     .join('\n') + '\n';
 
   try {
-    fs.writeFileSync(engagementPath, out);
+    // Atomic replace: a concurrent reader sees the old or the new file, never a torn write.
+    const tempPath = `${engagementPath}.${process.pid}.tmp`;
+    fs.writeFileSync(tempPath, out);
+    try {
+      fs.renameSync(tempPath, engagementPath);
+    } catch {
+      fs.writeFileSync(engagementPath, out);
+      try {
+        fs.unlinkSync(tempPath);
+      } catch {
+        // Leftover temp file is harmless.
+      }
+    }
   } catch {
     // Non-fatal.
   }
@@ -130,10 +161,15 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'cortex_state',
-    description: 'Load the broader Cortex working set when you explicitly need more context than ambient reflex whispers provide, especially after context loss, dense resumptions, or unclear current direction. Returns current-valid notes first, recent decisions, branch snapshot, and the last-session tail.',
+    description: 'Load the broader Cortex working set when you explicitly need more context than the session brief and ambient reflex whispers provide, especially after context loss, dense resumptions, or unclear current direction. Returns current-valid notes first, recent decisions, branch snapshot, and the last-session tail, within a token budget (default 800).',
     inputSchema: {
       type: 'object' as const,
-      properties: {},
+      properties: {
+        budget: {
+          type: 'number',
+          description: 'Optional output token budget (default 800); lower-priority sections drop first',
+        },
+      },
       required: [],
     },
   },
@@ -166,8 +202,35 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'cortex_resolve',
+    description: 'Close out a previously saved note: mark a decision/blocker/intent as resolved (done, no longer load-bearing) or superseded. Resolved notes go cold and stop appearing in briefs and default state. Pass replacement content to supersede with an updated note in one step.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        note_id: {
+          type: 'string',
+          description: 'Exact note id to resolve (preferred when known)',
+        },
+        subject: {
+          type: 'string',
+          description: 'Subject of the active note to resolve (used when note_id is not given)',
+        },
+        status: {
+          type: 'string',
+          enum: ['resolved', 'superseded'],
+          description: "Default 'resolved'",
+        },
+        replacement: {
+          type: 'string',
+          description: 'Optional new content; writes a replacement note that supersedes the old one',
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'cortex_recall',
-    description: 'Pull evidence from prior sessions on a topic before re-investigating familiar ground, revisiting recurring bugs or tests, proposing changes in an area with history, or touching a system where prior decisions may matter. Returns current-valid memories first and labels stale file references because repo truth beats memory.',
+    description: 'Pull evidence from prior sessions on a topic before re-investigating familiar ground, revisiting recurring bugs or tests, proposing changes in an area with history, or touching a system where prior decisions may matter. Answer-shaped: a lead line naming the most relevant memory and its trust level, then timestamped evidence. Current-valid memories rank first; stale or moved file references are labeled because repo truth beats memory. Output stays within a token budget.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -175,13 +238,22 @@ export const TOOL_DEFINITIONS = [
           type: 'string',
           description: 'Topic to search for',
         },
+        budget: {
+          type: 'number',
+          description: 'Optional output token budget (default 600); evidence drops from the bottom',
+        },
+        detail: {
+          type: 'string',
+          enum: ['none', 'scores'],
+          description: "Optional: 'scores' appends per-result rank breakdowns for debugging retrieval quality",
+        },
       },
       required: ['topic'],
     },
   },
   {
     name: 'cortex_brief',
-    description: 'Compact topical context to paste into a subagent prompt. Call before dispatching an Agent on a non-trivial task in a topic with history in this repo. Returns a smaller, focused subset than cortex_state. Paste the result into the agent prompt yourself; do not ask subagents to call cortex_brief because they do not share your session context reliably.',
+    description: 'Compact topical context to paste into a subagent prompt, within a token budget (default 450). Call before dispatching an Agent on a non-trivial task in a topic with history in this repo. Returns a smaller, focused subset than cortex_state, decisions first. Paste the result into the agent prompt yourself; do not ask subagents to call cortex_brief because they do not share your session context reliably.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -192,6 +264,10 @@ export const TOOL_DEFINITIONS = [
         for: {
           type: 'string',
           description: 'Name of the agent being briefed (optional)',
+        },
+        budget: {
+          type: 'number',
+          description: 'Optional output token budget (default 450)',
         },
       },
       required: ['topic'],
@@ -278,7 +354,9 @@ export function handleToolCall(
       writeEngagement('enabled', 'true');
       writeEngagement('state_called', 'true');
       markCortexConsulted();
-      const output = buildFullState(store);
+      const output = buildFullState(store, {
+        ...(typeof args['budget'] === 'number' ? { budget: args['budget'] } : {}),
+      });
       store.insertLedgerEntry({
         sessionId: session.id,
         type: 'state',
@@ -317,12 +395,53 @@ export function handleToolCall(
       }
     }
 
+    case 'cortex_resolve': {
+      ensureScopedSession(store, cwd);
+      const noteId = args['note_id'] as string | undefined;
+      const subject = args['subject'] as string | undefined;
+      const status = (args['status'] as 'resolved' | 'superseded' | undefined) ?? 'resolved';
+      const replacement = args['replacement'] as string | undefined;
+
+      const note = noteId
+        ? store.getNote(noteId)
+        : subject
+          ? store.findActiveNoteBySubject(subject)
+          : undefined;
+      if (!note) {
+        return `Error: no ${noteId ? `note with id ${noteId}` : `active note with subject "${subject ?? ''}"`} found.`;
+      }
+
+      try {
+        if (replacement) {
+          // insertNote auto-supersedes the active note with the same kind+subject.
+          const replacementNote = store.insertNote({
+            sessionId: ensureSession(store, cwd),
+            kind: note.kind as InsertNoteOpts['kind'],
+            content: replacement,
+            ...(note.subject ? { subject: note.subject } : {}),
+          });
+          if (status === 'resolved') {
+            store.updateNoteStatus(note.id, 'resolved');
+          }
+          return `Superseded (${note.kind}${note.subject ? `[${note.subject}]` : ''}) with note ${replacementNote.id}.`;
+        }
+
+        store.updateNoteStatus(note.id, status);
+        return `Marked ${note.kind}${note.subject ? `[${note.subject}]` : ''} as ${status}.`;
+      } catch (err) {
+        return `Error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+
     case 'cortex_recall': {
       const session = ensureScopedSession(store, cwd);
       refreshCurrentGraphQuietly(store, cwd);
       markCortexConsulted();
       const topic = args['topic'] as string;
-      const output = recall(store, topic);
+      const output = recall(store, topic, {
+        ...(typeof args['budget'] === 'number' ? { budget: args['budget'] } : {}),
+        ...(args['detail'] === 'scores' ? { detail: 'scores' as const } : {}),
+      });
       store.insertLedgerEntry({
         sessionId: session.id,
         type: 'recall',
@@ -338,7 +457,9 @@ export function handleToolCall(
       markCortexConsulted();
       const topic = args['topic'] as string;
       const forAgent = args['for'] as string | undefined;
-      const output = brief(store, topic, forAgent);
+      const output = brief(store, topic, forAgent, {
+        ...(typeof args['budget'] === 'number' ? { budget: args['budget'] } : {}),
+      });
       store.insertLedgerEntry({
         sessionId: session.id,
         type: 'brief',

@@ -306,7 +306,7 @@ describe('Schema', () => {
 
     const result = ensureCortexSchema(db, '/legacy/root');
     expect(result.migrated).toBe(true);
-    expect(getSchemaVersion(db)).toBe(3);
+    expect(getSchemaVersion(db)).toBe(SCHEMA_VERSION);
 
     const sessionColumns = db
       .prepare('PRAGMA table_info(sessions)')

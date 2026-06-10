@@ -2,6 +2,8 @@
 
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { openDatabase, ensureCortexSchema } from '../db/schema.js';
 import { CortexStore } from '../db/store.js';
@@ -12,6 +14,8 @@ import {
   handleCmdEvent,
   handleAgentEvent,
 } from '../capture/hooks.js';
+import { flushSpool } from '../capture/spool.js';
+import { runGc, shouldAutoGc } from '../db/gc.js';
 import {
   consolidateLevel1,
   renderCompressed,
@@ -24,7 +28,10 @@ import {
   type EvaluationResult,
   type QualityFixture,
 } from '../eval/harness.js';
+import type { EvaluationScenario } from '../eval/seed.js';
 import { buildHeader, formatTokens } from '../query/state.js';
+import { buildSessionBrief } from '../query/session-brief.js';
+import { estimateTokens } from '../query/retrieval.js';
 import { reflectMemory, type ReflexEvent } from '../query/reflex.js';
 import {
   configureEngagementPath,
@@ -79,7 +86,12 @@ function readJsonFile(filePath: string): unknown {
   return JSON.parse(fs.readFileSync(resolved, 'utf8')) as unknown;
 }
 
-function parseQualitySuite(filePath: string): QualityFixture[] {
+interface QualitySuite {
+  fixtures: QualityFixture[];
+  seed?: EvaluationScenario;
+}
+
+function parseQualitySuite(filePath: string): QualitySuite {
   const parsed = readJsonFile(filePath);
   if (
     !parsed ||
@@ -89,7 +101,19 @@ function parseQualitySuite(filePath: string): QualityFixture[] {
     throw new Error('Quality suite must be a JSON object with a fixtures array');
   }
 
-  return (parsed as { fixtures: QualityFixture[] }).fixtures;
+  const suite = parsed as { fixtures: QualityFixture[]; seed?: unknown };
+  if (suite.seed !== undefined) {
+    if (
+      !suite.seed ||
+      typeof suite.seed !== 'object' ||
+      !Array.isArray((suite.seed as { items?: unknown }).items)
+    ) {
+      throw new Error('Quality suite seed must be an object with an items array');
+    }
+    return { fixtures: suite.fixtures, seed: suite.seed as EvaluationScenario };
+  }
+
+  return { fixtures: suite.fixtures };
 }
 
 function parseEvaluationResult(filePath: string): EvaluationResult {
@@ -178,6 +202,18 @@ export function createProgram(): Command {
     .action((opts: { quiet?: boolean }) => {
       configureEngagementPath(process.cwd());
       const { store } = openCortexDb(process.cwd());
+
+      // Replay leftover spooled capture into the session it belongs to,
+      // before that session is consolidated and ended.
+      const previous = store.getCurrentSession();
+      if (previous) {
+        try {
+          flushSpool(store, process.cwd(), previous.id);
+        } catch {
+          // Leftovers stay in the spool for the next flush.
+        }
+      }
+
       const unconsolidated = store.getUnconsolidatedSessions();
 
       for (const session of unconsolidated) {
@@ -195,7 +231,14 @@ export function createProgram(): Command {
         store.endSession(current.id);
       }
 
-      ensureScopedSession(store, process.cwd());
+      const scopedSession = ensureScopedSession(store, process.cwd());
+      if (!previous) {
+        try {
+          flushSpool(store, process.cwd(), scopedSession.id);
+        } catch {
+          // Leftovers stay in the spool for the next flush.
+        }
+      }
       refreshCurrentGraphQuietly(store, process.cwd());
 
       const engPath = deriveEngagementPath(process.cwd());
@@ -205,7 +248,38 @@ export function createProgram(): Command {
         // Non-fatal.
       }
 
+      // Opt-in automatic GC, at most once per 24h.
+      if (process.env['CORTEX_GC_AUTO'] === 'apply') {
+        try {
+          const gcDb = openDatabase(findDbPath(process.cwd()));
+          if (shouldAutoGc(gcDb)) {
+            runGc(gcDb, { dryRun: false });
+          }
+          gcDb.close();
+        } catch {
+          // GC must never block session start.
+        }
+      }
+
       if (opts.quiet) {
+        // Quiet mode still leads with value: a tiny validated brief, or silence.
+        const sessionBrief = buildSessionBrief(store);
+        if (sessionBrief) {
+          const scoped = store.getCurrentSession();
+          if (scoped) {
+            try {
+              store.insertLedgerEntry({
+                sessionId: scoped.id,
+                type: 'session_brief',
+                direction: 'spent',
+                tokens: estimateTokens(sessionBrief),
+              });
+            } catch {
+              // Ledger accounting must never block startup.
+            }
+          }
+          process.stdout.write(`${sessionBrief}\n`);
+        }
         return;
       }
 
@@ -336,12 +410,134 @@ export function createProgram(): Command {
       const rootPath = path.isAbsolute(opts.root)
         ? opts.root
         : path.resolve(process.cwd(), opts.root);
+      const suite = opts.suite ? parseQualitySuite(opts.suite) : undefined;
       const options: EvaluationOptions = {
-        ...(opts.suite ? { fixtures: parseQualitySuite(opts.suite) } : {}),
+        ...(suite ? { fixtures: suite.fixtures } : {}),
+        ...(suite?.seed ? { scenario: suite.seed } : {}),
         ...(opts.compare ? { compareTo: parseEvaluationResult(opts.compare) } : {}),
       };
       const result = evaluateDatabase(dbPath, rootPath, parseTopics(opts.topics), options);
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    });
+
+  program
+    .command('flush-spool')
+    .description('Replay spooled hook capture (.cortex.spool.jsonl) into the store')
+    .action(() => {
+      const { store } = openCortexDb(process.cwd());
+      const session = ensureScopedSession(store, process.cwd());
+      const result = flushSpool(store, process.cwd(), session.id);
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    });
+
+  program
+    .command('note-resolve')
+    .description('Mark a saved note as resolved or superseded')
+    .option('--id <id>', 'Note id')
+    .option('--subject <text>', 'Subject of the active note (when id is unknown)')
+    .option('--status <status>', 'resolved | superseded', 'resolved')
+    .action((opts: { id?: string; subject?: string; status?: string }) => {
+      const { store } = openCortexDb(process.cwd());
+      const status = opts.status === 'superseded' ? 'superseded' : 'resolved';
+      const note = opts.id
+        ? store.getNote(opts.id)
+        : opts.subject
+          ? store.findActiveNoteBySubject(opts.subject)
+          : undefined;
+      if (!note) {
+        process.stderr.write('No matching note found (pass --id or --subject).\n');
+        process.exitCode = 1;
+        return;
+      }
+      store.updateNoteStatus(note.id, status);
+      process.stdout.write(`Marked ${note.kind}${note.subject ? `[${note.subject}]` : ''} as ${status}.\n`);
+    });
+
+  program
+    .command('gc')
+    .description('Prune derived data (events, retrieval log, ledger, archived items). Dry-run by default.')
+    .option('--apply', 'Actually delete (default is a dry-run report)')
+    .option('--vacuum <mode>', 'auto | always | never', 'auto')
+    .action((opts: { apply?: boolean; vacuum?: string }) => {
+      const dbPath = findDbPath(process.cwd());
+      const db = openDatabase(dbPath);
+      ensureCortexSchema(db, process.cwd());
+      const vacuum =
+        opts.vacuum === 'always' || opts.vacuum === 'never' ? opts.vacuum : 'auto';
+      const report = runGc(db, { dryRun: !opts.apply, vacuum });
+      db.close();
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    });
+
+  program
+    .command('install-hooks')
+    .description('Install canonical Cortex hook scripts for a harness')
+    .option('--claude', 'Install for Claude Code (~/.claude/hooks)')
+    .option('--codex', 'Install for Codex (~/.codex/hooks)')
+    .option('--dir <path>', 'Override the hooks directory')
+    .action((opts: { claude?: boolean; codex?: boolean; dir?: string }) => {
+      const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+      const templateDir = path.resolve(moduleDir, '..', '..', 'hooks', 'claude');
+      const nodePath = process.execPath;
+      const cliEntry = path.resolve(moduleDir, 'cli.js');
+      const hookEntry = path.resolve(moduleDir, 'hook-entry.js');
+
+      const targetDir =
+        opts.dir ??
+        (opts.codex
+          ? path.join(os.homedir(), '.codex', 'hooks')
+          : path.join(os.homedir(), '.claude', 'hooks'));
+      fs.mkdirSync(targetDir, { recursive: true });
+
+      const scripts = ['cortex-capture.sh', 'cortex-reflect.sh', 'cortex-end-of-turn.sh'];
+      for (const script of scripts) {
+        const template = fs.readFileSync(path.join(templateDir, script), 'utf8');
+        const rendered = template
+          .replaceAll('__CORTEX_NODE__', nodePath)
+          .replaceAll('__CORTEX_CLI__', cliEntry)
+          .replaceAll('__CORTEX_HOOK_ENTRY__', hookEntry);
+        const target = path.join(targetDir, script);
+        fs.writeFileSync(target, rendered);
+        try {
+          fs.chmodSync(target, 0o755);
+        } catch {
+          // chmod is a no-op on Windows.
+        }
+        process.stdout.write(`installed ${target}\n`);
+      }
+
+      const hooksDirForSnippet = targetDir.replace(/\\/g, '/');
+      const snippet = {
+        hooks: {
+          SessionStart: [
+            { hooks: [{ type: 'command', command: `"${nodePath}" "${cliEntry}" inject-header --quiet` }] },
+          ],
+          PostToolUse: [
+            {
+              matcher: 'Read|Edit|Write|Bash|Agent',
+              hooks: [{ type: 'command', command: `bash "${hooksDirForSnippet}/cortex-capture.sh"` }],
+            },
+          ],
+          PreToolUse: [
+            {
+              matcher: 'Edit|Write',
+              hooks: [{ type: 'command', command: `bash "${hooksDirForSnippet}/cortex-reflect.sh" reflect-pre` }],
+            },
+          ],
+          UserPromptSubmit: [
+            { hooks: [{ type: 'command', command: `bash "${hooksDirForSnippet}/cortex-reflect.sh" reflect-prompt` }] },
+          ],
+          Stop: [
+            { hooks: [{ type: 'command', command: `bash "${hooksDirForSnippet}/cortex-end-of-turn.sh"` }] },
+          ],
+        },
+      };
+      process.stdout.write(
+        `\nMerge into ${opts.codex ? 'Codex' : 'Claude'} settings (hooks section):\n${JSON.stringify(snippet, null, 2)}\n`,
+      );
+      process.stdout.write(
+        '\nNotes: capture is spooled (no Node per tool call); reflex runs only on Edit|Write and prompts; the Stop nudge fires only with high-confidence suggestions. Remove any old cortex-hook.sh / cortex-mark-agent-used.sh wiring.\n',
+      );
     });
 
   program

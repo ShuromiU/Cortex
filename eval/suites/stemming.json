@@ -1,0 +1,43 @@
+{
+  "_comment": "Rerank stemming: 'testing flakes' must top-rank the item that says 'test flake'. Baseline (raw-includes token hits) prefers the literal-'testing' decoy; passes once rerank counts stem hits (Phase 1.1).",
+  "seed": {
+    "scope": { "type": "branch", "key": "eval/stemming" },
+    "focus": "retrieval stemming",
+    "items": [
+      {
+        "id": "flake-teardown-insight",
+        "kind": "note:insight",
+        "subject": "store teardown flake",
+        "text": "Insight: the vitest test flake comes from store teardown — the db handle stays open on Windows runners, so rmdir fails intermittently.",
+        "state": "hot",
+        "importance": 1.8,
+        "age_days": 2
+      },
+      {
+        "id": "testing-setup-insight",
+        "kind": "note:insight",
+        "subject": "workspace setup",
+        "text": "Insight: testing setup uses vitest workspaces so integration suites share one config.",
+        "state": "hot",
+        "importance": 1.8,
+        "age_days": 2
+      },
+      {
+        "id": "pagination-decision",
+        "kind": "note:decision",
+        "subject": "api pagination",
+        "text": "Decision: cursor pagination for the events api. Alternatives: offset pagination rejected for skew under concurrent writes.",
+        "state": "warm",
+        "importance": 2.5,
+        "age_days": 3
+      }
+    ]
+  },
+  "fixtures": [
+    {
+      "topic": "testing flakes",
+      "expected_top": "flake-teardown-insight",
+      "allowed": []
+    }
+  ]
+}

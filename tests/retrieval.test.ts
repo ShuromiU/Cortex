@@ -31,7 +31,12 @@ describe('retrieval', () => {
 
     const context = buildRetrievalContext(store, 'Continue Pulse all-project hub foundation fix');
 
-    expect(context.tokens).toEqual(['pulse', 'project', 'hub', 'foundation']);
+    expect(context.tokens.map(token => token.raw)).toEqual([
+      'pulse',
+      'project',
+      'hub',
+      'foundation',
+    ]);
     expect(context.queryText).toBe('"pulse" OR "project" OR "hub" OR "foundation"');
   });
 
@@ -73,9 +78,10 @@ describe('retrieval', () => {
     });
 
     const output = recall(store, 'auth gateway');
-    const firstLine = output.split('\n')[0] ?? '';
-    expect(firstLine).toContain('JWT rotation fails');
-    expect(firstLine).toContain('Blocker');
+    const lines = output.split('\n');
+    expect(lines[0]).toContain('Most relevant — Blocker [auth gateway]');
+    expect(lines[1]).toContain('JWT rotation fails');
+    expect(lines[1]).toContain('Blocker');
   });
 
   it('logs retrievals and bumps access counts for returned memory items', () => {
@@ -308,7 +314,7 @@ describe('retrieval', () => {
     const output = recall(store, 'old Activity notes portal');
 
     expect(output).toContain('Previous Activity notes portal');
-    expect(output).toContain('Stale references: missing components/board/ExpandedTaskCard.tsx');
+    expect(output).toContain('stale: missing components/board/ExpandedTaskCard.tsx');
     expect(store.getMemoryItem('old-notes-portal-history')?.state).toBe('warm');
   });
 

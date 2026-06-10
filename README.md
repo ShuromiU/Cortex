@@ -20,23 +20,33 @@ Now:
 - default state built from a scored working set, not “all active notes”
 - timestamped note output, current-checkout reference validation, fixture-backed retrieval evaluation, and optional semantic shadow/rank retrieval
 
+## What Changed In V3 (pull, not push)
+
+- A tiny validated **session brief** (≤150 tokens: top branch-scoped decisions/blockers/intents plus a resume line) is the SessionStart payload; cold starts emit nothing.
+- The consult gate shrank to **one line, at most once per session**; the PreToolUse gate is gone. The reflex whisper remains the only mid-session push.
+- The Stop nudge fires **only** when a subagent ran this turn *and* suggest-notes has high-confidence candidates — and it embeds them. Disable with `CORTEX_STOP_NUDGE=off`.
+- Ambient capture is **spooled**: PostToolUse hooks append a JSON line to `.cortex.spool.jsonl` (no Node spawn per tool call); one flush per turn replays the batch.
+- Recall is **answer-shaped**: a lead line naming the most relevant memory and its trust level (`refs OK` / `stale refs` / `refs moved`), then timestamped evidence, within a token budget.
+- Rerank matches stemmed terms (`testing` finds `test flake`), renamed files resolve to `moved:` labels via a git rename map, and stale memory is labeled and demoted gently instead of buried.
+- `cortex_resolve` closes out notes; repeated command failures fold into one episode with an occurrence counter; `cortex gc` prunes derived data (dry-run by default).
+
 ## Core Behavior
 
-- `SessionStart` quietly enables capture with `cortex inject-header --quiet`.
+- `SessionStart` quietly enables capture with `cortex inject-header --quiet` and prints the validated session brief (or nothing on a cold start).
 - `cortex reflect` can emit short hook `additionalContext` on high-confidence focus shifts.
 - Cortex now supports branch-scoped restore: switching branches restores the right snapshot.
 - `cortex_route` / `cortex route` provide the cold-callable capability map.
-- `cortex_recall(topic)` searches notes, summaries, snapshots, and command/episode memory.
-- `cortex_brief(topic)` returns a smaller, agent-friendly subset.
-- `cortex_state` shows current-session load-bearing notes first, then branch snapshots and the scored working set.
+- `cortex_recall(topic)` searches notes, summaries, snapshots, and command/episode memory; output is answer-shaped and budgeted (`budget`, `detail: 'scores'`).
+- `cortex_brief(topic)` returns a smaller, agent-friendly subset (decisions first, budgeted).
+- `cortex_state` shows current-session load-bearing notes first, then branch snapshots and the scored working set, within a budget (default 800 tokens).
 - When that state is empty, `cortex_state` returns fallback guidance instead of an empty string.
 - Note-backed outputs include compact UTC timestamps, for example `Decision [2026-06-06 05:18Z]: [auth] use OIDC`.
-- Cortex tracks a lightweight current app graph for the active scope and validates file/path references extracted from memory.
-- Missing file references demote retrieved memories and render as `Stale references: missing ...`; historical queries can still surface them as history.
+- Cortex tracks a lightweight current app graph for the active scope and validates file/path references extracted from memory; head changes feed a git rename map.
+- Missing file references demote retrieved memories gently (graduated, capped penalty) and render as `[stale: missing ...]`; renamed files render as `[moved: a.ts → b.ts]`; historical queries can still surface them as history.
 - Branch snapshot summaries and recent-session tails prefer notes and file/test/agent activity over raw command-only hook noise.
 - touched and recalled memory stays hot; ignored memory decays out of the default state.
-- resolved notes stay cold and do not trigger hook reflex whispers.
-- UserPromptSubmit and PreToolUse hooks repeat a fact-silent Cortex consult gate for memory-relevant work until `cortex_route`, `cortex_recall(topic)`, `cortex_state`, `cortex_brief`, `cortex_engage`, or topic-based `cortex_validate_memory` is called.
+- resolved notes stay cold and do not trigger hook reflex whispers; `cortex_resolve` closes them out explicitly.
+- The UserPromptSubmit hook may add a one-line consult hint at most once per session for memory-relevant prompts; calling `cortex_route`, `cortex_recall(topic)`, `cortex_state`, `cortex_brief`, `cortex_engage`, or topic-based `cortex_validate_memory` suppresses it.
 - Prompt hooks do not inject memory facts from prompt text; edit and command reflexes still require high-confidence prior context.
 - Optional semantic retrieval is controlled by `CORTEX_SEMANTIC_MODE=off|shadow|rank`; default is `off`.
 
@@ -110,27 +120,18 @@ Run Cortex quietly at the start of every Claude session:
 
 Use `cortex inject-header` without `--quiet` only when you explicitly want to print the larger branch-aware working-memory header.
 
-### PostToolUse Hook
+### Capture, Reflex, and Stop Hooks
 
-To capture file, command, and agent activity:
+Run `cortex install-hooks --claude` to install the canonical scripts into `~/.claude/hooks` with your Node and Cortex paths baked in. It prints the exact `hooks` JSON to merge into settings. The wiring:
 
-```json
-{
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Read|Edit|Write|Bash|Agent",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ~/.claude/hooks/cortex-hook.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+| Event | Matcher | Script | Cost |
+|---|---|---|---|
+| `PostToolUse` | `Read\|Edit\|Write\|Bash\|Agent` | `cortex-capture.sh` | spool append only — no Node spawn |
+| `PreToolUse` | `Edit\|Write` | `cortex-reflect.sh reflect-pre` | Node only when engaged |
+| `UserPromptSubmit` | | `cortex-reflect.sh reflect-prompt` | Node only when engaged |
+| `Stop` | | `cortex-end-of-turn.sh` | one Node spawn per turn: spool flush + conditional nudge |
+
+The spool (`.cortex.spool.jsonl`) is flushed at turn end, at a 256 KiB threshold (detached `cortex flush-spool`), and at the next session start — leftover lines are never lost.
 
 ## Codex Setup
 
@@ -196,10 +197,11 @@ For new projects, keep the global `~/.codex/AGENTS.md` Cortex section aligned wi
 | Tool | Purpose |
 |------|---------|
 | `cortex_route` | Explain ambient memory behavior and route to the right Cortex tool |
-| `cortex_state` | Return current-session notes first, then the scored working set; empty state returns next-step guidance |
+| `cortex_state` | Return current-session notes first, then the scored working set, budgeted; empty state returns next-step guidance |
 | `cortex_note` | Record an `insight`, `decision`, `intent`, `blocker`, or `focus` |
-| `cortex_recall` | Retrieve evidence for a topic from memory |
-| `cortex_brief` | Return a smaller topical brief, optionally for an agent |
+| `cortex_resolve` | Mark a note resolved or superseded (optionally with replacement content) |
+| `cortex_recall` | Retrieve evidence for a topic: lead line + timestamped, validity-labeled evidence within a budget |
+| `cortex_brief` | Return a smaller topical brief, optionally for an agent, budgeted |
 | `cortex_suggest_notes` | Suggest load-bearing notes from the current session without writing them |
 | `cortex_validate_memory` | Audit memories against the current checkout without deleting notes |
 | `cortex_engage` | Re-enable Cortex if it was disengaged |
@@ -219,9 +221,14 @@ cortex status
 cortex stats
 cortex consolidate
 cortex evaluate
-cortex evaluate --suite quality-suite.json --compare previous-eval.json
+cortex evaluate --suite eval/suites/stemming.json --compare eval/baselines/stemming.json
 cortex suggest-notes
 cortex validate-memory --topic "Activity notes portal"
+cortex note-resolve --subject "auth transport" --status superseded
+cortex flush-spool
+cortex gc            # dry-run report
+cortex gc --apply    # actually prune (+ VACUUM when fragmented)
+cortex install-hooks --claude
 cortex serve
 cortex log read
 cortex log edit
@@ -273,9 +280,11 @@ Retrieval is hybrid:
 
 The quality report includes `top1_hit`, `recall_at_3`, `noise_count`, `stale_count`, output tokens, and per-result score breakdowns. Pass `--compare previous-eval.json` to include aggregate deltas against an earlier run.
 
+Suites can be hermetic: a `seed` block builds an in-memory store from declarative items, app graphs, and renames, so quality runs are deterministic and never touch your real `.cortex.db`. The repo ships locked suites in `eval/suites/` with reference results in `eval/baselines/`.
+
 ## Recommended Usage
 
-Cortex should feel ambient for trivial new work, but non-trivial familiar or resumed work should consult Cortex before planning or tool use. Hooks repeat a short consult gate for memory-relevant work until an explicit consultation tool is called.
+Cortex leads with value instead of demands: the session brief shows validated prior context at startup, the reflex whispers on high-confidence focus shifts, and at most one one-line hint appears for memory-relevant prompts. Consult `cortex_recall(topic)` proactively for non-trivial familiar or resumed work.
 
 - Use `cortex_route` when you need the capability map.
 - Use `cortex_recall(topic)` proactively before non-trivial work in familiar areas, recurring bugs, resumed features, or systems with prior decisions; use `cortex_state` when you need the broader working set.
@@ -289,13 +298,19 @@ Anti-patterns: don't add startup rituals to agent instructions, don't note routi
 
 ## Data
 
-Cortex stores memory in `.cortex.db` in the repo root.
+Cortex stores memory in `.cortex.db` in the repo root, engagement state in `.cortex.state`, and pending capture in `.cortex.spool.jsonl`.
 
 Add to `.gitignore`:
 
 ```text
 .cortex.db
+.cortex.state
+.cortex.spool.jsonl
+.cortex.spool.jsonl.processing
+.cortex.agent-used
 ```
+
+Growth is bounded: `cortex gc` (and the opt-in `CORTEX_GC_AUTO=apply` startup sweep, at most once per 24h) prunes events of consolidated sessions, trims the retrieval log, rolls up old ledger rows, deletes never-accessed archived items after 90 days, and caps stored `command_run` items per scope. Dry-run is the default; `--apply` deletes.
 
 ## License
 

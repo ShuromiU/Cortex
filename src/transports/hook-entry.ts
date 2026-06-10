@@ -11,17 +11,20 @@ import {
   handleWriteEvent,
 } from '../capture/hooks.js';
 import { reflectMemory, type ReflexEvent } from '../query/reflex.js';
+import { suggestNotes } from '../query/suggest-notes.js';
+import { flushSpool } from '../capture/spool.js';
 import { ensureScopedSession } from '../scope/runtime.js';
 import { configureEngagementPath, readEngagement, writeEngagement } from './mcp.js';
 
 const CORTEX_CONSULTED_KEY = 'cortex_consulted';
-const CONSULT_GATE_REQUIRED_KEY = 'consult_gate_required';
-const CONSULT_GATE_REASON_KEY = 'consult_gate_reason';
+const CONSULT_GATE_FIRED_KEY = 'consult_gate_fired';
 const CONSULT_GATE_SURFACED_COUNT_KEY = 'consult_gate_surfaced_count';
+const AGENT_USED_KEY = 'agent_used';
 const CONSULT_GATE_CONTEXT =
-  'Cortex consult required: this looks like memory-relevant work. Call cortex_recall(topic) before planning or tool work; use cortex_state for broad state or cortex_route for the capability map. Use cortex_disengage only for throwaway work.';
+  'Cortex may have prior context for this work — cortex_recall(topic) checks; cortex_state for broad state.';
 const MEMORY_RELEVANT_PROMPT_PATTERN =
   /\b(resume|resumed|resuming|continue|continuing|again|earlier|previous|prior|follow[- ]?up|pick up|fix|debug|bug|error|failure|failing|broken|regression|implement|plan|multi[- ]?step|decision|remember|memory|refactor)\b/i;
+const STOP_NUDGE_CONFIDENCE_THRESHOLD = 0.6;
 
 function toHookJson(hookEventName: 'UserPromptSubmit' | 'PreToolUse', additionalContext: string): string {
   return JSON.stringify({
@@ -38,7 +41,8 @@ export type HookAction =
   | 'reflect-pre'
   | 'reflect-edit'
   | 'reflect-cmd'
-  | 'reflect-agent';
+  | 'reflect-agent'
+  | 'end-of-turn';
 
 export interface HookRuntimeOptions {
   sessionId?: string;
@@ -127,25 +131,17 @@ function promptGateReason(prompt: string | undefined): string | undefined {
     : undefined;
 }
 
-function isGateableToolName(name: string): boolean {
-  return (
-    name === 'Bash' ||
-    name === 'shell_command' ||
-    name.endsWith('.shell_command') ||
-    name === 'Edit' ||
-    name === 'Write' ||
-    name === 'apply_patch' ||
-    name.endsWith('.apply_patch') ||
-    name === 'Agent'
-  );
-}
-
 function incrementConsultGateCount(engagement: Record<string, string>): void {
   const surfaced = Number.parseInt(engagement[CONSULT_GATE_SURFACED_COUNT_KEY] ?? '0', 10);
   const next = Number.isFinite(surfaced) ? surfaced + 1 : 1;
   writeEngagement(CONSULT_GATE_SURFACED_COUNT_KEY, String(next));
 }
 
+/**
+ * One-line, once-per-session hint. The SessionStart brief and the reflex are
+ * the real memory channels; this only catches sessions where the brief was
+ * empty but the prompt looks memory-relevant.
+ */
 function renderConsultGate(
   store: CortexStore,
   cwd: string,
@@ -163,19 +159,18 @@ function renderConsultGate(
   if (engagement['state_called'] === 'true') {
     return '';
   }
+  if (engagement[CONSULT_GATE_FIRED_KEY] === 'true') {
+    return '';
+  }
 
-  const existingReason = engagement[CONSULT_GATE_REQUIRED_KEY] === 'true'
-    ? engagement[CONSULT_GATE_REASON_KEY]
-    : undefined;
-  const resolvedReason = existingReason ?? reason ?? (
+  const resolvedReason = reason ?? (
     hasPriorScopeSessions(store) ? 'current scope has prior Cortex sessions' : undefined
   );
   if (!resolvedReason) {
     return '';
   }
 
-  writeEngagement(CONSULT_GATE_REQUIRED_KEY, 'true');
-  writeEngagement(CONSULT_GATE_REASON_KEY, resolvedReason);
+  writeEngagement(CONSULT_GATE_FIRED_KEY, 'true');
   incrementConsultGateCount(engagement);
   return toHookJson(hookEventName, CONSULT_GATE_CONTEXT);
 }
@@ -299,8 +294,82 @@ function postToolUse(
     const desc = firstString(input['description'], input['desc']);
     if (desc) {
       handleAgentEvent(store, sessionId, { desc });
+      try {
+        configureEngagementPath(cwd);
+        writeEngagement(AGENT_USED_KEY, 'true');
+      } catch {
+        // Marker is advisory; capture already succeeded.
+      }
     }
   }
+}
+
+function truncateSuggestion(text: string, maxChars = 140): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  return collapsed.length <= maxChars
+    ? collapsed
+    : `${collapsed.slice(0, maxChars - 1).trimEnd()}…`;
+}
+
+/**
+ * Stop-hook nudge, conditional: only blocks the turn end when this turn used a
+ * subagent AND suggest-notes has concrete high-confidence candidates to show.
+ * Silence is the default. Disable entirely with CORTEX_STOP_NUDGE=off.
+ */
+function endOfTurn(
+  store: CortexStore,
+  payload: Record<string, unknown>,
+  cwd: string,
+  options: HookRuntimeOptions,
+): string {
+  if (payload['stop_hook_active'] === true) {
+    return '';
+  }
+
+  // Replay this turn's spooled capture first so suggestions see fresh evidence.
+  try {
+    flushSpool(store, cwd, resolveSessionId(store, cwd, options));
+  } catch {
+    // Spool replay is best-effort at turn end; next flush picks it up.
+  }
+
+  if (process.env['CORTEX_STOP_NUDGE'] === 'off') {
+    return '';
+  }
+
+  configureEngagementPath(cwd);
+  const engagement = readEngagement();
+  const agentUsed =
+    engagement[AGENT_USED_KEY] === 'true' || payload['agent_used'] === true;
+  if (!agentUsed) {
+    return '';
+  }
+  writeEngagement(AGENT_USED_KEY, 'false');
+
+  let suggestions;
+  try {
+    const sessionId = resolveSessionId(store, cwd, options);
+    suggestions = suggestNotes(store, sessionId).filter(
+      suggestion => suggestion.confidence >= STOP_NUDGE_CONFIDENCE_THRESHOLD,
+    );
+  } catch {
+    return '';
+  }
+
+  if (suggestions.length === 0) {
+    return '';
+  }
+
+  const shown = suggestions
+    .slice(0, 3)
+    .map(suggestion => `- ${suggestion.kind}: ${truncateSuggestion(suggestion.content)}`);
+  const reason = [
+    'Cortex found candidate notes from this turn:',
+    ...shown,
+    'Write the load-bearing ones with cortex_note(kind, content); if none apply, reply DONE.',
+  ].join('\n');
+
+  return JSON.stringify({ decision: 'block', reason });
 }
 
 function reflectFromPayload(
@@ -336,12 +405,6 @@ function reflectFromPayload(
     desc = firstString(input['description'], input['desc'], payload['desc']);
   } else {
     const name = toolName(payload);
-    if (isGateableToolName(name)) {
-      const gate = renderConsultGate(store, cwd, 'PreToolUse', undefined);
-      if (gate) {
-        return gate;
-      }
-    }
     if (name === 'Bash' || name === 'shell_command' || name.endsWith('.shell_command')) {
       event = 'cmd';
       cmd = extractCommand(input);
@@ -384,6 +447,10 @@ export function handleHookPayload(
   if (action === 'post') {
     postToolUse(store, payload, cwd, options);
     return '';
+  }
+
+  if (action === 'end-of-turn') {
+    return endOfTurn(store, payload, cwd, options);
   }
 
   return reflectFromPayload(store, action, payload, cwd, options);
