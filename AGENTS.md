@@ -7,6 +7,12 @@
 - Use `cortex_validate_memory` when retrieved notes mention files, plans, or app structure that may be stale; repo truth beats memory.
 - Write `cortex_note` entries for real decisions, blockers, and non-obvious discoveries.
 
+## RefCertify
+
+- This repo is indexed by RefCertify. Use it for structural code questions (`refcertify_outline`, `refcertify_find`/`refcertify_search`, `refcertify_source`/`refcertify_slice`, `refcertify_refs`/`refcertify_deps`/`refcertify_callers`); raw `rg` or direct reads stay right for literals, configs, logs, and markdown.
+- `refcertify_route` is an evidence-grounded advisor, not a gate; `refcertify_pack` is last resort and preflights itself (`force:true` only when broad context is intentional).
+- RefCertify answers are root-bound: in a git worktree or second checkout, confirm the active root via `refcertify_stats`/`refcertify_workspace` and bind it with `refcertify_workspace {action:"use", path:"<git toplevel>"}`.
+
 ## Repo Priorities
 
 - Keep the retrieval-first memory model intact: `memory_items` is the canonical search layer and the default state is the scored working set.

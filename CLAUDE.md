@@ -92,11 +92,11 @@ Anti-patterns (still apply once engaged):
   - `~/.claude/hooks/cortex-hook.sh`
   - the live path Claude uses for the Cortex MCP server
 
-## RefCertify — Codebase Index (use before Read/Grep on this repo)
+## RefCertify — Codebase Index
 
-Cortex's source lives at `C:\Claude Code\cortex` and is indexed by RefCertify. Use RefCertify MCP tools instead of Read/Grep when navigating the code. Every tool accepts `compact: true` (~50% smaller payloads).
+Cortex's source at `C:\Claude Code\cortex` is indexed by RefCertify. Strict Saver posture: use RefCertify when it improves quality per token; raw `rg`/`Read`/Grep stays right for literal strings, exact paths, configs, logs, markdown, and generated text. Hook nudges are advisory, not gates. Every tool accepts `compact: true` for smaller payloads.
 
-**Workflow:** `refcertify_outline` (file or array) → `refcertify_source` (one symbol) → `refcertify_slice` (symbol + referenced symbols) → `refcertify_find` / `refcertify_search` → `refcertify_refs` → `refcertify_deps` → `refcertify_grep` → THEN Read.
+**Tool picks:** `refcertify_outline` (file shape) · `refcertify_find`/`refcertify_search` (symbols) · `refcertify_source` (one exact symbol) · `refcertify_slice` (symbol + direct helpers) · `refcertify_grep` (scoped raw text) · `refcertify_refs`/`refcertify_deps`/`refcertify_callers` (impact). `refcertify_help` is the compact router; `refcertify_route` is an evidence-grounded advisor, not a gate — treat its recommendation as a hint.
 
 **High-leverage tools for refactor work in this repo:**
 - `refcertify_callers(name)` — who calls a memory/retrieval function before you change its signature.
@@ -104,6 +104,7 @@ Cortex's source lives at `C:\Claude Code\cortex` and is indexed by RefCertify. U
 - `refcertify_signatures([names])` — batch signature lookup when comparing query/* methods.
 - `refcertify_unused_exports({path: 'src/'})` — dead-code finder; flag pre-`memory_items`-era exports.
 - `refcertify_kind_index('interface', {path: 'src/db'})` — every type in a subtree.
-- `refcertify_pack(query, budget_tokens?)` — assemble a token-budgeted bundle for a question instead of guessing files.
 
-**Grep is allowed only for non-code files** (markdown, JSON, yaml, config). The global `~/.claude/hooks/refcertify-first.sh` enforces this.
+`refcertify_pack` is last resort for broad context. It runs governor preflight and refuses only on strong evidence (telemetry gate fail, zero index evidence, true literal/config needle, extreme budget); use `preflight:true` to inspect, `force:true` only when broad context is intentional.
+
+**Worktree rule:** RefCertify answers are root-bound. In a git worktree or any checkout other than the session's start root, confirm the active root via `refcertify_stats`/`refcertify_workspace` and bind it with `refcertify_workspace {action:"use", path:"<toplevel>"}` before trusting answers.
