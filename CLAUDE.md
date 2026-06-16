@@ -21,6 +21,11 @@ Persistent working memory for coding agents.
   - this file
   - any consumer `CLAUDE.md` files that actually rely on Cortex workflows
 
+## Agent Tooling
+- **Deferred MCP schemas:** Tool discovery failures are not service failures by default. Prefer callable-name discovery (`ToolSearch`/`tool_search` query `refcertify_help`, `refcertify_outline`, `cortex_recall`) or server-name bootstrap (`RefCertify`, `Cortex`) as the primary path. Canonical Codex selectors such as `select:mcp__refcertify__refcertify_help` or `select:mcp__cortex__cortex_recall` are not authoritative on current Codex app-server builds and may return 0 even when MCP runtime calls are healthy.
+- **Context7:** Use for current library/framework/SDK/API/CLI/cloud-service docs, setup, config, migrations, and code examples. First call `resolve-library-id` with the library name and full user question, choose the best match, then call `query-docs` with the selected ID and full question. Do not use it for local repo truth, business logic, code review, exact strings, logs, or general programming concepts.
+- **BMAD:** Use for product/feature planning, PRDs, architecture, epics/stories, implementation readiness, sprint/story workflows, major scope changes, or explicit BMAD/persona requests. Start with `bmad-help` when unsure; prefer direct Claude/Codex flow for small well-scoped code changes.
+
 ## Core Files
 - `src/db/schema.ts` — schema, migrations, FTS setup
 - `src/db/store.ts` — canonical persistence/query surface
@@ -54,6 +59,7 @@ Persistent working memory for coding agents.
 - `inject-header --quiet` is wired to SessionStart. It flushes leftover spool lines into the session they belong to, creates a scoped session, flips `<project>/.cortex.state` to `enabled=true`, and prints the validated session brief (≤150 tokens) — or nothing on a cold start.
 - `cortex reflect` is hook-facing and emits short `additionalContext` only for high-confidence remembered focus shifts; silence is the default.
 - `cortex_route` / `cortex route` are the cold-callable capability map.
+- Deferred tool discovery should use callable-name discovery (`ToolSearch`/`tool_search` query `cortex_recall`, `cortex_state`, or `cortex_route`) or server-name bootstrap (`Cortex`). Canonical `select:mcp__cortex__...` selectors may return 0 on current Codex app-server builds and are not proof Cortex is unavailable.
 - `cortex_state` should show current-session load-bearing notes first, then the current working set, within its budget (default 800 tokens), never an empty `Branch snapshot:` header or duplicated evidence lines.
 - Empty `cortex_state` should return actionable fallback guidance, not an empty string.
 - `cortex_recall` and `cortex_brief` should search notes, snapshots, summaries, and command/episode memory, lead with a most-relevant line plus trust label, and respect their budgets.

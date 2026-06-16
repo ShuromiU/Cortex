@@ -7,6 +7,12 @@
 - Use `cortex_validate_memory` when retrieved notes mention files, plans, or app structure that may be stale; repo truth beats memory. Recall output labels stale (`[stale:]`) and renamed (`[moved:]`) references.
 - Write `cortex_note` entries for real decisions, blockers, and non-obvious discoveries; close them out with `cortex_resolve` when they stop being true.
 
+## Agent Tooling
+
+- **Deferred MCP schemas:** Tool discovery failures are not service failures by default. Prefer callable-name discovery (`ToolSearch`/`tool_search` query `refcertify_help`, `refcertify_outline`, `cortex_recall`) or server-name bootstrap (`RefCertify`, `Cortex`) as the primary path. Canonical Codex selectors such as `select:mcp__refcertify__refcertify_help` or `select:mcp__cortex__cortex_recall` are not authoritative on current Codex app-server builds and may return 0 even when MCP runtime calls are healthy.
+- **Context7:** Use for current library/framework/SDK/API/CLI/cloud-service docs, setup, config, migrations, and code examples. First call `resolve-library-id` with the library name and full user question, choose the best match, then call `query-docs` with the selected ID and full question. Do not use it for local repo truth, business logic, code review, exact strings, logs, or general programming concepts.
+- **BMAD:** Use for product/feature planning, PRDs, architecture, epics/stories, implementation readiness, sprint/story workflows, major scope changes, or explicit BMAD/persona requests. Start with `bmad-help` when unsure; prefer direct Codex flow for small well-scoped code changes.
+
 ## RefCertify
 
 - This repo is indexed by RefCertify. Use it for structural code questions (`refcertify_outline`, `refcertify_find`/`refcertify_search`, `refcertify_source`/`refcertify_slice`, `refcertify_refs`/`refcertify_deps`/`refcertify_callers`); raw `rg` or direct reads stay right for literals, configs, logs, and markdown.

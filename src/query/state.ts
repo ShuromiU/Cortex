@@ -23,6 +23,8 @@ const EMPTY_FULL_STATE_FALLBACK = [
   'Cortex state: no current working memory for this scope.',
   'Use cortex_route for the capability map, or cortex_recall(topic) if you are resuming a known area.',
 ].join('\n');
+const DEFERRED_TOOL_DISCOVERY_GUIDANCE =
+  'Deferred schema discovery: use ToolSearch/tool_search by callable name (`cortex_recall`, `cortex_state`, `cortex_route`) or server name (`Cortex`). Canonical `select:mcp__cortex__...` selectors may return 0 on current Codex app-server builds and are not proof Cortex is unavailable.';
 
 export function formatTokens(n: number): string {
   if (n >= 1000) {
@@ -147,7 +149,11 @@ function renderUsagePolicy(mode: UsagePolicyMode): string[] {
 }
 
 function withUsagePolicy(lines: string[], mode: UsagePolicyMode): string {
-  return [...lines.filter(line => line.length > 0), ...renderUsagePolicy(mode)].join('\n');
+  return [
+    ...lines.filter(line => line.length > 0),
+    ...renderUsagePolicy(mode),
+    DEFERRED_TOOL_DISCOVERY_GUIDANCE,
+  ].join('\n');
 }
 
 function renderResumeCandidate(items: ParsedMemoryItem[]): string | null {

@@ -118,6 +118,8 @@ export function renderCortexRoute(): string {
   return [
     'Cortex route: ambient memory for coding agents.',
     'Default behavior: ambient capture is enabled at session start, and the reflex may whisper short prior context on focus shifts.',
+    'Deferred schema discovery: use ToolSearch/tool_search by callable name (`cortex_recall`, `cortex_state`, `cortex_route`) or server name (`Cortex`).',
+    'Canonical `select:mcp__cortex__...` selectors may return 0 on current Codex app-server builds and are not proof Cortex is unavailable.',
     'Use cortex_recall(topic) proactively before non-trivial work in a familiar area, recurring bug, resumed feature, or system with prior decisions.',
     'Use cortex_state for a broader working set when resuming dense work, and cortex_brief(topic) before delegating with context.',
     'Use cortex_validate_memory(topic) when retrieved notes mention files/plans and you need to check them against the current checkout.',

@@ -36,6 +36,7 @@ Now:
 - `cortex reflect` can emit short hook `additionalContext` on high-confidence focus shifts.
 - Cortex now supports branch-scoped restore: switching branches restores the right snapshot.
 - `cortex_route` / `cortex route` provide the cold-callable capability map.
+- Deferred tool discovery should use callable-name discovery (`ToolSearch`/`tool_search` query `cortex_recall`, `cortex_state`, or `cortex_route`) or server-name bootstrap (`Cortex`). Canonical `select:mcp__cortex__...` selectors may return 0 on current Codex app-server builds and are not proof Cortex is unavailable.
 - `cortex_recall(topic)` searches notes, summaries, snapshots, and command/episode memory; output is answer-shaped and budgeted (`budget`, `detail: 'scores'`).
 - `cortex_brief(topic)` returns a smaller, agent-friendly subset (decisions first, budgeted).
 - `cortex_state` shows current-session load-bearing notes first, then branch snapshots and the scored working set, within a budget (default 800 tokens).
@@ -286,7 +287,7 @@ Suites can be hermetic: a `seed` block builds an in-memory store from declarativ
 
 Cortex leads with value instead of demands: the session brief shows validated prior context at startup, the reflex whispers on high-confidence focus shifts, and at most one one-line hint appears for memory-relevant prompts. Consult `cortex_recall(topic)` proactively for non-trivial familiar or resumed work.
 
-- Use `cortex_route` when you need the capability map.
+- Use `cortex_route` when you need the capability map; if deferred discovery is needed, discover by callable name (`cortex_route`, `cortex_recall`, `cortex_state`) or by server name (`Cortex`).
 - Use `cortex_recall(topic)` proactively before non-trivial work in familiar areas, recurring bugs, resumed features, or systems with prior decisions; use `cortex_state` when you need the broader working set.
 - Use `cortex_brief(topic)` before dispatching a subagent when topic history matters.
 - Use `cortex_note(decision, alternatives=[...])`, `cortex_note(insight)`, or `cortex_note(blocker)` for load-bearing memory only.

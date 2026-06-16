@@ -38,6 +38,11 @@ describe('buildHeader - empty', () => {
     expect(header).toContain('Cortex is ambient');
     expect(header).toContain('cortex_route');
     expect(header).toContain('Consult Cortex before non-trivial familiar or resumed work');
+    expect(header).toContain('callable name');
+    expect(header).toContain('cortex_recall');
+    expect(header).toContain('server name');
+    expect(header).toContain('select:mcp__cortex__');
+    expect(header).toContain('not proof Cortex is unavailable');
     expect(header).not.toContain('Start with cortex_state');
   });
 });

@@ -186,6 +186,18 @@ describe('handleToolCall', () => {
     expect(result).toContain('cortex_recall');
   });
 
+  it('cortex_route gives deferred tool discovery recovery guidance', () => {
+    const result = callTool('cortex_route');
+    expect(result).toContain('callable name');
+    expect(result).toContain('cortex_recall');
+    expect(result).toContain('cortex_state');
+    expect(result).toContain('cortex_route');
+    expect(result).toContain('server name');
+    expect(result).toContain('Cortex');
+    expect(result).toContain('select:mcp__cortex__');
+    expect(result).toContain('not proof Cortex is unavailable');
+  });
+
   it('cortex_route marks Cortex as consulted for hook visibility suppression', () => {
     configureEngagementPath(cwd);
 
