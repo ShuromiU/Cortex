@@ -70,13 +70,17 @@ _Critical rules and patterns for implementing code in Cortex. Unobvious details 
 
 ### Retrieval-Quality Gate
 
-Any change touching ranking, scoring, tokenization, reference validation, or output shaping must run the locked suites:
+Any change touching ranking, scoring, tokenization, reference validation, or output shaping must run the gate. One command, all suites, non-zero exit on regression:
 
 ```bash
-node dist/transports/cli.js evaluate --suite eval/suites/<name>.json --compare eval/baselines/<name>.json
+npm run gate
 ```
 
-**Reject the change on:** any negative `top1_hit` delta, any negative `recall_at_3` delta, or any positive `output_tokens` delta. Suites are `budget`, `kind-ordering`, `rename-moved`, `stale-label`, `stemming`. Baselines are locked artifacts — regenerating one is a deliberate act that must be justified in the commit body, never a way to make a red gate go green.
+**It fails on:** any negative `top1_hit` delta, any negative `recall_at_3` delta, any positive `output_tokens` delta, any fixture whose own assertions fail, a suite with no baseline, a baseline with no suite, a baseline missing a metric, a suite that asserts nothing, and any registered `memory_items` kind no suite exercises (AD-5). `noise_count` and `stale_count` are reported, not gated. Suites are `budget`, `kind-ordering`, `rename-moved`, `stale-label`, `stemming`; CI runs the gate on every push.
+
+`evaluate --suite … --compare …` still exists as the single-suite human view. **It always exits 0 and is not a gate** — do not use it as one.
+
+Baselines and `eval/kind-coverage.json` are locked artifacts. Change one only via `cortex eval-gate --regenerate-baseline <suite>` with a `Baseline-Regenerated: <reason>` line in the body of the commit that makes the change; CI rejects it otherwise. Regenerating is never a way to make a red gate go green.
 
 ### Code Quality & Style Rules
 

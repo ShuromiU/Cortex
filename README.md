@@ -146,10 +146,20 @@ Branch snapshots, scoped session listings and the recent-session tail read prima
 Ranking is benchmarked by hermetic seeded suites in `eval/suites/`, each locked against a reference result in `eval/baselines/`. One command runs all of them:
 
 ```bash
-node dist/transports/cli.js eval-gate
+npm run gate
 ```
 
-It fails, names the suite and the metric, and exits non-zero on a negative `top1_hit` delta, a negative `recall_at_3` delta, or a positive `output_tokens` delta — accuracy must not fall and output must not get more expensive. It also enforces AD-5: a `memory_items` kind that no fixture exercises is invisible to the suites rather than penalised by them, so a newly registered kind fails the gate until a fixture ships with it. `eval/kind-coverage.json` grandfathers the kinds that predate the gate.
+It names the suite and the metric and exits non-zero on a negative `top1_hit` delta, a negative `recall_at_3` delta, or a positive `output_tokens` delta — accuracy must not fall and output must not get more expensive. `noise_count` and `stale_count` are reported for visibility but do not gate.
+
+Everything ambiguous fails closed, because a gate that cannot fail is worse than none:
+
+- a suite with no baseline, and a **baseline with no suite** — deleting a suite file must not silently stop gating it
+- a baseline **missing** a metric — absent values compare as `NaN`, which would otherwise un-gate that metric while still printing plausible numbers
+- a **fixture whose own assertions fail** — two suites exist only to lock `[stale:` and `[moved:` in the output, and losing a label shrinks the output, so the aggregate delta alone would read the regression as an improvement
+- a suite with no fixtures or no seed, which would score zero on everything and pass forever
+- an unreadable suite, baseline or manifest
+
+It also enforces AD-5: a `memory_items` kind that no fixture exercises is invisible to the suites rather than penalised by them, so a newly registered kind fails the gate until a fixture ships with it. `eval/kind-coverage.json` grandfathers the kinds that predate the gate — and a test pins that list to exactly the kinds no suite covers, so widening it means editing an assertion, not quietly appending to an array.
 
 CI runs the gate on every push, after build, lint and tests.
 
@@ -159,7 +169,7 @@ Baselines are locked artifacts. Regenerating one is deliberate:
 node dist/transports/cli.js eval-gate --regenerate-baseline budget
 ```
 
-The command prints the regressions it is about to bake in, and CI rejects the change unless a commit body in the range carries a `Baseline-Regenerated: <reason>` line. Regenerating is never the way to turn a red gate green.
+The command prints the regressions it is about to bake in, and CI rejects the change unless **the commit that makes it** carries a `Baseline-Regenerated: <reason>` line — a trailer elsewhere in the range cannot launder it, and a placeholder reason is rejected. `eval/kind-coverage.json` is guarded the same way. Regenerating is never the way to turn a red gate green.
 
 ## Codex Setup
 

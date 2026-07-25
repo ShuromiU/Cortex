@@ -444,7 +444,12 @@ export function createProgram(): Command {
         rootPath: process.cwd(),
       };
 
-      if (opts.regenerateBaseline) {
+      if (opts.regenerateBaseline !== undefined) {
+        if (opts.regenerateBaseline.trim().length === 0) {
+          process.stderr.write('name the suite to regenerate, e.g. --regenerate-baseline budget\n');
+          process.exitCode = 1;
+          return;
+        }
         const report = regenerateBaseline(opts.regenerateBaseline, options);
         process.stdout.write(`rewrote ${report.baselinePath}\n`);
         if (report.accepted.length > 0) {

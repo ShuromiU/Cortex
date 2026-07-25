@@ -48,6 +48,7 @@ Persistent working memory for coding agents.
 - `src/query/scope.ts` — branch/worktree session scoping
 - `src/capture/spool.ts` — JSONL capture spool: append, atomic claim, idempotent flush
 - `src/eval/seed.ts` — hermetic scenario seeding for quality suites
+- `src/eval/gate.ts` — the locked retrieval-quality gate (suite discovery, comparison, AD-5 kind coverage, baseline regeneration)
 - `src/transports/cli.ts` — `inject-header`, `route`, `reflect`, `flush-spool`, `gc`, `install-hooks`, evaluation
 - `src/transports/hook-entry.ts` — JSON hook bridge (reflex, one-shot consult hint, `end-of-turn`)
 - `src/transports/mcp.ts` — MCP tools used by Claude (incl. engagement state at `<project>/.cortex.state`)
@@ -109,8 +110,8 @@ Anti-patterns (still apply once engaged):
 - Run `npm run build`
 - Run `npm run lint`
 - Run `npx vitest run`
-- Run `node dist/transports/cli.js eval-gate` — every locked suite against its baseline in one command, plus the AD-5 check that no registered `memory_items` kind is unexercised. Fails on a negative `top1_hit`/`recall_at_3` delta or a positive `output_tokens` delta, names the suite and metric, and exits non-zero. CI runs it on every push. (`evaluate --suite … --compare …` remains the single-suite human view; it always exits 0 and is not a gate.)
-- Baselines in `eval/baselines/` are locked artifacts. Rewriting one requires `cortex eval-gate --regenerate-baseline <suite>` and a `Baseline-Regenerated: <reason>` line in the commit body; CI rejects an unjustified baseline change. Regenerating is never the way to turn a red gate green.
+- Run `npm run gate` — every locked suite against its baseline in one command, plus AD-5 kind coverage. Names the suite and metric and exits non-zero on: a negative `top1_hit`/`recall_at_3` delta, a positive `output_tokens` delta, a failing fixture assertion, a suite with no baseline, a **baseline with no suite** (a deleted suite must not silently stop gating), a baseline **missing** a metric (absent values compare as `NaN`, which would otherwise un-gate it), a suite that asserts nothing, or an unexercised registered kind. `noise_count` and `stale_count` are reported, not gated. CI runs it on every push. (`evaluate --suite … --compare …` remains the single-suite human view; it always exits 0 and is not a gate.)
+- Baselines in `eval/baselines/` and `eval/kind-coverage.json` are locked artifacts. Change one via `cortex eval-gate --regenerate-baseline <suite>` with a `Baseline-Regenerated: <reason>` line in the body of the commit that makes the change; CI rejects it otherwise. Regenerating is never the way to turn a red gate green.
 - A change introducing a new `memory_items` kind must add a locked fixture exercising it in the same change (AD-5). `eval/kind-coverage.json` grandfathers the kinds that predate the gate; adding to that list is not how to pass it.
 - If the change affects real Claude usage, verify:
   - `~/.claude/settings.json`

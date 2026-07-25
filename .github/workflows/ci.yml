@@ -5,10 +5,22 @@ on:
     branches: ['**']
   pull_request:
 
+# Least privilege: `npm ci` runs lifecycle scripts from the whole dependency
+# tree, including better-sqlite3's native build.
+permissions:
+  contents: read
+
+# A same-repo PR otherwise runs the whole matrix twice, on push and on
+# pull_request. Superseded runs are cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     name: verify (${{ matrix.os }}, node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -20,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The baseline-justification check reads commit bodies in the range.
+          # The justification guard reads commit bodies across the range.
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
@@ -34,11 +46,14 @@ jobs:
 
       - run: npm run lint
 
-      - run: npx vitest run
+      # The declared script, not `npx vitest run`: npx would silently fetch a
+      # published vitest if the devDependency were removed, and any future
+      # change to the test script would never reach CI.
+      - run: npm test
 
       # Runs against dist/, so it must follow the build.
       - name: Retrieval quality gate
-        run: node dist/transports/cli.js eval-gate
+        run: npm run gate
 
       - name: Baseline justification
         if: runner.os == 'Linux' && matrix.node == 20
