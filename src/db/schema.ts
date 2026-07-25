@@ -243,7 +243,6 @@ CREATE INDEX IF NOT EXISTS idx_ledger_session   ON token_ledger(session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent  ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status  ON sessions(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_scope   ON sessions(scope_key, status, started_at);
-CREATE INDEX IF NOT EXISTS idx_sessions_agent   ON sessions(scope_key, agent_id);
 CREATE INDEX IF NOT EXISTS idx_command_runs_session ON command_runs(session_id, timestamp);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_command_runs_event ON command_runs(event_id) WHERE event_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id, created_at);
@@ -354,6 +353,7 @@ export function applySchema(db: Database.Database): void {
   ensureSessionScopeColumns(db);
   ensureMemoryReferenceColumns(db);
   db.exec(INDEXES);
+  ensureSessionAgentIndex(db);
 }
 
 /**
@@ -481,6 +481,27 @@ function ensureColumn(
 
 function ensureMemoryReferenceColumns(db: Database.Database): void {
   ensureColumn(db, 'memory_references', 'moved_to', 'moved_to TEXT');
+}
+
+/**
+ * Unique on the AD-9 identity, partial so primary sessions (agent_id NULL) are
+ * unconstrained. Uniqueness is the race guard: hook processes are independent
+ * and resolve a child by read-then-insert, so without it two concurrent tool
+ * calls from one subagent can create two child rows and strand the loser's
+ * events. Guarded creation — a store that somehow already holds duplicates
+ * must still open (AD-11), so it degrades to a plain lookup index.
+ */
+function ensureSessionAgentIndex(db: Database.Database): void {
+  try {
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_agent
+         ON sessions(scope_key, agent_id) WHERE agent_id IS NOT NULL`,
+    );
+  } catch {
+    db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(scope_key, agent_id)',
+    );
+  }
 }
 
 function ensureSessionScopeColumns(db: Database.Database): void {

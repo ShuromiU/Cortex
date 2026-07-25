@@ -127,7 +127,7 @@ function isEnabled(cwd: string, options: HookRuntimeOptions): boolean {
 }
 
 function hasPriorScopeSessions(store: CortexStore): boolean {
-  const session = store.getCurrentSession() ?? store.getRecentSessions(1)[0];
+  const session = store.getCurrentSession() ?? store.getRecentPrimarySessions(1)[0];
   if (!session) {
     return false;
   }

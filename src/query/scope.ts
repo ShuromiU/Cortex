@@ -9,7 +9,7 @@ export interface PreferredScope {
 }
 
 export function getPreferredScope(store: CortexStore): PreferredScope | undefined {
-  const session = store.getCurrentSession() ?? store.getRecentSessions(1)[0];
+  const session = store.getCurrentSession() ?? store.getRecentPrimarySessions(1)[0];
   if (!session) {
     return undefined;
   }

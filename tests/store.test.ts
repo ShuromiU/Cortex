@@ -183,6 +183,53 @@ describe('CortexStore — sessions', () => {
     expect(store.getCurrentSession()?.id).toBe(primary.id);
   });
 
+  it('rejects a duplicate (scope_key, agent_id) pair', () => {
+    const primary = store.createSession({ scopeKey: 'project:/repo' });
+    store.createSession({
+      parentSessionId: primary.id,
+      agentId: 'agent-abc',
+      scopeKey: 'project:/repo',
+    });
+
+    expect(() =>
+      store.createSession({
+        parentSessionId: primary.id,
+        agentId: 'agent-abc',
+        scopeKey: 'project:/repo',
+      }),
+    ).toThrow();
+
+    // Primary sessions carry a NULL agent_id and stay unconstrained.
+    expect(() => store.createSession({ scopeKey: 'project:/repo' })).not.toThrow();
+  });
+
+  it('endSessionTree ends a session together with its active children', () => {
+    const primary = store.createSession({ scopeKey: 'project:/repo' });
+    const child = store.createSession({
+      parentSessionId: primary.id,
+      agentId: 'agent-abc',
+      scopeKey: 'project:/repo',
+    });
+
+    store.endSessionTree(primary.id);
+
+    expect(store.getSession(primary.id)?.status).toBe('ended');
+    expect(store.getSession(child.id)?.status).toBe('ended');
+    expect(store.getSession(child.id)?.ended_at).toBeTruthy();
+  });
+
+  it('getRecentPrimarySessions excludes children that sort ahead of their parent', () => {
+    const primary = store.createSession({ scopeKey: 'project:/repo' });
+    store.createSession({
+      parentSessionId: primary.id,
+      agentId: 'agent-abc',
+      scopeKey: 'project:/repo',
+    });
+
+    expect(store.getRecentSessions(1)[0]?.agent_id).toBe('agent-abc');
+    expect(store.getRecentPrimarySessions(1)[0]?.id).toBe(primary.id);
+  });
+
   it('excludes child sessions from scope listings and counts', () => {
     const primary = store.createSession({
       scopeType: 'branch',

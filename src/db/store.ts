@@ -989,9 +989,48 @@ export class CortexStore {
       .run(new Date().toISOString(), id);
   }
 
+  /**
+   * End a session together with its still-active children. Nothing else ends a
+   * child — session rotation and `inject-header` both act on the active
+   * primary — so without this a subagent's session stays `active` forever and
+   * is structurally exempt from consolidation and event GC, both of which
+   * require `status = 'ended'`.
+   */
+  endSessionTree(id: string): void {
+    const now = new Date().toISOString();
+    const end = this.db.prepare(
+      `UPDATE sessions SET status = 'ended', ended_at = ? WHERE id = ?`,
+    );
+
+    this.runInTransaction(() => {
+      for (const child of this.getChildSessions(id)) {
+        if (child.status === 'active') {
+          end.run(now, child.id);
+        }
+      }
+      end.run(now, id);
+    });
+  }
+
   getRecentSessions(limit: number): SessionRow[] {
     return this.db
       .prepare('SELECT * FROM sessions ORDER BY started_at DESC, rowid DESC LIMIT ?')
+      .all(limit) as SessionRow[];
+  }
+
+  /**
+   * Recent primary sessions. Callers deriving "where am I working" must use
+   * this rather than `getRecentSessions`: children sort ahead of their parent
+   * (they are created later), so an orphaned child would otherwise become the
+   * scope anchor once the primary has ended.
+   */
+  getRecentPrimarySessions(limit: number): SessionRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM sessions
+         WHERE parent_session_id IS NULL
+         ORDER BY started_at DESC, rowid DESC LIMIT ?`,
+      )
       .all(limit) as SessionRow[];
   }
 

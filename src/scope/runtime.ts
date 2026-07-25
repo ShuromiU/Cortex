@@ -132,30 +132,50 @@ export function syncBranchSnapshotForSession(
  * `(scope_key, agent_id)` per AD-9, so the same subagent resolves to the same
  * session for as long as it runs, and two subagents never share one.
  */
+function findAgentSession(
+  store: CortexStore,
+  primary: SessionRow,
+  agentId: string,
+): SessionRow | undefined {
+  return primary.scope_key
+    ? store.getSessionByAgentId(primary.scope_key, agentId)
+    // A primary with no scope key yet cannot be searched by AD-9 identity;
+    // fall back to its own children so a repeat payload still reuses one
+    // rather than creating an unbounded run of duplicates.
+    : store.getChildSessions(primary.id).find(child => child.agent_id === agentId);
+}
+
 function ensureAgentSession(
   store: CortexStore,
   primary: SessionRow,
   agentId: string,
   agentType: string | undefined,
 ): SessionRow {
-  if (primary.scope_key) {
-    const existing = store.getSessionByAgentId(primary.scope_key, agentId);
-    if (existing) {
-      return existing;
-    }
+  const existing = findAgentSession(store, primary, agentId);
+  if (existing) {
+    return existing;
   }
 
-  return store.createSession({
-    parentSessionId: primary.id,
-    agentId,
-    agentType: agentType ?? 'subagent',
-    ...(primary.git_root ? { gitRoot: primary.git_root } : {}),
-    ...(primary.worktree_path ? { worktreePath: primary.worktree_path } : {}),
-    ...(primary.branch_ref ? { branchRef: primary.branch_ref } : {}),
-    ...(primary.head_oid ? { headOid: primary.head_oid } : {}),
-    scopeType: primary.scope_type,
-    ...(primary.scope_key ? { scopeKey: primary.scope_key } : {}),
-  });
+  try {
+    return store.createSession({
+      parentSessionId: primary.id,
+      agentId,
+      agentType: agentType ?? 'subagent',
+      ...(primary.git_root ? { gitRoot: primary.git_root } : {}),
+      ...(primary.worktree_path ? { worktreePath: primary.worktree_path } : {}),
+      ...(primary.branch_ref ? { branchRef: primary.branch_ref } : {}),
+      ...(primary.head_oid ? { headOid: primary.head_oid } : {}),
+      scopeType: primary.scope_type,
+      ...(primary.scope_key ? { scopeKey: primary.scope_key } : {}),
+    });
+  } catch (error) {
+    // Lost the race to a concurrent hook process; its row is authoritative.
+    const winner = findAgentSession(store, primary, agentId);
+    if (winner) {
+      return winner;
+    }
+    throw error;
+  }
 }
 
 export function ensureScopedSession(
@@ -163,10 +183,18 @@ export function ensureScopedSession(
   cwd: string,
   options: ScopeSessionOptions = {},
 ): SessionRow {
-  const primary = ensurePrimarySession(store, cwd, options);
-  return options.agentId
-    ? ensureAgentSession(store, primary, options.agentId, options.agentType)
-    : primary;
+  if (!options.agentId) {
+    return ensurePrimarySession(store, cwd, options);
+  }
+
+  // A subagent belongs to the session that dispatched it. Its cwd can differ
+  // from the parent's — worktree-isolated agents, nested repos, submodules —
+  // and resolving scope from it would end and rotate the parent's live session
+  // mid-turn, then parent the child to the replacement. Take the active
+  // primary as-is; only resolve scope when there is none to inherit.
+  const active = store.getCurrentSession();
+  const primary = active?.scope_key ? active : ensurePrimarySession(store, cwd, options);
+  return ensureAgentSession(store, primary, options.agentId, options.agentType);
 }
 
 /**
@@ -200,7 +228,7 @@ function ensurePrimarySession(
 
   if (current) {
     syncBranchSnapshotForSession(store, current.id);
-    store.endSession(current.id);
+    store.endSessionTree(current.id);
   }
 
   return store.createSession({

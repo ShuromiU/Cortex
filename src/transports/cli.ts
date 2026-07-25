@@ -228,7 +228,7 @@ export function createProgram(): Command {
       const current = store.getCurrentSession();
       if (current) {
         syncBranchSnapshotForSession(store, current.id);
-        store.endSession(current.id);
+        store.endSessionTree(current.id);
       }
 
       const scopedSession = ensureScopedSession(store, process.cwd());

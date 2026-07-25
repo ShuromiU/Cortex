@@ -109,12 +109,14 @@ describe('spool', () => {
     expect(flushSpool(store, root, sessionId)).toEqual({ processed: 0, skipped: 0 });
   });
 
-  it('replays pre-agent-identity spool lines into the primary session', () => {
+  it('replays legacy spool lines into the session it was given, idempotently', () => {
     const root = tempRoot();
     const { store, sessionId } = createStore(root);
 
-    // Lines written by a hook installed before agent identity existed: no
-    // agent_id field at all (Story 0.1 AC 5).
+    // Lines written by a hook installed before agent identity existed. The
+    // spool format has no agent field in any version, so this pins the replay
+    // contract only; the resolution half of AC 5 — a payload with no agent_id
+    // resolving to the primary — is asserted in tests/hook-entry.test.ts.
     fs.writeFileSync(
       deriveSpoolPath(root),
       [

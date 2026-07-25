@@ -4,7 +4,7 @@ import { applySchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import { handleCmdEvent, handleReadEvent } from '../src/capture/hooks.js';
 import { buildHeader, buildFullState } from '../src/query/state.js';
-import { ensureScopedSession } from '../src/scope/runtime.js';
+import { ensureScopedSession, syncBranchSnapshotForSession } from '../src/scope/runtime.js';
 import { deriveBranchScopeKey } from '../src/scope/keys.js';
 import type { GitScopeIdentity } from '../src/scope/git.js';
 
@@ -235,6 +235,70 @@ describe('scope runtime — agent identity (AD-9)', () => {
 
     expect(store.getSession(primary.id)?.status).toBe('active');
     expect(store.getCurrentSession()?.id).toBe(primary.id);
+  });
+
+  it('does not rotate the primary when a subagent payload resolves to another scope', () => {
+    const store = new CortexStore(createTestDb());
+    const main = branchScope('main');
+    // A worktree-isolated subagent: same run, different cwd, different scope key.
+    const isolated: GitScopeIdentity = {
+      ...branchScope('main'),
+      worktreePath: '/wt',
+      scopeKey: deriveBranchScopeKey('/repo/.git', '/wt', 'main'),
+    };
+    expect(isolated.scopeKey).not.toBe(main.scopeKey);
+
+    const primary = ensureScopedSession(store, '/repo', { resolveScope: () => main });
+    const child = ensureScopedSession(store, '/wt', {
+      resolveScope: () => isolated,
+      agentId: 'agent-1',
+    });
+
+    expect(store.getSession(primary.id)?.status).toBe('active');
+    expect(store.getCurrentSession()?.id).toBe(primary.id);
+    expect(child.parent_session_id).toBe(primary.id);
+    // The child inherits the dispatching session's scope, not its own cwd's.
+    expect(child.scope_key).toBe(main.scopeKey);
+  });
+
+  it('ends still-active children when the primary session ends', () => {
+    const store = new CortexStore(createTestDb());
+    const main = branchScope('main');
+
+    const primary = ensureScopedSession(store, '/repo', { resolveScope: () => main });
+    const child = ensureScopedSession(store, '/repo', {
+      resolveScope: () => main,
+      agentId: 'agent-1',
+    });
+
+    ensureScopedSession(store, '/repo', { resolveScope: () => branchScope('feature/next') });
+
+    expect(store.getSession(primary.id)?.status).toBe('ended');
+    expect(store.getSession(child.id)?.status).toBe('ended');
+    // Consolidation and event GC both require status = 'ended'.
+    expect(store.getUnconsolidatedSessions().some(session => session.id === child.id)).toBe(true);
+  });
+
+  it('does not let a subagent session write the branch snapshot', () => {
+    const store = new CortexStore(createTestDb());
+    const main = branchScope('main');
+
+    const primary = ensureScopedSession(store, '/repo', { resolveScope: () => main });
+    const child = ensureScopedSession(store, '/repo', {
+      resolveScope: () => main,
+      agentId: 'agent-1',
+    });
+    // Focus is read off the session row itself, so a child carrying one is the
+    // case where the guard is the only thing standing between a subagent and
+    // the branch snapshot.
+    store.updateSessionFocus(child.id, 'subagent-only focus');
+
+    syncBranchSnapshotForSession(store, child.id);
+    expect(store.getBranchSnapshot(main.scopeKey)).toBeUndefined();
+
+    store.updateSessionFocus(primary.id, 'primary focus');
+    syncBranchSnapshotForSession(store, primary.id);
+    expect(store.getBranchSnapshot(main.scopeKey)?.focus).toBe('primary focus');
   });
 
   it('keeps subagent activity out of the branch snapshot', () => {
