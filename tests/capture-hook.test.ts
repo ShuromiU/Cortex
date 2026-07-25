@@ -23,6 +23,15 @@ function hasTool(tool: string): boolean {
 
 const canRun = hasTool('bash') && hasTool('jq');
 
+// Silent skipping would let the only coverage of the shell change disappear on
+// a machine without jq. Say so loudly instead.
+if (!canRun) {
+  process.stderr.write(
+    '\n[capture-hook] SKIPPED: bash and jq are required to execute the PostToolUse hook.\n' +
+      '[capture-hook] The shell/jq layer is UNVERIFIED in this run.\n\n',
+  );
+}
+
 function runHook(payload: Record<string, unknown>): {
   cwd: string;
   lines: Array<Record<string, unknown>>;
@@ -112,6 +121,31 @@ describe.skipIf(!canRun)('cortex-capture.sh', () => {
     });
   });
 
+  it('accepts camelCase agent identity as well as snake_case', () => {
+    const { lines } = runHook({
+      tool_name: 'Read',
+      tool_input: { file_path: 'src/drift.ts' },
+      agentId: 'agent-camel',
+      agentType: 'Explore',
+    });
+
+    expect(lines).toHaveLength(1);
+    // Normalized to snake_case on the line so the flush has one shape to read.
+    expect(lines[0]).toMatchObject({ agent_id: 'agent-camel', agent_type: 'Explore' });
+  });
+
+  it('does not emit an agent_id for a non-scalar value', () => {
+    const { lines } = runHook({
+      tool_name: 'Read',
+      tool_input: { file_path: 'src/weird.ts' },
+      agent_id: { nested: true },
+    });
+
+    expect(lines).toHaveLength(1);
+    // jq copies it through; the flush is what must refuse to bind it.
+    expect(lines[0]).toMatchObject({ tool: 'read', file: 'src/weird.ts' });
+  });
+
   it('emits a well-formed line even when agent_type is absent but agent_id is present', () => {
     const { lines } = runHook({
       tool_name: 'Write',
@@ -140,12 +174,29 @@ describe('cortex-capture.sh — no process per tool call (N-4)', () => {
     expect(nodeLines[0]!.index).toBeGreaterThan(thresholdIndex);
   });
 
-  it('uses one jq invocation per event branch', () => {
+  it('uses at most one jq invocation per event branch', () => {
     const script = fs.readFileSync(SCRIPT, 'utf8');
-    // Count actual invocations, not the word: two setup reads (tool_name,
-    // cwd) plus one per branch — read/edit/write, Bash, Agent. Any more means
-    // an extra process on the hot path.
-    const invocations = (script.match(/\|\s*jq\s+-/g) ?? []).length;
-    expect(invocations).toBe(5);
+    const lines = script.split('\n');
+
+    // Per-region counts, not a whole-file total: a global count stays green if
+    // one branch gains a jq while another loses one, which is the regression
+    // this test exists to catch. Setup reads tool_name and cwd; each of the
+    // three event branches builds its line with exactly one jq.
+    const branchStarts = ['  Read|Edit|Write)', '  Bash)', '  Agent)'];
+    const boundaries = branchStarts.map(marker => {
+      const index = lines.findIndex(line => line.startsWith(marker));
+      expect(index, `branch ${marker} not found`).toBeGreaterThan(-1);
+      return index;
+    });
+    const esacIndex = lines.findIndex(line => line.startsWith('esac'));
+    expect(esacIndex).toBeGreaterThan(boundaries[2]!);
+
+    const countJq = (from: number, to: number): number =>
+      (lines.slice(from, to).join('\n').match(/\|\s*jq\s+-|\$\(\s*jq\s|<<<|xargs/g) ?? []).length;
+
+    expect(countJq(0, boundaries[0]!)).toBe(2); // setup: tool_name, cwd
+    expect(countJq(boundaries[0]!, boundaries[1]!)).toBe(1);
+    expect(countJq(boundaries[1]!, boundaries[2]!)).toBe(1);
+    expect(countJq(boundaries[2]!, esacIndex)).toBe(1);
   });
 });

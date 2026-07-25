@@ -153,11 +153,18 @@ function ensureAgentSession(
 ): SessionRow {
   const existing = findAgentSession(store, primary, agentId);
   if (existing) {
+    // The host may not report agent_type on an agent's first captured call.
+    // Upgrade the placeholder rather than freezing it for the session's life.
+    if (agentType && agentType !== existing.agent_type) {
+      store.updateSessionAgentType(existing.id, agentType);
+      return store.getSession(existing.id) ?? existing;
+    }
     return existing;
   }
 
+  let created: SessionRow;
   try {
-    return store.createSession({
+    created = store.createSession({
       parentSessionId: primary.id,
       agentId,
       agentType: agentType ?? 'subagent',
@@ -176,6 +183,17 @@ function ensureAgentSession(
     }
     throw error;
   }
+
+  // A batch can be flushed after its primary ended. Nothing would ever end a
+  // child created at that point — `endSessionTree` only runs on the active
+  // primary — leaving it permanently invisible to consolidation and event GC,
+  // both of which require `status = 'ended'`.
+  if (primary.status === 'ended') {
+    store.endSession(created.id);
+    return store.getSession(created.id) ?? created;
+  }
+
+  return created;
 }
 
 /**

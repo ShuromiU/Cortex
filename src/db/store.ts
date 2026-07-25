@@ -942,6 +942,12 @@ export class CortexStore {
       .get(scopeKey, agentId) as SessionRow | undefined;
   }
 
+  updateSessionAgentType(id: string, agentType: string): void {
+    this.db
+      .prepare('UPDATE sessions SET agent_type = ? WHERE id = ?')
+      .run(agentType, id);
+  }
+
   updateSessionFocus(id: string, focus: string): void {
     this.db
       .prepare('UPDATE sessions SET focus = ? WHERE id = ?')
@@ -1279,10 +1285,34 @@ export class CortexStore {
   }
 
   /** Newest episode of a kind whose summary matches the base text (with or without a repeat suffix). */
+  /**
+   * A session and everyone it shares a primary with: the root primary plus all
+   * of its children. Used to scope folds and evidence collection to one turn's
+   * work without merging across unrelated sessions.
+   */
+  getSessionTreeIds(sessionId: string): string[] {
+    const session = this.getSession(sessionId);
+    if (!session) {
+      return [sessionId];
+    }
+
+    const rootId = session.parent_session_id ?? session.id;
+    return [rootId, ...this.getChildSessions(rootId).map(child => child.id)];
+  }
+
+  /**
+   * Scoped to the recording session. The fold exists to collapse a retry loop
+   * within one session, not to merge across sessions — unscoped, whichever
+   * session hit an identical failure *first* owned the episode, so a subagent
+   * failing before its parent left the parent with no episode at all and
+   * reheated the child's row on the parent's activity. Two agents independently
+   * hitting one failure are two observations and each keeps its own episode.
+   */
   findRecentEpisodeBySummary(
     kind: string,
     baseSummary: string,
     sinceIso: string,
+    sessionId: string,
   ): ParsedEpisode | undefined {
     const row = this.db
       .prepare(
@@ -1290,10 +1320,13 @@ export class CortexStore {
          WHERE kind = ?
            AND created_at >= ?
            AND (summary = ? OR summary LIKE ?)
+           AND session_id = ?
          ORDER BY created_at DESC
          LIMIT 1`,
       )
-      .get(kind, sinceIso, baseSummary, `${baseSummary} (seen %`) as EpisodeRow | undefined;
+      .get(kind, sinceIso, baseSummary, `${baseSummary} (seen %`, sessionId) as
+      | EpisodeRow
+      | undefined;
     return row ? parseEpisodeRow(row) : undefined;
   }
 

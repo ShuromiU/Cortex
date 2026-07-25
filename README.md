@@ -13,7 +13,7 @@ Before:
 - stale notes stayed active forever
 
 Now:
-- branch/worktree-aware sessions and snapshots
+- branch/worktree-aware sessions and snapshots, identified by `(scope_key, agent_id)` so subagent work lands in its own session
 - live `memory_items` retrieval layer with FTS search
 - command failures and test cycles captured as durable episodes
 - hot/warm/cold decay with reinforcement from actual use
@@ -133,6 +133,12 @@ Run `cortex install-hooks --claude` to install the canonical scripts into `~/.cl
 | `Stop` | | `cortex-end-of-turn.sh` | one Node spawn per turn: spool flush + conditional nudge |
 
 The spool (`.cortex.spool.jsonl`) is flushed at turn end, at a 256 KiB threshold (detached `cortex flush-spool`), and at the next session start — leftover lines are never lost.
+
+### Subagent attribution
+
+A session is identified by `(scope_key, agent_id)`. Each spool line carries the `agent_id` and `agent_type` the host reported, so the flush files a subagent's reads, edits and commands under a child session of its own — recording `parent_session_id` and inheriting the parent's scope — instead of merging them into the parent's timeline. A line without an `agent_id`, including every line written by a hook installed before this existed, resolves to the primary session. A subagent's tool call never rotates or ends the session that dispatched it, and ending a session ends its children so they stay reachable by consolidation and GC.
+
+Branch snapshots, scoped session listings and the recent-session tail read primary sessions only; child timelines are reached explicitly. If you upgraded the package but subagent activity still lands on the parent, your installed `cortex-capture.sh` predates the change — re-run `cortex install-hooks --claude`.
 
 ## Codex Setup
 

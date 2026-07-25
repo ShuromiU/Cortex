@@ -21,9 +21,12 @@ LINE=""
 # primary-session line stays byte-identical to the pre-agent-identity format.
 # Defined once and concatenated into each program: one jq call per event, no
 # extra process on the hot path (N-4, B-4).
+# Both spellings are accepted so host field-name drift degrades to primary
+# attribution rather than silently voiding the feature — this script is the only
+# live capture path, so the tolerance has to live here, not just in Node.
 AGENT_FIELDS='
-  + (if (.agent_id // "") != "" then {agent_id: .agent_id} else {} end)
-  + (if (.agent_type // "") != "" then {agent_type: .agent_type} else {} end)'
+  + (if ((.agent_id // .agentId) // "") != "" then {agent_id: (.agent_id // .agentId)} else {} end)
+  + (if ((.agent_type // .agentType) // "") != "" then {agent_type: (.agent_type // .agentType)} else {} end)'
 
 case "$TOOL_NAME" in
   Read|Edit|Write)

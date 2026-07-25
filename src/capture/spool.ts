@@ -91,6 +91,27 @@ function parseSpoolLines(raw: string): SpoolEntry[] {
   });
 }
 
+/**
+ * Whether `replayEntry` will accept this entry. Checked before resolving a
+ * session so an entry this build cannot replay — an unknown tool from a newer
+ * hook, a line missing its target — never materializes an event-less child
+ * session as a side effect.
+ */
+function isReplayable(entry: SpoolEntry): boolean {
+  switch (entry.tool) {
+    case 'read':
+    case 'edit':
+    case 'write':
+      return Boolean(entry.file);
+    case 'cmd':
+      return Boolean(entry.cmd);
+    case 'agent':
+      return Boolean(entry.desc);
+    default:
+      return false;
+  }
+}
+
 function replayEntry(store: CortexStore, sessionId: string, entry: SpoolEntry): boolean {
   switch (entry.tool) {
     case 'read':
@@ -134,33 +155,62 @@ function replayEntry(store: CortexStore, sessionId: string, entry: SpoolEntry): 
  * written before agent identity existed, and every primary-session line since —
  * resolve to the batch's session unchanged (N-7).
  */
+/**
+ * Spool lines come from `jq`, which preserves whatever JSON type the host sent.
+ * A numeric `agent_id` would otherwise bind as a double and split one subagent
+ * across `"42"` and `"42.0"`; a structured value would throw on bind. Coerce
+ * scalars, reject the rest.
+ */
+function normalizeAgentId(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    return value.length > 0 ? value : undefined;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+  return undefined;
+}
+
+function normalizeAgentType(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+interface ResolvedAgent {
+  id: string;
+  /** Whether the session's agent_type came from a real host value. */
+  typed: boolean;
+}
+
 function resolveEntrySession(
   store: CortexStore,
   sessionId: string,
   entry: SpoolEntry,
-  cache: Map<string, string>,
+  cache: Map<string, ResolvedAgent>,
 ): string {
-  const agentId = entry.agent_id;
+  const agentId = normalizeAgentId(entry.agent_id);
   if (!agentId) {
     return sessionId;
   }
 
+  const agentType = normalizeAgentType(entry.agent_type);
   const cached = cache.get(agentId);
-  if (cached !== undefined) {
-    return cached;
+  // Re-resolve when this entry is the first to carry a real agent_type, so the
+  // placeholder recorded from an earlier untyped entry still gets upgraded.
+  if (cached !== undefined && (cached.typed || !agentType)) {
+    return cached.id;
   }
 
-  let resolved: string;
   try {
-    resolved = resolveAgentSessionId(store, sessionId, agentId, entry.agent_type);
+    const resolved = resolveAgentSessionId(store, sessionId, agentId, agentType);
+    cache.set(agentId, { id: resolved, typed: agentType !== undefined });
+    return resolved;
   } catch {
     // Attribution is best-effort: a failure here must not abort the batch or
-    // surface to the user (AD-12). Fall back to the batch's own session.
-    resolved = sessionId;
+    // surface to the user (AD-12). Fall back to the batch's own session, and
+    // deliberately do NOT cache the fallback — one bad entry must not
+    // misattribute every later entry from the same agent.
+    return sessionId;
   }
-
-  cache.set(agentId, resolved);
-  return resolved;
 }
 
 function processClaimFile(
@@ -189,10 +239,15 @@ function processClaimFile(
     store.runInTransaction(() => {
       // A 256 KiB batch can hold hundreds of entries from one subagent; resolve
       // each distinct agent once rather than per entry.
-      const sessionByAgent = new Map<string, string>();
+      const sessionByAgent = new Map<string, ResolvedAgent>();
 
       for (const entry of entries) {
-        if (replayEntry(store, resolveEntrySession(store, sessionId, entry, sessionByAgent), entry)) {
+        if (!isReplayable(entry)) {
+          skipped++;
+          continue;
+        }
+        const target = resolveEntrySession(store, sessionId, entry, sessionByAgent);
+        if (replayEntry(store, target, entry)) {
           processed++;
         } else {
           skipped++;

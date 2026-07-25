@@ -97,7 +97,12 @@ function writeCommandEpisodes(
     // The same failure repeating within a day folds into one episode with an
     // occurrence counter instead of stacking duplicate rows.
     const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const existing = store.findRecentEpisodeBySummary('command_failure', summary, dayAgo);
+    const existing = store.findRecentEpisodeBySummary(
+      'command_failure',
+      summary,
+      dayAgo,
+      sessionId,
+    );
     if (existing) {
       store.bumpEpisodeOccurrence(existing.id, summary);
     } else {

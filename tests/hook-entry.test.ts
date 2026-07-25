@@ -237,6 +237,56 @@ describe('handleHookPayload', () => {
   });
 });
 
+describe('end-of-turn nudge — subagent evidence', () => {
+  it('finds candidates recorded by a subagent session, not just the primary', () => {
+    // Deliberately no pre-created session: the first hook call establishes the
+    // primary from `cwd`, so both calls resolve the same one. A fixture session
+    // scoped elsewhere would make the non-agent end-of-turn call rotate the
+    // primary and correctly end its children, which is a different behavior.
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    applySchema(db);
+    initializeMeta(db, '/repo');
+    const store = new CortexStore(db);
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-eot-agent-'));
+
+    // No options.sessionId: that short-circuits resolution, and the point here
+    // is to exercise the real identity path. A failing command captured against
+    // a subagent's own session is the only situation the nudge fires in, and
+    // the one it used to be blind to.
+    handleHookPayload(
+      store,
+      'post',
+      JSON.stringify({
+        tool_name: 'Bash',
+        tool_input: { command: 'npm test' },
+        tool_response: { exit_code: 1, stderr: 'FAIL src/db/store.test.ts' },
+        agent_id: 'agent-nudge',
+        agent_type: 'Explore',
+      }),
+      cwd,
+      { requireEngagement: false },
+    );
+
+    const primary = store.getCurrentSession()!;
+    const child = store.getSessionByAgentId(primary.scope_key!, 'agent-nudge')!;
+    expect(store.getCommandRunsBySession(child.id)).toHaveLength(1);
+    expect(store.getCommandRunsBySession(primary.id)).toHaveLength(0);
+
+    const output = handleHookPayload(
+      store,
+      'end-of-turn',
+      JSON.stringify({ agent_used: true }),
+      cwd,
+      { requireEngagement: false },
+    );
+
+    const parsed = JSON.parse(output) as { decision?: string; reason?: string };
+    expect(parsed.decision).toBe('block');
+    expect(parsed.reason).toContain('candidate notes from this turn');
+  });
+});
+
 describe('end-of-turn nudge', () => {
   it('stays silent when no agent ran this turn', () => {
     const { store, sessionId } = createTestStore();

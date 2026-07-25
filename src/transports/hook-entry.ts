@@ -367,9 +367,22 @@ function endOfTurn(
   let suggestions;
   try {
     const sessionId = resolveSessionId(store, cwd, options);
-    suggestions = suggestNotes(store, sessionId).filter(
-      suggestion => suggestion.confidence >= STOP_NUDGE_CONFIDENCE_THRESHOLD,
-    );
+    // The nudge fires only when a subagent ran, and a subagent's evidence lives
+    // in its own session — so collecting from the primary alone would blind it
+    // in exactly the case it exists for. Walk the whole tree and dedupe.
+    const seen = new Set<string>();
+    suggestions = store
+      .getSessionTreeIds(sessionId)
+      .flatMap(id => suggestNotes(store, id))
+      .filter(suggestion => suggestion.confidence >= STOP_NUDGE_CONFIDENCE_THRESHOLD)
+      .filter(suggestion => {
+        const key = `${suggestion.kind} ${suggestion.content}`;
+        if (seen.has(key)) {
+          return false;
+        }
+        seen.add(key);
+        return true;
+      });
   } catch {
     return '';
   }

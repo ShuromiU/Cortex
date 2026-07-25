@@ -202,38 +202,160 @@ describe('spool', () => {
     ]);
   });
 
-  it('folds a subagent command failure into the existing episode rather than duplicating it', () => {
-    const root = tempRoot();
-    const { store, sessionId } = createStore(root);
-
-    // Same failing command, once from the primary and once from a subagent.
+  it('keeps command-failure episodes with the session that recorded them, in either order', () => {
     const failure = {
       tool: 'cmd' as const,
       cmd: 'npm test',
       exit: '1',
       stderr: 'FAIL src/db/store.test.ts',
     };
-    appendSpoolEntry(root, { ...failure, ts: '2026-06-10T10:00:00Z', seq: 1 });
+
+    // Subagent fails FIRST — the parent's later identical failure must still
+    // produce the parent's own episode rather than folding into the child's.
+    const childFirst = tempRoot();
+    {
+      const { store, sessionId } = createStore(childFirst);
+      appendSpoolEntry(childFirst, { ...failure, ts: '2026-06-10T10:00:00Z', seq: 1, agent_id: 'a1' });
+      appendSpoolEntry(childFirst, { ...failure, ts: '2026-06-10T10:00:05Z', seq: 2 });
+      flushSpool(store, childFirst, sessionId);
+
+      const child = store.getChildSessions(sessionId)[0]!;
+      expect(store.getEpisodesBySession(sessionId)).toHaveLength(1);
+      expect(store.getEpisodesBySession(child.id)).toHaveLength(1);
+    }
+
+    // Parent fails first — same outcome, mirrored.
+    const parentFirst = tempRoot();
+    {
+      const { store, sessionId } = createStore(parentFirst);
+      appendSpoolEntry(parentFirst, { ...failure, ts: '2026-06-10T10:00:00Z', seq: 1 });
+      appendSpoolEntry(parentFirst, { ...failure, ts: '2026-06-10T10:00:05Z', seq: 2, agent_id: 'a1' });
+      flushSpool(store, parentFirst, sessionId);
+
+      const child = store.getChildSessions(sessionId)[0]!;
+      expect(store.getEpisodesBySession(sessionId)).toHaveLength(1);
+      expect(store.getEpisodesBySession(child.id)).toHaveLength(1);
+    }
+  });
+
+  it('still folds a repeated failure within one session', () => {
+    const root = tempRoot();
+    const { store, sessionId } = createStore(root);
+    const failure = { tool: 'cmd' as const, cmd: 'npm test', exit: '1', stderr: 'FAIL src/a.test.ts' };
+
+    appendSpoolEntry(root, { ...failure, ts: '2026-06-10T10:00:00Z', seq: 1, agent_id: 'a1' });
+    appendSpoolEntry(root, { ...failure, ts: '2026-06-10T10:00:05Z', seq: 2, agent_id: 'a1' });
+    flushSpool(store, root, sessionId);
+
+    const child = store.getChildSessions(sessionId)[0]!;
+    const episodes = store.getEpisodesBySession(child.id);
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0]?.summary).toContain('(seen 2x)');
+  });
+
+  it('does not create a child session for an entry it cannot replay', () => {
+    const root = tempRoot();
+    const { store, sessionId } = createStore(root);
+
+    // A tool kind this build does not know — e.g. a newer hook against older dist.
+    appendSpoolEntry(root, { tool: 'todo', ts: '2026-06-10T10:00:00Z', seq: 1, agent_id: 'ghost' });
+
+    expect(flushSpool(store, root, sessionId)).toEqual({ processed: 0, skipped: 1 });
+    expect(store.getChildSessions(sessionId)).toHaveLength(0);
+  });
+
+  it('ends a child created under an already-ended primary', () => {
+    const root = tempRoot();
+    const { store, sessionId } = createStore(root);
+    store.endSessionTree(sessionId);
+
     appendSpoolEntry(root, {
-      ...failure, ts: '2026-06-10T10:00:05Z', seq: 2,
-      agent_id: 'agent-1', agent_type: 'Explore',
+      tool: 'read', file: 'src/late.ts', ts: '2026-06-10T10:00:00Z', seq: 1, agent_id: 'late',
+    });
+    flushSpool(store, root, sessionId);
+
+    const child = store.getChildSessions(sessionId)[0]!;
+    expect(child.status).toBe('ended');
+    // Consolidation and event GC both require status = 'ended'.
+    expect(store.getUnconsolidatedSessions().some(session => session.id === child.id)).toBe(true);
+  });
+
+  it('treats a numeric agent_id as the same subagent as its string form', () => {
+    const root = tempRoot();
+    const { store, sessionId } = createStore(root);
+
+    fs.writeFileSync(
+      deriveSpoolPath(root),
+      [
+        '{"v":1,"ts":"2026-06-10T10:00:00Z","tool":"read","file":"src/a.ts","agent_id":42}',
+        '{"v":1,"ts":"2026-06-10T10:00:01Z","tool":"read","file":"src/b.ts","agent_id":"42"}',
+        '',
+      ].join('\n'),
+    );
+    flushSpool(store, root, sessionId);
+
+    const children = store.getChildSessions(sessionId);
+    expect(children).toHaveLength(1);
+    expect(children[0]?.agent_id).toBe('42');
+    expect(store.getEventsBySession(children[0]!.id)).toHaveLength(2);
+  });
+
+  it('ignores a malformed agent_type without losing the agent_id', () => {
+    const root = tempRoot();
+    const { store, sessionId } = createStore(root);
+
+    fs.writeFileSync(
+      deriveSpoolPath(root),
+      [
+        // agent_type is structured. It must be dropped, not allowed to void
+        // attribution for a perfectly good agent_id.
+        '{"v":1,"ts":"2026-06-10T10:00:00Z","tool":"read","file":"src/a.ts","agent_id":"g","agent_type":{"bad":1}}',
+        '{"v":1,"ts":"2026-06-10T10:00:01Z","tool":"read","file":"src/b.ts","agent_id":"g"}',
+        '',
+      ].join('\n'),
+    );
+    flushSpool(store, root, sessionId);
+
+    const children = store.getChildSessions(sessionId);
+    expect(children).toHaveLength(1);
+    expect(children[0]?.agent_type).toBe('subagent');
+    expect(store.getEventsBySession(children[0]!.id).map(event => event.target)).toEqual([
+      'src/a.ts',
+      'src/b.ts',
+    ]);
+    expect(store.getEventsBySession(sessionId)).toHaveLength(0);
+  });
+
+  it('upgrades a placeholder agent_type when a later entry supplies the real one', () => {
+    const root = tempRoot();
+    const { store, sessionId } = createStore(root);
+
+    appendSpoolEntry(root, { tool: 'read', file: 'src/a.ts', ts: '2026-06-10T10:00:00Z', seq: 1, agent_id: 'a9' });
+    appendSpoolEntry(root, {
+      tool: 'read', file: 'src/b.ts', ts: '2026-06-10T10:00:01Z', seq: 2,
+      agent_id: 'a9', agent_type: 'Explore',
+    });
+    flushSpool(store, root, sessionId);
+
+    const children = store.getChildSessions(sessionId);
+    expect(children).toHaveLength(1);
+    expect(children[0]?.agent_type).toBe('Explore');
+  });
+
+  it('attributes a subagent command run to the child session', () => {
+    const root = tempRoot();
+    const { store, sessionId } = createStore(root);
+
+    appendSpoolEntry(root, {
+      tool: 'cmd', cmd: 'npm test', exit: '1', stderr: 'FAIL src/db/store.test.ts',
+      ts: '2026-06-10T10:00:00Z', seq: 1, agent_id: 'agent-1', agent_type: 'Explore',
     });
     flushSpool(store, root, sessionId);
 
     const child = store.getChildSessions(sessionId)[0]!;
     expect(child.agent_id).toBe('agent-1');
-    // The command event itself is attributed to the child.
     expect(store.getCommandRunsBySession(child.id)).toHaveLength(1);
-
-    // The episode does NOT split: an identical failure inside the fold window
-    // is one recurring fact, and duplicating it would put two identical
-    // command_failure items into retrieval. Stated exception to story 0.1's
-    // "attributed to the child, never the parent" — the episode stays on the
-    // session that first recorded it, and this predates agent identity.
-    const episodes = store.getEpisodesBySession(sessionId);
-    expect(episodes).toHaveLength(1);
-    expect(episodes[0]?.summary).toContain('(seen 2x)');
-    expect(store.getEpisodesBySession(child.id)).toHaveLength(0);
+    expect(store.getCommandRunsBySession(sessionId)).toHaveLength(0);
   });
 
   it('replays legacy spool lines into the session it was given, idempotently', () => {
