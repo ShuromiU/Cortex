@@ -334,55 +334,64 @@ describe('buildFullState - notes and events', () => {
   });
 
   it('refills the state working set after filtering stale notes', () => {
-    const store = makeStore();
-    const session = store.createSession({
-      focus: 'activity',
-      worktreePath: '/repo',
-      scopeType: 'project',
-      scopeKey: 'project:/repo',
-    });
-    store.upsertCurrentAppGraph({
-      scopeKey: 'project:/repo',
-      scopeType: 'project',
-      worktreePath: '/repo',
-      files: ['src/current.ts'],
-    });
+    // Clock pinned: the fixture's createdAt values are absolute, and hotness
+    // scoring reads the wall clock, so an unpinned run decays the valid note
+    // out of the working set once it ages past the 14-day staleness penalty.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-06-06T05:18:24.000Z'));
+      const store = makeStore();
+      const session = store.createSession({
+        focus: 'activity',
+        worktreePath: '/repo',
+        scopeType: 'project',
+        scopeKey: 'project:/repo',
+      });
+      store.upsertCurrentAppGraph({
+        scopeKey: 'project:/repo',
+        scopeType: 'project',
+        worktreePath: '/repo',
+        files: ['src/current.ts'],
+      });
 
-    for (let i = 0; i < 12; i++) {
+      for (let i = 0; i < 12; i++) {
+        store.upsertMemoryItem({
+          id: `stale-${i}`,
+          sessionId: session.id,
+          scopeType: 'project',
+          scopeKey: 'project:/repo',
+          kind: 'note:decision',
+          sourceTable: 'notes',
+          sourceId: `stale-${i}`,
+          subject: 'activity',
+          text: `decision: stale high score uses src/missing-${i}.ts.`,
+          state: 'pinned',
+          importance: 5,
+          createdAt: `2026-01-01T00:00:${String(i).padStart(2, '0')}.000Z`,
+        });
+      }
       store.upsertMemoryItem({
-        id: `stale-${i}`,
+        id: 'valid-lower-score',
         sessionId: session.id,
         scopeType: 'project',
         scopeKey: 'project:/repo',
         kind: 'note:decision',
         sourceTable: 'notes',
-        sourceId: `stale-${i}`,
+        sourceId: 'valid-lower-score',
         subject: 'activity',
-        text: `decision: stale high score uses src/missing-${i}.ts.`,
-        state: 'pinned',
-        importance: 5,
-        createdAt: `2026-01-01T00:00:${String(i).padStart(2, '0')}.000Z`,
+        text: 'decision: valid lower score uses src/current.ts.',
+        state: 'warm',
+        importance: 0.1,
+        createdAt: '2026-06-06T00:01:00.000Z',
       });
+
+      const state = buildFullState(store);
+
+      expect(state).toContain('valid lower score uses src/current.ts');
+      expect(state).not.toContain('stale high score');
+    } finally {
+      vi.useRealTimers();
     }
-    store.upsertMemoryItem({
-      id: 'valid-lower-score',
-      sessionId: session.id,
-      scopeType: 'project',
-      scopeKey: 'project:/repo',
-      kind: 'note:decision',
-      sourceTable: 'notes',
-      sourceId: 'valid-lower-score',
-      subject: 'activity',
-      text: 'decision: valid lower score uses src/current.ts.',
-      state: 'warm',
-      importance: 0.1,
-      createdAt: '2026-06-06T00:01:00.000Z',
-    });
-
-    const state = buildFullState(store);
-
-    expect(state).toContain('valid lower score uses src/current.ts');
-    expect(state).not.toContain('stale high score');
   });
 
   it('prioritizes current-session notes before older broad working context without duplicating them', () => {
