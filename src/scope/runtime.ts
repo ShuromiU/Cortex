@@ -178,6 +178,29 @@ function ensureAgentSession(
   }
 }
 
+/**
+ * Resolve the session a spooled entry belongs to, given the primary session the
+ * batch is being flushed into. Deliberately keyed off the *recorded* primary
+ * rather than whatever is active now: a batch can be replayed long after its
+ * turn, and the work belongs to the session that produced it.
+ *
+ * Returns `primarySessionId` unchanged when the primary row is gone, so a
+ * flush degrades to today's attribution instead of failing (AD-12).
+ */
+export function resolveAgentSessionId(
+  store: CortexStore,
+  primarySessionId: string,
+  agentId: string,
+  agentType?: string,
+): string {
+  const primary = store.getSession(primarySessionId);
+  if (!primary) {
+    return primarySessionId;
+  }
+
+  return ensureAgentSession(store, primary, agentId, agentType).id;
+}
+
 export function ensureScopedSession(
   store: CortexStore,
   cwd: string,

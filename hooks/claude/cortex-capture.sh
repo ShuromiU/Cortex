@@ -15,11 +15,21 @@ SPOOL="$CWD/.cortex.spool.jsonl"
 TS=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 LINE=""
 
+# Subagent identity, merged into whichever line shape the branch builds. Both
+# operands of jq's `+` see the same input, so `.agent_id` here is the hook
+# payload's field, not the object being built. Omitted when absent, so a
+# primary-session line stays byte-identical to the pre-agent-identity format.
+# Defined once and concatenated into each program: one jq call per event, no
+# extra process on the hot path (N-4, B-4).
+AGENT_FIELDS='
+  + (if (.agent_id // "") != "" then {agent_id: .agent_id} else {} end)
+  + (if (.agent_type // "") != "" then {agent_type: .agent_type} else {} end)'
+
 case "$TOOL_NAME" in
   Read|Edit|Write)
     TOOL=$(printf '%s' "$TOOL_NAME" | tr '[:upper:]' '[:lower:]')
     LINE=$(echo "$INPUT" | jq -c --arg ts "$TS" --arg tool "$TOOL" '
-      {v:1, ts:$ts, tool:$tool, file:(.tool_input.file_path // .tool_input.path // "")}
+      {v:1, ts:$ts, tool:$tool, file:(.tool_input.file_path // .tool_input.path // "")}'"$AGENT_FIELDS"'
       | select(.file != "")')
     ;;
   Bash)
@@ -30,12 +40,12 @@ case "$TOOL_NAME" in
       + (if (.stdout // .tool_response.stdout // .tool_result.stdout // "") != ""
          then {stdout: (.stdout // .tool_response.stdout // .tool_result.stdout)} else {} end)
       + (if (.stderr // .tool_response.stderr // .tool_result.stderr // "") != ""
-         then {stderr: (.stderr // .tool_response.stderr // .tool_result.stderr)} else {} end)
+         then {stderr: (.stderr // .tool_response.stderr // .tool_result.stderr)} else {} end)'"$AGENT_FIELDS"'
       | select(.cmd != "")')
     ;;
   Agent)
     LINE=$(echo "$INPUT" | jq -c --arg ts "$TS" '
-      {v:1, ts:$ts, tool:"agent", desc:(.tool_input.description // "")}
+      {v:1, ts:$ts, tool:"agent", desc:(.tool_input.description // "")}'"$AGENT_FIELDS"'
       | select(.desc != "")')
     # Marker consumed by cortex-end-of-turn.sh for the conditional note nudge.
     : > "$CWD/.cortex.agent-used"

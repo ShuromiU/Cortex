@@ -2,6 +2,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { CortexStore } from '../db/store.js';
+import { resolveAgentSessionId } from '../scope/runtime.js';
 import {
   handleAgentEvent,
   handleCmdEvent,
@@ -31,6 +32,9 @@ export interface SpoolEntry {
   stdout?: string;
   stderr?: string;
   desc?: string;
+  /** Subagent identity, written by the hook; absent for primary-session work. */
+  agent_id?: string;
+  agent_type?: string;
 }
 
 export interface SpoolFlushResult {
@@ -125,6 +129,40 @@ function replayEntry(store: CortexStore, sessionId: string, entry: SpoolEntry): 
   }
 }
 
+/**
+ * Which session an entry belongs to. Entries with no `agent_id` — every line
+ * written before agent identity existed, and every primary-session line since —
+ * resolve to the batch's session unchanged (N-7).
+ */
+function resolveEntrySession(
+  store: CortexStore,
+  sessionId: string,
+  entry: SpoolEntry,
+  cache: Map<string, string>,
+): string {
+  const agentId = entry.agent_id;
+  if (!agentId) {
+    return sessionId;
+  }
+
+  const cached = cache.get(agentId);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  let resolved: string;
+  try {
+    resolved = resolveAgentSessionId(store, sessionId, agentId, entry.agent_type);
+  } catch {
+    // Attribution is best-effort: a failure here must not abort the batch or
+    // surface to the user (AD-12). Fall back to the batch's own session.
+    resolved = sessionId;
+  }
+
+  cache.set(agentId, resolved);
+  return resolved;
+}
+
 function processClaimFile(
   store: CortexStore,
   sessionId: string,
@@ -145,10 +183,16 @@ function processClaimFile(
 
   if (entries.length > 0 && store.getMeta(markerKey) === undefined) {
     // One transaction per claim; the marker commits with the replay so a crash
-    // between commit and unlink cannot double-apply the batch.
+    // between commit and unlink cannot double-apply the batch. Child sessions
+    // are created inside it too, so an interrupted batch cannot leave behind a
+    // subagent session with no events.
     store.runInTransaction(() => {
+      // A 256 KiB batch can hold hundreds of entries from one subagent; resolve
+      // each distinct agent once rather than per entry.
+      const sessionByAgent = new Map<string, string>();
+
       for (const entry of entries) {
-        if (replayEntry(store, sessionId, entry)) {
+        if (replayEntry(store, resolveEntrySession(store, sessionId, entry, sessionByAgent), entry)) {
           processed++;
         } else {
           skipped++;

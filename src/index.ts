@@ -14,7 +14,7 @@ export { extractMemoryReferences, type ExtractedMemoryReference, type MemoryRefe
 export { normalizeScopePath, deriveProjectScopeKey, deriveBranchScopeKey, deriveDetachedScopeKey, formatScopeLabel, type ScopeType } from './scope/keys.js';
 export { detectGitScope, type GitScopeIdentity, type GitCommandRunner } from './scope/git.js';
 export { refreshCurrentAppGraph, listCurrentAppFiles, type RefreshCurrentAppGraphOptions } from './scope/app-graph.js';
-export { ensureScopedSession, syncBranchSnapshotForSession, type ScopeSessionOptions } from './scope/runtime.js';
+export { ensureScopedSession, resolveAgentSessionId, syncBranchSnapshotForSession, type ScopeSessionOptions } from './scope/runtime.js';
 // Query
 export { buildHeader, buildFullState } from './query/state.js';
 export { recall } from './query/recall.js';

@@ -109,6 +109,133 @@ describe('spool', () => {
     expect(flushSpool(store, root, sessionId)).toEqual({ processed: 0, skipped: 0 });
   });
 
+  it('attributes each entry in a mixed batch to the session matching its agent_id', () => {
+    const root = tempRoot();
+    const { store, sessionId } = createStore(root);
+
+    appendSpoolEntry(root, { tool: 'read', file: 'src/primary.ts', ts: '2026-06-10T10:00:00Z', seq: 1 });
+    appendSpoolEntry(root, {
+      tool: 'read', file: 'src/agent-one.ts', ts: '2026-06-10T10:00:01Z', seq: 2,
+      agent_id: 'agent-1', agent_type: 'Explore',
+    });
+    appendSpoolEntry(root, {
+      tool: 'edit', file: 'src/agent-two.ts', ts: '2026-06-10T10:00:02Z', seq: 3,
+      agent_id: 'agent-2', agent_type: 'general-purpose',
+    });
+    appendSpoolEntry(root, {
+      tool: 'read', file: 'src/agent-one-again.ts', ts: '2026-06-10T10:00:03Z', seq: 4,
+      agent_id: 'agent-1',
+    });
+
+    expect(flushSpool(store, root, sessionId)).toEqual({ processed: 4, skipped: 0 });
+
+    const children = store.getChildSessions(sessionId);
+    expect(children).toHaveLength(2);
+
+    const primary = store.getSession(sessionId)!;
+    const one = store.getSessionByAgentId(primary.scope_key!, 'agent-1')!;
+    const two = store.getSessionByAgentId(primary.scope_key!, 'agent-2')!;
+
+    expect(one.agent_type).toBe('Explore');
+    expect(two.agent_type).toBe('general-purpose');
+    expect(store.getEventsBySession(sessionId).map(event => event.target)).toEqual([
+      'src/primary.ts',
+    ]);
+    expect(store.getEventsBySession(one.id).map(event => event.target)).toEqual([
+      'src/agent-one.ts',
+      'src/agent-one-again.ts',
+    ]);
+    expect(store.getEventsBySession(two.id).map(event => event.target)).toEqual([
+      'src/agent-two.ts',
+    ]);
+  });
+
+  it('replaying an agent batch produces identical state', () => {
+    const root = tempRoot();
+    const { store, sessionId } = createStore(root);
+
+    const lines = [
+      '{"v":1,"ts":"2026-06-10T10:00:00Z","tool":"read","file":"src/a.ts"}',
+      '{"v":1,"ts":"2026-06-10T10:00:01Z","tool":"read","file":"src/b.ts","agent_id":"agent-1","agent_type":"Explore"}',
+      '',
+    ].join('\n');
+
+    fs.writeFileSync(deriveSpoolPath(root), lines);
+    expect(flushSpool(store, root, sessionId).processed).toBe(2);
+
+    fs.writeFileSync(deriveSpoolPath(root), lines);
+    expect(flushSpool(store, root, sessionId).processed).toBe(0);
+
+    expect(store.getChildSessions(sessionId)).toHaveLength(1);
+    expect(store.getEventsBySession(sessionId)).toHaveLength(1);
+    const child = store.getChildSessions(sessionId)[0]!;
+    expect(store.getEventsBySession(child.id)).toHaveLength(1);
+  });
+
+  it('attributes an entry to its child even after the parent session has ended', () => {
+    const root = tempRoot();
+    const { store, sessionId } = createStore(root);
+
+    // First batch creates the child, then the whole tree is ended.
+    appendSpoolEntry(root, {
+      tool: 'read', file: 'src/first.ts', ts: '2026-06-10T10:00:00Z', seq: 1,
+      agent_id: 'agent-1', agent_type: 'Explore',
+    });
+    flushSpool(store, root, sessionId);
+    store.endSessionTree(sessionId);
+
+    const primary = store.getSession(sessionId)!;
+    const child = store.getSessionByAgentId(primary.scope_key!, 'agent-1')!;
+    expect(store.getSession(child.id)?.status).toBe('ended');
+
+    // A late line for the same subagent still lands on it, and does not throw.
+    appendSpoolEntry(root, {
+      tool: 'read', file: 'src/late.ts', ts: '2026-06-10T10:05:00Z', seq: 2,
+      agent_id: 'agent-1',
+    });
+    expect(() => flushSpool(store, root, sessionId)).not.toThrow();
+
+    expect(store.getChildSessions(sessionId)).toHaveLength(1);
+    expect(store.getEventsBySession(child.id).map(event => event.target)).toEqual([
+      'src/first.ts',
+      'src/late.ts',
+    ]);
+  });
+
+  it('folds a subagent command failure into the existing episode rather than duplicating it', () => {
+    const root = tempRoot();
+    const { store, sessionId } = createStore(root);
+
+    // Same failing command, once from the primary and once from a subagent.
+    const failure = {
+      tool: 'cmd' as const,
+      cmd: 'npm test',
+      exit: '1',
+      stderr: 'FAIL src/db/store.test.ts',
+    };
+    appendSpoolEntry(root, { ...failure, ts: '2026-06-10T10:00:00Z', seq: 1 });
+    appendSpoolEntry(root, {
+      ...failure, ts: '2026-06-10T10:00:05Z', seq: 2,
+      agent_id: 'agent-1', agent_type: 'Explore',
+    });
+    flushSpool(store, root, sessionId);
+
+    const child = store.getChildSessions(sessionId)[0]!;
+    expect(child.agent_id).toBe('agent-1');
+    // The command event itself is attributed to the child.
+    expect(store.getCommandRunsBySession(child.id)).toHaveLength(1);
+
+    // The episode does NOT split: an identical failure inside the fold window
+    // is one recurring fact, and duplicating it would put two identical
+    // command_failure items into retrieval. Stated exception to story 0.1's
+    // "attributed to the child, never the parent" — the episode stays on the
+    // session that first recorded it, and this predates agent identity.
+    const episodes = store.getEpisodesBySession(sessionId);
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0]?.summary).toContain('(seen 2x)');
+    expect(store.getEpisodesBySession(child.id)).toHaveLength(0);
+  });
+
   it('replays legacy spool lines into the session it was given, idempotently', () => {
     const root = tempRoot();
     const { store, sessionId } = createStore(root);
