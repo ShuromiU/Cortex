@@ -108,6 +108,7 @@ describe('Schema', () => {
     expect(names).toContain('idx_sessions_parent');
     expect(names).toContain('idx_sessions_status');
     expect(names).toContain('idx_sessions_scope');
+    expect(names).toContain('idx_sessions_agent');
     expect(names).toContain('idx_command_runs_session');
     expect(names).toContain('idx_command_runs_event');
     expect(names).toContain('idx_episodes_session');
@@ -119,6 +120,46 @@ describe('Schema', () => {
     expect(names).toContain('idx_memory_references_item');
     expect(names).toContain('idx_memory_references_status');
     expect(names).toContain('idx_retrieval_log_session');
+  });
+
+  it('adds sessions.agent_id to an existing store without bumping the schema version', () => {
+    // A store predating agent identity: sessions exists, agent_id does not.
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE sessions (
+        id                TEXT PRIMARY KEY,
+        parent_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+        started_at        TEXT NOT NULL,
+        ended_at          TEXT,
+        focus             TEXT,
+        agent_type        TEXT NOT NULL DEFAULT 'primary',
+        status            TEXT NOT NULL DEFAULT 'active'
+      );
+      INSERT INTO meta (key, value) VALUES ('schema_version', '4');
+      INSERT INTO sessions (id, started_at) VALUES ('legacy-1', '2026-01-01T00:00:00.000Z');
+    `);
+
+    const columnNames = (): string[] =>
+      (db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>)
+        .map(column => column.name);
+    expect(columnNames()).not.toContain('agent_id');
+
+    ensureCortexSchema(db, '/repo');
+
+    expect(columnNames()).toContain('agent_id');
+    expect(getSchemaVersion(db)).toBe(4);
+    expect(SCHEMA_VERSION).toBe(4);
+    // Pre-existing rows survive and default to primary (no agent identity).
+    expect(
+      (db.prepare('SELECT agent_id FROM sessions WHERE id = ?').get('legacy-1') as {
+        agent_id: string | null;
+      }).agent_id,
+    ).toBeNull();
+
+    // Re-running changes nothing.
+    ensureCortexSchema(db, '/repo');
+    expect(columnNames().filter(name => name === 'agent_id').length).toBe(1);
+    expect(getSchemaVersion(db)).toBe(4);
   });
 
   it('stores semantic metadata keyed by memory item id', () => {

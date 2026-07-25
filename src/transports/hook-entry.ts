@@ -13,7 +13,7 @@ import {
 import { reflectMemory, type ReflexEvent } from '../query/reflex.js';
 import { suggestNotes } from '../query/suggest-notes.js';
 import { flushSpool } from '../capture/spool.js';
-import { ensureScopedSession } from '../scope/runtime.js';
+import { ensureScopedSession, type ScopeSessionOptions } from '../scope/runtime.js';
 import { configureEngagementPath, readEngagement, writeEngagement } from './mcp.js';
 
 const CORTEX_CONSULTED_KEY = 'cortex_consulted';
@@ -93,12 +93,28 @@ function parsePayload(raw: string): Record<string, unknown> {
   }
 }
 
+/**
+ * Subagent identity as the host reports it. Field-name drift must degrade to
+ * primary-session attribution — today's behavior — rather than break capture,
+ * so both snake_case and camelCase spellings are accepted and absence is fine.
+ */
+function agentIdentity(payload: Record<string, unknown>): ScopeSessionOptions {
+  const agentId = firstString(payload['agent_id'], payload['agentId']);
+  if (!agentId) {
+    return {};
+  }
+
+  const agentType = firstString(payload['agent_type'], payload['agentType']);
+  return { agentId, ...(agentType ? { agentType } : {}) };
+}
+
 function resolveSessionId(
   store: CortexStore,
   cwd: string,
   options: HookRuntimeOptions,
+  identity: ScopeSessionOptions = {},
 ): string {
-  return options.sessionId ?? ensureScopedSession(store, cwd).id;
+  return options.sessionId ?? ensureScopedSession(store, cwd, identity).id;
 }
 
 function isEnabled(cwd: string, options: HookRuntimeOptions): boolean {
@@ -249,7 +265,9 @@ function postToolUse(
   cwd: string,
   options: HookRuntimeOptions,
 ): void {
-  const sessionId = resolveSessionId(store, cwd, options);
+  // A payload carrying agent_id is a subagent's tool call and is attributed to
+  // that subagent's own session, never the parent's timeline (AD-9).
+  const sessionId = resolveSessionId(store, cwd, options, agentIdentity(payload));
   const name = toolName(payload);
   const input = toolInput(payload);
 

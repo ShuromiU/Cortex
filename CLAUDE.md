@@ -68,8 +68,9 @@ Persistent working memory for coding agents.
 - Note renderers should preserve `Kind [YYYY-MM-DD HH:mmZ]: ...` timestamp format for agent-readable chronology.
 - Retrieval should expose score breakdowns (`detail: 'scores'`) for quality evaluation and respect temporal terms such as latest/current, old/history, resolved, and when.
 - Semantic ranking must remain optional; `off` is default, `shadow` must not change returned results, and `rank` must be tested with deterministic fake providers.
+- Sessions are identified by `(scope_key, agent_id)`. A hook payload carrying `agent_id` resolves to a child session created on demand under the scope's active primary, with `parent_session_id` and `agent_type` recorded; a payload without one resolves to the primary. Subagent activity is never attributed to the parent.
 - Branch switches should restore the matching snapshot.
-- Branch snapshot summaries and recent-session tails should not be raw command-only hook activity.
+- Branch snapshot summaries and recent-session tails should not be raw command-only hook activity, and should not include child-session activity — branch snapshots and scope session counts read primary sessions only.
 - Stale notes should decay out of the default state unless reinforced by actual retrieval/use.
 - Resolved notes should remain cold even when retrieved, and should not trigger reflex `additionalContext`; `cortex_resolve` is the explicit close-out path.
 - The UserPromptSubmit hook may add a one-line consult hint **at most once per session** for memory-relevant prompts; there is no PreToolUse gate. Route/state/recall/brief/engage or topic-based validate-memory suppresses it.

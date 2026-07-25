@@ -108,4 +108,40 @@ describe('spool', () => {
     const { store, sessionId } = createStore(root);
     expect(flushSpool(store, root, sessionId)).toEqual({ processed: 0, skipped: 0 });
   });
+
+  it('replays pre-agent-identity spool lines into the primary session', () => {
+    const root = tempRoot();
+    const { store, sessionId } = createStore(root);
+
+    // Lines written by a hook installed before agent identity existed: no
+    // agent_id field at all (Story 0.1 AC 5).
+    fs.writeFileSync(
+      deriveSpoolPath(root),
+      [
+        '{"v":1,"ts":"2026-06-10T09:00:00Z","tool":"read","file":"src/legacy-a.ts"}',
+        '{"v":1,"ts":"2026-06-10T09:00:01Z","tool":"edit","file":"src/legacy-b.ts"}',
+        '',
+      ].join('\n'),
+    );
+
+    const first = flushSpool(store, root, sessionId);
+    expect(first).toEqual({ processed: 2, skipped: 0 });
+    expect(store.getEventsBySession(sessionId).map(event => event.target)).toEqual([
+      'src/legacy-a.ts',
+      'src/legacy-b.ts',
+    ]);
+    expect(store.getChildSessions(sessionId)).toHaveLength(0);
+
+    // Replaying the identical batch produces identical state (N-7).
+    fs.writeFileSync(
+      deriveSpoolPath(root),
+      [
+        '{"v":1,"ts":"2026-06-10T09:00:00Z","tool":"read","file":"src/legacy-a.ts"}',
+        '{"v":1,"ts":"2026-06-10T09:00:01Z","tool":"edit","file":"src/legacy-b.ts"}',
+        '',
+      ].join('\n'),
+    );
+    expect(flushSpool(store, root, sessionId).processed).toBe(0);
+    expect(store.getEventsBySession(sessionId)).toHaveLength(2);
+  });
 });

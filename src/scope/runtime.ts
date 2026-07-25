@@ -4,6 +4,10 @@ import { detectGitScope, type GitScopeIdentity } from './git.js';
 
 export interface ScopeSessionOptions {
   resolveScope?: (cwd: string) => GitScopeIdentity;
+  /** Host-provided subagent id. Present → resolve a child session (AD-9). */
+  agentId?: string;
+  /** Host-provided subagent type, recorded on the child session. */
+  agentType?: string;
 }
 
 function collectRecentFiles(store: CortexStore, scopeKey: string): string[] {
@@ -109,6 +113,12 @@ export function syncBranchSnapshotForSession(
     return;
   }
 
+  // A subagent's reads must not rewrite the branch snapshot — the snapshot is
+  // the primary timeline's summary, and every capture handler calls this.
+  if (session.parent_session_id) {
+    return;
+  }
+
   const payload = buildSnapshotPayload(store, session);
   if (!payload) {
     return;
@@ -117,10 +127,57 @@ export function syncBranchSnapshotForSession(
   store.upsertBranchSnapshot(payload);
 }
 
+/**
+ * Find or create the child session for `agentId` under `primary`. Identity is
+ * `(scope_key, agent_id)` per AD-9, so the same subagent resolves to the same
+ * session for as long as it runs, and two subagents never share one.
+ */
+function ensureAgentSession(
+  store: CortexStore,
+  primary: SessionRow,
+  agentId: string,
+  agentType: string | undefined,
+): SessionRow {
+  if (primary.scope_key) {
+    const existing = store.getSessionByAgentId(primary.scope_key, agentId);
+    if (existing) {
+      return existing;
+    }
+  }
+
+  return store.createSession({
+    parentSessionId: primary.id,
+    agentId,
+    agentType: agentType ?? 'subagent',
+    ...(primary.git_root ? { gitRoot: primary.git_root } : {}),
+    ...(primary.worktree_path ? { worktreePath: primary.worktree_path } : {}),
+    ...(primary.branch_ref ? { branchRef: primary.branch_ref } : {}),
+    ...(primary.head_oid ? { headOid: primary.head_oid } : {}),
+    scopeType: primary.scope_type,
+    ...(primary.scope_key ? { scopeKey: primary.scope_key } : {}),
+  });
+}
+
 export function ensureScopedSession(
   store: CortexStore,
   cwd: string,
   options: ScopeSessionOptions = {},
+): SessionRow {
+  const primary = ensurePrimarySession(store, cwd, options);
+  return options.agentId
+    ? ensureAgentSession(store, primary, options.agentId, options.agentType)
+    : primary;
+}
+
+/**
+ * Resolve the scope's primary session, rotating it when the scope changed.
+ * Rotation, snapshot sync and session end happen here and only here — a
+ * subagent payload must never end or rotate the primary it belongs to.
+ */
+function ensurePrimarySession(
+  store: CortexStore,
+  cwd: string,
+  options: ScopeSessionOptions,
 ): SessionRow {
   const scope = (options.resolveScope ?? detectGitScope)(cwd);
   const current = store.getCurrentSession();

@@ -183,6 +183,58 @@ describe('handleHookPayload', () => {
     expect(runs[0]?.exit_code).toBe(1);
     expect(runs[0]?.stderr_tail).toContain('hook entry test');
   });
+
+  it('attributes a payload carrying agent_id to a child session, not the parent', () => {
+    const { store } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-agent-'));
+
+    handleHookPayload(
+      store,
+      'post',
+      JSON.stringify({
+        tool_name: 'Read',
+        tool_input: { file_path: 'src/subagent-read.ts' },
+        agent_id: 'agent-xyz',
+        agent_type: 'Explore',
+      }),
+      cwd,
+      { requireEngagement: false },
+    );
+
+    const primary = store.getCurrentSession()!;
+    const child = store.getSessionByAgentId(primary.scope_key!, 'agent-xyz');
+    expect(child).toBeDefined();
+    expect(child!.parent_session_id).toBe(primary.id);
+    expect(child!.agent_type).toBe('Explore');
+
+    expect(
+      store.getEventsBySession(child!.id).map(event => event.target),
+    ).toEqual(['src/subagent-read.ts']);
+    expect(store.getEventsBySession(primary.id)).toHaveLength(0);
+  });
+
+  it('attributes a payload without agent_id to the primary session', () => {
+    const { store } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hook-primary-'));
+
+    handleHookPayload(
+      store,
+      'post',
+      JSON.stringify({
+        tool_name: 'Read',
+        tool_input: { file_path: 'src/primary-read.ts' },
+      }),
+      cwd,
+      { requireEngagement: false },
+    );
+
+    const primary = store.getCurrentSession()!;
+    expect(primary.agent_id).toBeNull();
+    expect(
+      store.getEventsBySession(primary.id).map(event => event.target),
+    ).toEqual(['src/primary-read.ts']);
+    expect(store.getChildSessions(primary.id)).toHaveLength(0);
+  });
 });
 
 describe('end-of-turn nudge', () => {

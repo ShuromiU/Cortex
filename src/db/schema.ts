@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   ended_at          TEXT,
   focus             TEXT,
   agent_type        TEXT NOT NULL DEFAULT 'primary',
+  agent_id          TEXT,
   status            TEXT NOT NULL DEFAULT 'active',
   git_root          TEXT,
   worktree_path     TEXT,
@@ -242,6 +243,7 @@ CREATE INDEX IF NOT EXISTS idx_ledger_session   ON token_ledger(session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent  ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status  ON sessions(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_scope   ON sessions(scope_key, status, started_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_agent   ON sessions(scope_key, agent_id);
 CREATE INDEX IF NOT EXISTS idx_command_runs_session ON command_runs(session_id, timestamp);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_command_runs_event ON command_runs(event_id) WHERE event_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id, created_at);
@@ -493,6 +495,9 @@ function ensureSessionScopeColumns(db: Database.Database): void {
     "scope_type TEXT NOT NULL DEFAULT 'project'",
   );
   ensureColumn(db, 'sessions', 'scope_key', 'scope_key TEXT');
+  // AD-9: session identity is (scope_key, agent_id). Nullable — a NULL agent_id
+  // is a primary session, which is every session written before this column.
+  ensureColumn(db, 'sessions', 'agent_id', 'agent_id TEXT');
 }
 
 function legacyDatabaseHasData(db: Database.Database): boolean {

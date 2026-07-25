@@ -54,6 +54,7 @@ export interface SessionRow {
   ended_at: string | null;
   focus: string | null;
   agent_type: string;
+  agent_id: string | null;
   status: string;
   git_root: string | null;
   worktree_path: string | null;
@@ -305,6 +306,8 @@ export interface ParsedRetrievalLog {
 export interface CreateSessionOpts {
   parentSessionId?: string;
   agentType?: string;
+  /** Host-provided subagent id; absent for a primary session (AD-9). */
+  agentId?: string;
   focus?: string;
   gitRoot?: string;
   worktreePath?: string;
@@ -873,6 +876,7 @@ export class CortexStore {
            started_at,
            focus,
            agent_type,
+           agent_id,
            status,
            git_root,
            worktree_path,
@@ -881,7 +885,7 @@ export class CortexStore {
            scope_type,
            scope_key
          )
-         VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -889,6 +893,7 @@ export class CortexStore {
         now,
         opts.focus ?? null,
         opts.agentType ?? 'primary',
+        opts.agentId ?? null,
         opts.gitRoot ?? null,
         opts.worktreePath ?? null,
         opts.branchRef ?? null,
@@ -906,13 +911,35 @@ export class CortexStore {
       .get(id) as SessionRow | undefined;
   }
 
+  /**
+   * The active *primary* session. Child sessions stay active for as long as
+   * their subagent runs, so without the parentage filter the newest subagent
+   * would become "the current session" and every primary-path caller would
+   * start writing into it (AD-9).
+   */
   getCurrentSession(): SessionRow | undefined {
     return this.db
       .prepare(
-        `SELECT * FROM sessions WHERE status = 'active'
+        `SELECT * FROM sessions
+         WHERE status = 'active' AND parent_session_id IS NULL
          ORDER BY started_at DESC, rowid DESC LIMIT 1`,
       )
       .get() as SessionRow | undefined;
+  }
+
+  /**
+   * Resolve a child session by its AD-9 identity. Deliberately unfiltered by
+   * status and parent: a subagent's entries can be replayed from the spool
+   * after its parent has ended, and must still find their own session.
+   */
+  getSessionByAgentId(scopeKey: string, agentId: string): SessionRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM sessions
+         WHERE scope_key = ? AND agent_id = ?
+         ORDER BY started_at DESC, rowid DESC LIMIT 1`,
+      )
+      .get(scopeKey, agentId) as SessionRow | undefined;
   }
 
   updateSessionFocus(id: string, focus: string): void {
@@ -968,11 +995,17 @@ export class CortexStore {
       .all(limit) as SessionRow[];
   }
 
+  /**
+   * Primary sessions only. These feed branch snapshots, the recent-session
+   * tail and the consult gate; a child inherits its parent's scope_key, so
+   * without the filter subagent activity would surface as scope history.
+   * Child timelines are reached explicitly via getChildSessions.
+   */
   getRecentSessionsByScope(scopeKey: string, limit: number): SessionRow[] {
     return this.db
       .prepare(
         `SELECT * FROM sessions
-         WHERE scope_key = ?
+         WHERE scope_key = ? AND parent_session_id IS NULL
          ORDER BY started_at DESC, rowid DESC LIMIT ?`,
       )
       .all(scopeKey, limit) as SessionRow[];
@@ -980,7 +1013,10 @@ export class CortexStore {
 
   getSessionCountByScope(scopeKey: string): number {
     const row = this.db
-      .prepare('SELECT COUNT(*) as count FROM sessions WHERE scope_key = ?')
+      .prepare(
+        `SELECT COUNT(*) as count FROM sessions
+         WHERE scope_key = ? AND parent_session_id IS NULL`,
+      )
       .get(scopeKey) as { count: number };
     return row.count;
   }

@@ -120,6 +120,88 @@ describe('CortexStore — sessions', () => {
     expect(current).toBeUndefined();
   });
 
+  it('records agent_id on a session and round-trips it', () => {
+    const primary = store.createSession({ scopeKey: 'project:/repo' });
+    expect(primary.agent_id).toBeNull();
+
+    const child = store.createSession({
+      parentSessionId: primary.id,
+      agentId: 'agent-abc',
+      agentType: 'Explore',
+      scopeKey: 'project:/repo',
+    });
+
+    expect(child.agent_id).toBe('agent-abc');
+    expect(child.agent_type).toBe('Explore');
+    expect(child.parent_session_id).toBe(primary.id);
+    expect(store.getSession(child.id)?.agent_id).toBe('agent-abc');
+  });
+
+  it('finds a session by (scope_key, agent_id)', () => {
+    const primary = store.createSession({ scopeKey: 'project:/repo' });
+    const child = store.createSession({
+      parentSessionId: primary.id,
+      agentId: 'agent-abc',
+      scopeKey: 'project:/repo',
+    });
+
+    expect(store.getSessionByAgentId('project:/repo', 'agent-abc')?.id).toBe(child.id);
+    expect(store.getSessionByAgentId('project:/repo', 'agent-missing')).toBeUndefined();
+  });
+
+  it('does not resolve an agent_id across scope boundaries', () => {
+    const primary = store.createSession({ scopeKey: 'project:/repo' });
+    store.createSession({
+      parentSessionId: primary.id,
+      agentId: 'agent-abc',
+      scopeKey: 'project:/repo',
+    });
+
+    expect(store.getSessionByAgentId('project:/other', 'agent-abc')).toBeUndefined();
+  });
+
+  it('finds a child by agent_id after its parent has ended', () => {
+    const primary = store.createSession({ scopeKey: 'project:/repo' });
+    const child = store.createSession({
+      parentSessionId: primary.id,
+      agentId: 'agent-abc',
+      scopeKey: 'project:/repo',
+    });
+    store.endSession(primary.id);
+
+    expect(store.getSessionByAgentId('project:/repo', 'agent-abc')?.id).toBe(child.id);
+  });
+
+  it('getCurrentSession skips active child sessions', () => {
+    const primary = store.createSession({ scopeKey: 'project:/repo' });
+    store.createSession({
+      parentSessionId: primary.id,
+      agentId: 'agent-abc',
+      scopeKey: 'project:/repo',
+    });
+
+    expect(store.getCurrentSession()?.id).toBe(primary.id);
+  });
+
+  it('excludes child sessions from scope listings and counts', () => {
+    const primary = store.createSession({
+      scopeType: 'branch',
+      scopeKey: 'branch:/repo/.git:/repo:main',
+      branchRef: 'main',
+    });
+    store.createSession({
+      parentSessionId: primary.id,
+      agentId: 'agent-abc',
+      scopeType: 'branch',
+      scopeKey: 'branch:/repo/.git:/repo:main',
+      branchRef: 'main',
+    });
+
+    const recent = store.getRecentSessionsByScope('branch:/repo/.git:/repo:main', 10);
+    expect(recent.map(session => session.id)).toEqual([primary.id]);
+    expect(store.getSessionCountByScope('branch:/repo/.git:/repo:main')).toBe(1);
+  });
+
   it('lists recent sessions ordered by started_at DESC', () => {
     const s1 = store.createSession();
     const s2 = store.createSession();
