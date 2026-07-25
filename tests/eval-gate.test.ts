@@ -2,7 +2,10 @@ import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import Database from 'better-sqlite3';
 import { createProgram } from '../src/transports/cli.js';
+import { applySchema, initializeMeta } from '../src/db/schema.js';
+import { CortexStore } from '../src/db/store.js';
 import { KIND_WEIGHTS } from '../src/memory/kind-weights.js';
 import {
   runEvalGate,
@@ -253,10 +256,13 @@ describe('eval gate — cannot be silently disabled', () => {
     seedSuite(dirs, 'alpha');
     grandfatherAllBut(dirs, ['note:decision']);
     writeSuite(dirs, 'empty', { seed: { items: [] }, fixtures: [] });
+    // Give it a baseline, so it cannot fail on the missing-baseline path and
+    // mask whether the shape validation is doing anything.
+    writeBaseline(dirs, 'empty', { quality: { top1_hit: 0, recall_at_3: 0, output_tokens: 0 } });
 
     const result = runEvalGate(dirs);
     expect(result.ok).toBe(false);
-    expect(result.lines.join('\n')).toContain('empty');
+    expect(result.lines.join('\n')).toContain('assert nothing');
   });
 
   it('fails a suite with no seed instead of evaluating against an empty store', () => {
@@ -264,11 +270,12 @@ describe('eval gate — cannot be silently disabled', () => {
     const suite = suiteFor('note:decision') as Record<string, unknown>;
     delete suite['seed'];
     writeSuite(dirs, 'noseed', suite);
+    writeBaseline(dirs, 'noseed', { quality: { top1_hit: 0, recall_at_3: 0, output_tokens: 0 } });
     grandfatherAllBut(dirs, ['note:decision']);
 
     const result = runEvalGate(dirs);
     expect(result.ok).toBe(false);
-    expect(result.lines.join('\n')).toContain('noseed');
+    expect(result.lines.join('\n')).toContain('empty store');
   });
 
   it('reports a malformed suite without aborting the suites that follow it', () => {
@@ -306,16 +313,31 @@ describe('eval gate — cannot be silently disabled', () => {
     expect(result.kindCoverage.uncovered.length).toBeGreaterThan(0);
   });
 
-  it('flags a non-suite file sitting in the suites directory', () => {
-    const dirs = makeDirs();
-    seedSuite(dirs, 'alpha');
-    grandfatherAllBut(dirs, ['note:decision']);
-    fs.writeFileSync(path.join(dirs.suitesDir, 'notes.txt'), 'stray');
+  it.each(['budget.JSON', 'extra.jsonc', 'beta.json.bak'])(
+    'flags %s in the suites directory, which would be silently ignored',
+    stray => {
+      const dirs = makeDirs();
+      seedSuite(dirs, 'alpha');
+      grandfatherAllBut(dirs, ['note:decision']);
+      fs.writeFileSync(path.join(dirs.suitesDir, stray), '{}');
 
-    const result = runEvalGate(dirs);
-    expect(result.ok).toBe(false);
-    expect(result.lines.join('\n')).toContain('notes.txt');
-  });
+      const result = runEvalGate(dirs);
+      expect(result.ok).toBe(false);
+      expect(result.lines.join('\n')).toContain(stray);
+    },
+  );
+
+  it.each(['README.md', '.gitkeep', '.DS_Store'])(
+    'does not fail the build over %s, which is plainly not a suite',
+    stray => {
+      const dirs = makeDirs();
+      seedSuite(dirs, 'alpha');
+      grandfatherAllBut(dirs, ['note:decision']);
+      fs.writeFileSync(path.join(dirs.suitesDir, stray), 'not a suite');
+
+      expect(runEvalGate(dirs).ok).toBe(true);
+    },
+  );
 });
 
 // ── AD-5 kind coverage ────────────────────────────────────────────────
@@ -359,9 +381,26 @@ describe('the repository gate', () => {
     expect(runEvalGate().ok).toBe(true);
   });
 
-  it('grandfathers exactly the kinds no real suite exercises, and no more', () => {
-    // Pins the escape hatch: widening `grandfathered` now requires editing this
-    // assertion, so it cannot be done quietly in a JSON array.
+  it('grandfathers exactly this frozen list, so widening it edits a test', () => {
+    // A pin computed from KIND_WEIGHTS would pass when a NEW kind is added to
+    // both the registry and the manifest at once — the only widening that
+    // matters. The list is therefore literal: growing it is a visible diff in
+    // a test file, not a quiet append to a JSON array.
+    const manifest = JSON.parse(fs.readFileSync('eval/kind-coverage.json', 'utf8')) as {
+      grandfathered: string[];
+    };
+
+    expect([...manifest.grandfathered].sort()).toEqual([
+      'branch_snapshot',
+      'episode:session_summary',
+      'note:focus',
+      'note:intent',
+      'project_snapshot',
+      'session_state',
+    ]);
+  });
+
+  it('does not grandfather a kind that a suite already covers', () => {
     const manifest = JSON.parse(fs.readFileSync('eval/kind-coverage.json', 'utf8')) as {
       grandfathered: string[];
     };
@@ -377,32 +416,43 @@ describe('the repository gate', () => {
         }),
     );
 
-    expect([...manifest.grandfathered].sort()).toEqual(
-      Object.keys(KIND_WEIGHTS).filter(kind => !covered.has(kind)).sort(),
-    );
+    expect(manifest.grandfathered.filter(kind => covered.has(kind))).toEqual([]);
   });
 
-  it('registers every memory_items kind that source code writes', () => {
+  it('registers every memory_items kind the store actually writes', () => {
     // AC #4 detects a new key in KIND_WEIGHTS, but memory_items.kind has no
-    // constraint — so a kind could ship unregistered and stay invisible.
-    const literals = new Set<string>();
-    const walk = (dir: string): void => {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          walk(full);
-        } else if (entry.name.endsWith('.ts')) {
-          const source = fs.readFileSync(full, 'utf8');
-          for (const match of source.matchAll(/kind:\s*'((?:note|episode):[a-z_]+)'/g)) {
-            literals.add(match[1]!);
-          }
-        }
-      }
-    };
-    walk('src');
+    // constraint and kinds are built dynamically (`note:${note.kind}`), so a
+    // static scan for literals finds nothing. Drive real writes instead and
+    // read back what landed.
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    applySchema(db);
+    initializeMeta(db, '/kinds');
+    const store = new CortexStore(db);
+    const session = store.createSession({ scopeType: 'project', scopeKey: 'project:/kinds' });
 
-    const unregistered = [...literals].filter(kind => !(kind in KIND_WEIGHTS));
-    expect(unregistered).toEqual([]);
+    for (const kind of ['decision', 'insight', 'blocker', 'intent', 'focus'] as const) {
+      store.insertNote({ sessionId: session.id, kind, subject: kind, content: `a ${kind} note` });
+    }
+    for (const kind of ['command_failure', 'test_cycle', 'session_summary']) {
+      store.insertEpisode({
+        id: `${kind}:1`, sessionId: session.id, kind, summary: `${kind} happened`,
+      });
+    }
+    store.insertCommandRun({
+      id: 'run-1', sessionId: session.id, category: 'test', commandSummary: 'npm test', exitCode: 0,
+    });
+    store.upsertBranchSnapshot({
+      scopeKey: 'project:/kinds', branchRef: 'main', summary: 'snapshot', lastSessionId: session.id,
+    });
+    store.insertState({ sessionId: session.id, layer: 'session', content: 'session state' });
+
+    const written = (
+      db.prepare('SELECT DISTINCT kind FROM memory_items').all() as Array<{ kind: string }>
+    ).map(row => row.kind);
+
+    expect(written.length).toBeGreaterThan(0);
+    expect(written.filter(kind => !(kind in KIND_WEIGHTS))).toEqual([]);
   });
 });
 
@@ -426,12 +476,14 @@ describe('eval gate — baseline regeneration', () => {
     expect(() => regenerateBaseline('nope', dirs)).toThrow(/nope/);
   });
 
-  it.each(['../escape', 'nested/alpha', '', '  '])(
+  it.each(['../escape', 'nested/alpha', '', '  ', '..', './alpha'])(
     'refuses the suite name %j so a baseline cannot be written outside the directory',
     name => {
       const dirs = makeDirs();
       seedSuite(dirs, 'alpha');
-      expect(() => regenerateBaseline(name, dirs)).toThrow(/bare file name|No locked suite/);
+      // Specifically the basename guard — "No locked suite" would also be
+      // thrown by the unguarded code and would let the fix be deleted silently.
+      expect(() => regenerateBaseline(name, dirs)).toThrow(/bare file name/);
     },
   );
 
@@ -612,5 +664,48 @@ describe('baseline justification', () => {
         commit('chore: drop a suite', ['eval/baselines/budget.json'], 'D'),
       ]).ok,
     ).toBe(false);
+  });
+
+  it('demands justification for MOVING a locked artifact out of the guarded directory', () => {
+    // Two `git mv`s would otherwise retire a suite more quietly than one rm:
+    // the destination is unguarded and the gate sees nothing orphaned.
+    const verdict = checkBaselineJustification([
+      {
+        body: 'chore: tidy',
+        files: [
+          { status: 'R100', from: 'eval/baselines/budget.json', path: 'archive/budget.json' },
+          { status: 'R100', from: 'eval/suites/budget.json', path: 'archive/suite.json' },
+        ],
+      },
+    ]);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toContain('eval/baselines/budget.json');
+  });
+
+  it('does not demand justification for moving a file INTO the guarded directory', () => {
+    expect(
+      checkBaselineJustification([
+        {
+          body: 'feat: promote a staged baseline',
+          files: [
+            { status: 'R100', from: 'staging/new.json', path: 'eval/baselines/new.json' },
+          ],
+        },
+      ]).ok,
+    ).toBe(true);
+  });
+
+  it.each(['n/a', 'N/A', 'none', 'tbd', '.', '-'])('rejects %j as a reason', reason => {
+    expect(
+      checkBaselineJustification([
+        commit(`feat: x\n\nBaseline-Regenerated: ${reason}`, ['eval/baselines/budget.json']),
+      ]).ok,
+    ).toBe(false);
+  });
+
+  it('does not treat a near-miss path as the guarded manifest', () => {
+    for (const near of ['eval/kind-coverage.jsonc', 'eval/kind-coverage.json.bak']) {
+      expect(checkBaselineJustification([commit('chore: x', [near])]).ok).toBe(true);
+    }
   });
 });

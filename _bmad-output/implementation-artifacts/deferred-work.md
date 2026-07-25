@@ -12,6 +12,18 @@ Items surfaced during review that are real but not actionable in the story that 
 
 - ~~**README carries no session-identity model.**~~ **CLOSED in story 0.2** — README gained a "Subagent attribution" section covering `(scope_key, agent_id)`, per-line spool identity, primary-only scoped reads, and the stale-hook symptom with its fix.
 
+## Deferred from: code review of story-1.5 (2026-07-25)
+
+Low-severity items from two review rounds on the eval gate. None can make the gate report green while quality regresses; they are ergonomics, coverage and doc-accuracy gaps.
+
+- **`scripts/check-baseline-justification.mjs` has no test coverage.** Only the pure `checkBaselineJustification(commits)` is unit-tested. The base resolution, `--name-status` parsing and range construction were verified by hand against a scratch git repo, twice, but nothing pins them. A test that builds a temp repo and runs the script would close it — Task 4 said "keep the check in a small script so it is testable", and it is testable, just untested.
+- **`regenerateBaseline` writes unconditionally.** It prints the regressions it is about to bake in, but a trailer justifying an accepted token cost silently accepts any accuracy regression alongside it. Nothing correlates the stated reason with the accepted deltas. Considered requiring the trailer to name the metric; rejected as over-fitting for now.
+- **The `concurrency` group does not de-duplicate push and pull_request runs.** `github.head_ref || github.ref` yields different keys for the two events, so a same-repo PR still runs the matrix twice. Same-event supersession does work. The comment in the workflow overstates it.
+- **Stray non-`.json` files in `eval/baselines/` are ignored** while near-misses in `eval/suites/` fail. `listJsonNames` computes `unrecognized` for both and only consumes one. Asymmetric, harmless today.
+- **A `null` entry inside `seed.items` throws** from `checkKindCoverage` outside the per-suite try/catch, suppressing the whole report. Fails closed but unreadably.
+- **`--regenerate-baseline ../escape` rejects the write via an unhandled exception**, so it prints a Node stack trace rather than the clean message the empty-name path produces.
+- **`CLAUDE.md` § Verification still tells humans `npx vitest run`** while CI was moved to `npm test` on the grounds that the declared script is authoritative.
+
 ## Deferred from: code review of story-0.2 (2026-07-24)
 
 - **Concurrent spool appends tear lines above the stdio buffer.** `hooks/claude/cortex-capture.sh` appends with `printf '%s\n' "$LINE" >> "$SPOOL"`, which is atomic only up to roughly one stdio buffer. Measured by a reviewer with 16 concurrent hook invocations: 848-byte lines 16/16 intact, 2.8 KB 13/16, 53 KB 14/16 — torn lines are then silently dropped by `parseSpoolLines`. The `Bash` branch embeds uncapped `stdout`/`stderr`, so a real failing-test capture lands well past the safe size. Predates agent identity; parallel subagents make it easier to hit. Likely fix: cap the captured streams inside the existing jq program (e.g. `.[0:2000]`), which costs no extra process, and/or write via a per-PID temp file. Wants a measurement-backed story of its own.

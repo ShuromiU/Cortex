@@ -53,7 +53,18 @@ function resolveBase(candidate) {
   return root ? root.trim().split('\n')[0] : undefined;
 }
 
-const base = resolveBase(rawBase);
+let base = resolveBase(rawBase);
+
+// Pushing to the default branch itself resolves the fallback to the pushed tip,
+// which would inspect zero commits and pass vacuously — the same blind spot in
+// a new shape. Step back one commit instead.
+if (
+  base !== undefined &&
+  tryGit(['rev-parse', `${base}^{commit}`])?.trim() === tryGit(['rev-parse', `${head}^{commit}`])?.trim()
+) {
+  base = tryGit(['rev-parse', `${head}~1^{commit}`]) !== undefined ? `${head}~1` : base;
+}
+
 if (base === undefined) {
   process.stderr.write(
     'baseline-justification: FAILED\nCould not resolve a base commit to compare against. ' +
@@ -62,19 +73,27 @@ if (base === undefined) {
   process.exit(1);
 }
 
-// Three-dot: compare against the merge base, so commits that landed on the base
-// branch after this one forked are not attributed to it.
-const shas = (tryGit(['rev-list', `${base}...${head}`]) ?? '').split('\n').filter(Boolean);
+// Two dots: commits reachable from head but not from base. `rev-list A...B` is
+// the SYMMETRIC difference — it would also list base-only commits and blame the
+// branch for someone else's work, which the author cannot amend. (Three-dot
+// means merge-base for `git diff`, not for `git rev-list`.)
+const shas = (tryGit(['rev-list', `${base}..${head}`]) ?? '').split('\n').filter(Boolean);
 
 const commits = shas.map(sha => ({
   body: tryGit(['log', '-1', '--format=%B', sha]) ?? '',
-  // --name-status so an added artifact can be told from a modified one.
-  files: (tryGit(['show', '--name-status', '--format=', sha]) ?? '')
+  // --name-status so an added artifact can be told from a modified or moved
+  // one. core.quotePath=false keeps non-ASCII paths from arriving quoted and
+  // escaping the guarded-path match.
+  files: (tryGit(['-c', 'core.quotePath=false', 'show', '--name-status', '--format=', sha]) ?? '')
     .split('\n')
     .filter(Boolean)
     .map(line => {
       const [status, ...rest] = line.split('\t');
-      return { status: (status ?? '').trim(), path: (rest[rest.length - 1] ?? '').trim() };
+      const trimmed = (status ?? '').trim();
+      // Renames and copies arrive as `R100\told\tnew`.
+      return /^[RC]/i.test(trimmed) && rest.length >= 2
+        ? { status: trimmed, from: (rest[0] ?? '').trim(), path: (rest[1] ?? '').trim() }
+        : { status: trimmed, path: (rest[rest.length - 1] ?? '').trim() };
     })
     .filter(file => file.path.length > 0),
 }));

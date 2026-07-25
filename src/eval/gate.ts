@@ -77,6 +77,8 @@ export interface GateResult {
 export interface ChangedFile {
   path: string;
   status: string;
+  /** Rename source, when git reported one. */
+  from?: string;
 }
 
 /** One commit's contribution to a push or pull request. */
@@ -187,7 +189,10 @@ function evaluateSuite(
  * `quality` block is `{}` would silently un-gate every metric while printing
  * plausible current numbers.
  */
-function findMetricRegressions(result: EvaluationResult): string[] {
+function findMetricRegressions(
+  result: EvaluationResult,
+  baseline: EvaluationResult,
+): string[] {
   const comparison = result.quality_comparison;
   if (!comparison) {
     return ['no comparison produced — the suite or its baseline carries no quality block'];
@@ -195,10 +200,21 @@ function findMetricRegressions(result: EvaluationResult): string[] {
 
   const regressions: string[] = [];
   for (const metric of GATED_METRICS) {
+    // Check the baseline's own value, not just the delta: `current - null`
+    // coerces to a finite number, so a null metric would otherwise read as an
+    // improvement — the same fail-open shape as the missing-key case.
+    const recorded = baseline.quality?.[metric];
+    if (typeof recorded !== 'number' || !Number.isFinite(recorded)) {
+      regressions.push(
+        `${metric}: baseline value missing or non-numeric — the baseline cannot gate this metric`,
+      );
+      continue;
+    }
+
     const delta = comparison[`${metric}_delta` as keyof typeof comparison];
     if (typeof delta !== 'number' || !Number.isFinite(delta)) {
       regressions.push(
-        `${metric}: baseline value missing or non-numeric — the baseline cannot gate this metric`,
+        `${metric}: delta could not be computed — the baseline cannot gate this metric`,
       );
       continue;
     }
@@ -217,18 +233,31 @@ function findMetricRegressions(result: EvaluationResult): string[] {
 }
 
 /**
- * Absolute, not comparative. Two suites exist only to lock output content
- * (`[stale:`, `[moved:`), and a fixture's own assertions are invisible to the
- * aggregate deltas — worse, losing a label shrinks the output, so the delta
- * reads as an improvement. `passed` folds top-1, recall, token budget and the
- * contains/excludes assertions.
+ * Comparative, per fixture. A fixture's own assertions are invisible to the
+ * aggregate deltas — worse, losing a `[stale:` label shrinks the output, so
+ * `output_tokens` falls and the delta reads as an improvement. But gating on
+ * `passed` absolutely would break the red-to-green authoring workflow the
+ * locked suites document ("baseline fails recall_at_3 and the output
+ * assertion; passes after Phase 1.3"): a suite that is not already perfect
+ * could never be baselined. So a fixture that was already failing at the
+ * baseline is not a regression; one that newly fails is.
  */
-function findFixtureFailures(result: EvaluationResult): string[] {
-  const fixtures = result.quality?.fixtures ?? [];
+function findFixtureRegressions(
+  result: EvaluationResult,
+  baseline: EvaluationResult,
+): string[] {
+  const wasPassing = new Map(
+    (baseline.quality?.fixtures ?? []).map(fixture => [fixture.topic, fixture.passed]),
+  );
   const failures: string[] = [];
 
-  for (const fixture of fixtures) {
+  for (const fixture of result.quality?.fixtures ?? []) {
     if (fixture.passed) {
+      continue;
+    }
+    // Known-failing at the baseline: the author accepted it deliberately.
+    // A fixture absent from the baseline is new and must pass on arrival.
+    if (wasPassing.get(fixture.topic) === false) {
       continue;
     }
     const reasons: string[] = [];
@@ -246,8 +275,19 @@ function findFixtureFailures(result: EvaluationResult): string[] {
         `over token budget (${fixture.token_budget.actual_tokens} > ${fixture.token_budget.max_tokens})`,
       );
     }
+    // recall/noise/stale also feed `passed`; naming them keeps the failure from
+    // rendering with no stated cause.
+    if (fixture.recall_at_3 < 1) {
+      reasons.push(`recall_at_3 ${fixture.recall_at_3}`);
+    }
+    if (fixture.noise_count > 0) {
+      reasons.push(`noise_count ${fixture.noise_count}`);
+    }
+    if (fixture.stale_count > 0) {
+      reasons.push(`stale_count ${fixture.stale_count}`);
+    }
     failures.push(
-      `fixture '${fixture.topic}' failed${reasons.length > 0 ? `: ${reasons.join('; ')}` : ''}`,
+      `fixture '${fixture.topic}' newly failing${reasons.length > 0 ? `: ${reasons.join('; ')}` : ''}`,
     );
   }
 
@@ -328,7 +368,11 @@ export function runEvalGate(options: EvalGateOptions = {}): GateResult {
     };
   }
 
-  for (const stray of suiteFiles.unrecognized) {
+  // Only near-misses fail: a file that looks like it was meant to be a suite
+  // would be silently ignored, which is the invisibility this gate exists to
+  // prevent. A README, .gitkeep or .DS_Store is not that, and hard-failing on
+  // one turns documenting the directory into a red build.
+  for (const stray of suiteFiles.unrecognized.filter(file => /\.jsonc?($|\.)|\.JSON$/i.test(file))) {
     lines.push(`FAIL  ${suitesDir}/${stray} is not a suite file — it would be silently ignored`);
     suites.push({ suite: stray, ok: false, regressions: ['unrecognized file in suites directory'] });
   }
@@ -379,7 +423,10 @@ export function runEvalGate(options: EvalGateOptions = {}): GateResult {
       continue;
     }
 
-    const regressions = [...findMetricRegressions(result), ...findFixtureFailures(result)];
+    const regressions = [
+      ...findMetricRegressions(result, baseline),
+      ...findFixtureRegressions(result, baseline),
+    ];
     if (regressions.length > 0) {
       fail(name, regressions);
       continue;
@@ -437,7 +484,13 @@ export function regenerateBaseline(
 
   // A suite name is a bare file name. Without this, `../outside/x` writes a
   // baseline beyond eval/baselines and escapes the CI justification check.
-  if (suiteName.trim().length === 0 || suiteName !== path.basename(suiteName)) {
+  // `path.basename('..')` is '..', so the relative segments need naming.
+  if (
+    suiteName.trim().length === 0 ||
+    suiteName !== path.basename(suiteName) ||
+    suiteName === '.' ||
+    suiteName === '..'
+  ) {
     throw new Error(`Suite name must be a bare file name, got '${suiteName}'`);
   }
 
@@ -454,8 +507,8 @@ export function regenerateBaseline(
 
   const result = evaluateSuite(suite, rootPath, previous);
   const accepted = previous
-    ? [...findMetricRegressions(result), ...findFixtureFailures(result)]
-    : findFixtureFailures(result);
+    ? [...findMetricRegressions(result, previous), ...findFixtureRegressions(result, previous)]
+    : [];
 
   fs.mkdirSync(baselinesDir, { recursive: true });
   fs.writeFileSync(baselinePath, `${JSON.stringify(result, null, 2)}\n`);
@@ -467,11 +520,12 @@ export function regenerateBaseline(
 
 function touchesGuardedPath(file: string): boolean {
   const normalized = file.replace(/\\/g, '/');
-  return JUSTIFIED_PATHS.some(
-    guarded =>
-      normalized === guarded.replace(/\/$/, '') ||
-      normalized.startsWith(guarded) ||
-      normalized === guarded,
+  return JUSTIFIED_PATHS.some(guarded =>
+    guarded.endsWith('/')
+      // Directory: anything beneath it.
+      ? normalized.startsWith(guarded)
+      // Exact file, so `eval/kind-coverage.jsonc` and `.json.bak` are not it.
+      : normalized === guarded,
   );
 }
 
@@ -482,8 +536,10 @@ function justificationIn(body: string): string | undefined {
       continue;
     }
     const reason = trimmed.slice(BASELINE_TRAILER.length).trim();
-    // The CLI prints `<why this quality change is intended>` as a template.
-    if (reason.length > 0 && !/^<.*>$/.test(reason)) {
+    // The CLI prints `<why this quality change is intended>` as a template, and
+    // `n/a`-class non-answers defeat the purpose as thoroughly as an empty one.
+    const meaningless = /^(n\/?a|none|tbd|todo|\.|-|\?+)$/i.test(reason);
+    if (reason.length >= 8 && !/^<.*>$/.test(reason) && !meaningless) {
       return reason;
     }
   }
@@ -504,10 +560,17 @@ export function checkBaselineJustification(
     const touched = commit.files
       // Adding a locked artifact is not regenerating one — a new suite needs a
       // new baseline, and the suite's own correctness is gated separately.
-      // Modifying or deleting an existing one is the act that needs a reason.
-      .filter(file => file.status.toUpperCase() !== 'A')
-      .filter(file => touchesGuardedPath(file.path))
-      .map(file => file.path);
+      // Modifying, deleting or *moving* an existing one needs a reason: two
+      // `git mv`s would otherwise retire a suite more quietly than one `git rm`.
+      .filter(file => {
+        const status = file.status.toUpperCase();
+        if (status.startsWith('R')) {
+          // A rename's source leaving a guarded path is the act to catch.
+          return file.from !== undefined && touchesGuardedPath(file.from);
+        }
+        return status !== 'A' && touchesGuardedPath(file.path);
+      })
+      .map(file => (file.status.toUpperCase().startsWith('R') ? file.from! : file.path));
     if (touched.length === 0) {
       continue;
     }
