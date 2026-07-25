@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cortex · Session Trace · 2026-07-24</title>
+<style>
+  :root{
+    --bg:#07090d; --bg2:#0c1016; --ink:#e6ecf5; --dim:#8a97ab; --faint:#4d5768;
+    --line:#1a2130;
+    --hot:#ff5d3b; --warm:#ffa63d; --cool:#4fd1c5; --cold:#5b8def; --arch:#3a4358;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--ink); font-family:var(--sans);
+    line-height:1.55; -webkit-font-smoothing:antialiased;
+    background-image:
+      radial-gradient(900px 500px at 12% -8%, rgba(255,93,59,.10), transparent 62%),
+      radial-gradient(800px 460px at 92% 4%, rgba(91,141,239,.12), transparent 60%),
+      radial-gradient(700px 700px at 50% 118%, rgba(79,209,197,.07), transparent 64%);
+    background-attachment:fixed;
+  }
+  .wrap{max-width:1120px;margin:0 auto;padding:0 22px 120px}
+  section{padding:64px 0;border-top:1px solid var(--line)}
+  section:first-of-type{border-top:0}
+
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.24em;text-transform:uppercase;color:var(--faint)}
+  h1{font-size:clamp(38px,7vw,78px);line-height:.96;margin:.28em 0 .1em;letter-spacing:-.035em;font-weight:800}
+  h1 .thin{font-weight:200;color:var(--dim)}
+  h2{font-size:clamp(22px,3.2vw,34px);letter-spacing:-.02em;margin:0 0 .35em;font-weight:700}
+  h3{font-size:15px;margin:0 0 6px;letter-spacing:-.01em}
+  p{color:var(--dim);max-width:74ch;margin:0 0 14px}
+  .lede{font-size:19px;color:#b8c4d6;max-width:70ch}
+  strong{color:var(--ink);font-weight:600}
+  code{font-family:var(--mono);font-size:.87em;background:#141a24;border:1px solid var(--line);
+       padding:1px 6px;border-radius:5px;color:#c6d3e6}
+
+  /* ── hero ─────────────────────────────── */
+  header{padding:88px 0 56px}
+  .stats{display:flex;flex-wrap:wrap;gap:38px;margin-top:38px;
+         font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+  .stats b{display:block;font-size:34px;letter-spacing:-.03em;color:var(--ink);font-family:var(--sans);font-weight:800;line-height:1}
+
+  /* ── contradiction ────────────────────── */
+  .triz{display:grid;grid-template-columns:1fr auto 1fr;gap:18px;align-items:center;margin-top:26px}
+  .triz .pole{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
+  .triz .pole:first-child{border-left:3px solid var(--hot)}
+  .triz .pole:last-child{border-left:3px solid var(--cold)}
+  .triz .vs{font-family:var(--mono);font-size:11px;letter-spacing:.2em;color:var(--faint);
+            writing-mode:vertical-rl;text-orientation:mixed}
+  .resolve{margin-top:20px;background:linear-gradient(90deg,rgba(79,209,197,.11),transparent);
+           border:1px solid rgba(79,209,197,.28);border-left:3px solid var(--cool);
+           border-radius:12px;padding:18px 22px}
+  .resolve p{color:#cfe5e2;margin:0}
+
+  /* ── technique trace ──────────────────── */
+  .trace{display:flex;gap:10px;overflow-x:auto;padding:22px 2px 10px;scrollbar-width:thin}
+  .lens{flex:0 0 168px;background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .lens .n{font-family:var(--mono);font-size:10px;color:var(--faint);letter-spacing:.16em}
+  .lens .t{font-size:13px;font-weight:650;margin:6px 0 5px;letter-spacing:-.01em}
+  .lens .y{font-size:11.5px;color:var(--dim);line-height:1.4}
+  .lens[data-heat="hot"]{border-top:2px solid var(--hot)}
+  .lens[data-heat="warm"]{border-top:2px solid var(--warm)}
+  .lens[data-heat="cool"]{border-top:2px solid var(--cool)}
+
+  /* ── clusters ─────────────────────────── */
+  .regions{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin-top:26px}
+  .region{background:var(--bg2);border:1px solid var(--line);border-radius:16px;padding:22px;position:relative;overflow:hidden}
+  .region::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--c,var(--faint))}
+  .region .tag{font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--c)}
+  .region h3{font-size:19px;margin:8px 0 10px;letter-spacing:-.02em}
+  .region .thru{font-size:13.5px;color:#a9b6c9;border-bottom:1px dashed var(--line);padding-bottom:13px;margin-bottom:13px}
+  .region ul{margin:0;padding:0;list-style:none}
+  .region li{font-size:13.5px;color:var(--dim);padding:6px 0 6px 17px;position:relative;line-height:1.45}
+  .region li::before{content:"";position:absolute;left:0;top:13px;width:6px;height:6px;border-radius:50%;background:var(--c);opacity:.55}
+  .region li b{color:var(--ink);font-weight:600}
+
+  /* ── matrix ───────────────────────────── */
+  .matrix{position:relative;height:460px;margin-top:30px;border:1px solid var(--line);border-radius:16px;
+          background:var(--bg2);
+          background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+          background-size:12.5% 25%}
+  .dot{position:absolute;transform:translate(-50%,-50%);background:#111721;border:1px solid var(--line);
+       border-radius:20px;padding:5px 11px;font-size:11.5px;white-space:nowrap;color:var(--ink);
+       box-shadow:0 6px 18px rgba(0,0,0,.5)}
+  .dot.t1{border-color:rgba(255,93,59,.55);background:rgba(255,93,59,.13)}
+  .dot.t2{border-color:rgba(255,166,61,.5);background:rgba(255,166,61,.11)}
+  .dot.t3{border-color:rgba(91,141,239,.5);background:rgba(91,141,239,.11)}
+  .dot.t4{border-color:var(--line);color:var(--faint)}
+  .axis{position:absolute;font-family:var(--mono);font-size:10px;letter-spacing:.18em;
+        text-transform:uppercase;color:var(--faint)}
+  .axis.x{bottom:-24px;left:50%;transform:translateX(-50%)}
+  .axis.yl{left:-14px;top:50%;transform:translateY(-50%) rotate(-90deg);transform-origin:center}
+  .legend{display:flex;gap:20px;flex-wrap:wrap;margin-top:44px;font-size:12px;color:var(--dim)}
+  .legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px}
+
+  /* ── climax ───────────────────────────── */
+  .climax{background:linear-gradient(160deg,#10131b,#0a0d13);border:1px solid #232c3d;
+          border-radius:22px;padding:clamp(28px,5vw,56px);margin-top:8px;position:relative;overflow:hidden}
+  .climax::after{content:"";position:absolute;right:-120px;top:-120px;width:400px;height:400px;
+                 background:radial-gradient(circle,rgba(255,93,59,.16),transparent 66%)}
+  .from-to{display:grid;grid-template-columns:1fr auto 1fr;gap:20px;align-items:center;margin:26px 0 10px;position:relative}
+  .from-to div{padding:18px 20px;border-radius:12px}
+  .from{background:#0e1219;border:1px solid var(--line);color:var(--faint)}
+  .to{background:rgba(255,93,59,.09);border:1px solid rgba(255,93,59,.4)}
+  .from-to .arw{font-size:26px;color:var(--hot)}
+  .from-to .lbl{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;display:block;margin-bottom:7px}
+  .to .lbl{color:var(--hot)}
+  .quote{font-size:clamp(19px,2.6vw,27px);line-height:1.38;letter-spacing:-.022em;color:#fff;
+         font-weight:600;max-width:26ch;position:relative}
+
+  /* ── connections ──────────────────────── */
+  .links{display:grid;gap:12px;margin-top:24px}
+  .link{background:var(--bg2);border:1px solid var(--line);border-left:3px solid var(--warm);
+        border-radius:12px;padding:16px 20px}
+  .link .h{font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--warm);margin-bottom:7px}
+  .link p{margin:0;font-size:14px;color:#a9b6c9}
+
+  /* ── build order ──────────────────────── */
+  table{width:100%;border-collapse:collapse;margin-top:22px;font-size:13.5px}
+  th{text-align:left;font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+     color:var(--faint);padding:0 14px 12px 0;font-weight:400;border-bottom:1px solid var(--line)}
+  td{padding:14px 14px 14px 0;border-bottom:1px solid var(--line);color:var(--dim);vertical-align:top}
+  td:first-child{color:var(--ink);font-weight:600;width:31%}
+  td .why{display:block;color:var(--faint);font-size:12.5px;margin-top:3px}
+  .pill{font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:20px;white-space:nowrap;letter-spacing:.06em}
+  .p1{background:rgba(255,93,59,.14);color:#ff8f75;border:1px solid rgba(255,93,59,.35)}
+  .p2{background:rgba(255,166,61,.13);color:#ffc27a;border:1px solid rgba(255,166,61,.32)}
+  .p3{background:rgba(91,141,239,.13);color:#8fb2f5;border:1px solid rgba(91,141,239,.32)}
+
+  footer{padding:52px 0 0;border-top:1px solid var(--line);color:var(--faint);font-size:12px;font-family:var(--mono)}
+  @media(max-width:720px){
+    .triz,.from-to{grid-template-columns:1fr}
+    .triz .vs,.from-to .arw{writing-mode:horizontal-tb;text-align:center}
+    .matrix{height:620px}
+    .dot{font-size:10.5px;padding:4px 8px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">BMad · Brainstorming · Ideate-for-me · 2026-07-24</div>
+  <h1>Cortex<span class="thin"> doesn't have a memory problem.</span><br>It has an <span style="color:var(--hot)">economics</span> problem.</h1>
+  <p class="lede">Ninety-four ideas across eleven lenses, run against the actual codebase — 10,552 lines, 4 schema versions, 5 locked eval suites. What came back wasn't "add more memory." It was that the most valuable thing Cortex can do is <strong>stop work from happening twice</strong> — and then prove it in tokens.</p>
+  <div class="stats">
+    <span><b>94</b>ideas generated</span>
+    <span><b>11</b>lenses applied</span>
+    <span><b>7</b>clusters</span>
+    <span><b>2</b>features already half-built</span>
+  </div>
+</header>
+
+<section>
+  <div class="eyebrow">Lens 03 · TRIZ Contradiction</div>
+  <h2>The tension the whole product sits on</h2>
+  <p>Every agent-memory tool hits this wall. Cortex hits it harder than most because it's honest about budgets.</p>
+  <div class="triz">
+    <div class="pole"><h3 style="color:var(--hot)">Memory only helps if it's in context</h3><p style="margin:0;font-size:13.5px">Unrecalled memory is worth zero. The instinct is always to inject more, earlier, more often.</p></div>
+    <div class="vs">VERSUS</div>
+    <div class="pole"><h3 style="color:var(--cold)">Anything in context costs the work</h3><p style="margin:0;font-size:13.5px">Every token of memory is a token the actual task doesn't get. Better recall makes the working context worse.</p></div>
+  </div>
+  <div class="resolve">
+    <p><strong>TRIZ says: don't trade off — win both.</strong> You win both when a recall <em>replaces</em> an action instead of adding to it. "Here are three notes about auth" is a cost. "That file is unchanged since you read it at 14:02" is a <strong>refund</strong> — it deletes a 4,000-token re-read for 20 tokens. The second kind of memory is net-negative on context. Cortex currently ships almost none of it.</p>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">The run</div>
+  <h2>Eleven lenses, in firing order</h2>
+  <div class="trace">
+    <div class="lens" data-heat="cool"><div class="n">01</div><div class="t">Build on What Works</div><div class="y">Trust labeling is the moat. Eval suites are a benchmark waiting to happen.</div></div>
+    <div class="lens" data-heat="hot"><div class="n">02</div><div class="t">Assumption Reversal</div><div class="y">Memory ≠ notes. Memory = content. The artifact cache falls straight out.</div></div>
+    <div class="lens" data-heat="hot"><div class="n">03</div><div class="t">TRIZ Contradiction</div><div class="y">Recall must refund tokens, not spend them. The organizing idea.</div></div>
+    <div class="lens" data-heat="warm"><div class="n">04</div><div class="t">Nature's Solutions</div><div class="y">Consolidation, interference, prospective memory. The brain metaphor has unspent capital.</div></div>
+    <div class="lens" data-heat="hot"><div class="n">05</div><div class="t">Ecosystem Thinking</div><div class="y">Subagents are the hole. 200k tokens of work evaporate every fan-out.</div></div>
+    <div class="lens" data-heat="warm"><div class="n">06</div><div class="t">Kill the Crown Jewel</div><div class="y">Delete ranking → addressed memory + a git-tracked decisions.md survive.</div></div>
+    <div class="lens" data-heat="cool"><div class="n">07</div><div class="t">Crank the Dial</div><div class="y">Provenance to 11. Latency to 11. Proactivity to 11.</div></div>
+    <div class="lens" data-heat="cool"><div class="n">08</div><div class="t">Time Horizon Ladder</div><div class="y">At 10M context, capacity stops mattering and attention starts. Bet on selection.</div></div>
+    <div class="lens" data-heat="warm"><div class="n">09</div><div class="t">Emerging Tech Collision</div><div class="y">Local ONNX embeddings. Prompt-cache-stable injection.</div></div>
+    <div class="lens" data-heat="hot"><div class="n">10</div><div class="t">Failure Analysis</div><div class="y">Adoption, Windows fragility, invisible DB, no CRUD. The unglamorous truth.</div></div>
+    <div class="lens" data-heat="warm"><div class="n">11</div><div class="t">Provocation</div><div class="y">Decisions compiled into lint rules. Rejected alternatives as armor.</div></div>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Convergence · Affinity clustering</div>
+  <h2>Seven regions</h2>
+  <p>94 candidates collapse into seven. Colour tracks Cortex's own decay model — <span style="color:var(--hot)">hot</span> is where the leverage is.</p>
+  <div class="regions">
+
+    <div class="region" style="--c:var(--hot)">
+      <div class="tag">Region 01 · hot</div>
+      <h3>The Context Economy</h3>
+      <div class="thru">Cortex should be net-negative on tokens — and be able to prove it.</div>
+      <ul>
+        <li><b>Read ledger.</b> The session brief lists files already read and whether they've changed. Kills re-reads with zero interception.</li>
+        <li><b>Artifact cache.</b> Content-addressed digests of files read; on re-read, answer "unchanged since 14:02" instead of resending 4k tokens.</li>
+        <li><b>Negative cache.</b> Remember what <em>wasn't</em> there: "you grepped <code>foo</code> across src/ at HEAD abc — 0 hits." Failed searches are the most wasteful re-work.</li>
+        <li><b>Tool-output cache</b> keyed on (command, HEAD, dirty set): "last <code>npm test</code> at abc was green and nothing you touched is in its path."</li>
+        <li><b>File cards.</b> A 200-token distillation per hot file, regenerated on hash change — a replacement for the file, not a pointer to it.</li>
+        <li><b>Token P&amp;L.</b> <code>token_ledger</code> already exists. Turn it into injected-vs-saved and surface it in <code>cortex stats</code>.</li>
+      </ul>
+    </div>
+
+    <div class="region" style="--c:var(--warm)">
+      <div class="tag">Region 02 · warm</div>
+      <h3>Current-Truth Depth</h3>
+      <div class="thru">Memory that knows when it's wrong is already the moat. Go deeper into it.</div>
+      <ul>
+        <li><b>Symbol-level validation.</b> Wire LSP/Serena as the validator backend: a note about <code>buildFullState</code> goes stale when the function dies, not just the file.</li>
+        <li><b>Conflict detection.</b> <code>notes.conflict</code> exists and is <em>unused</em>. "You decided X in June; you're now doing not-X."</li>
+        <li><b>Rejected alternatives as armor.</b> <code>notes.alternatives</code> is barely surfaced. Showing "already rejected: X, Y" stops agents relitigating settled decisions.</li>
+        <li><b>Active revalidation</b> on HEAD change, so staleness is known <em>before</em> retrieval, not computed during it.</li>
+        <li><b>Auto-supersede.</b> Retroactive interference: a new decision on subject S demotes the old ones without a manual <code>cortex_resolve</code>.</li>
+      </ul>
+    </div>
+
+    <div class="region" style="--c:var(--hot)">
+      <div class="tag">Region 03 · hot</div>
+      <h3>The Multi-Agent Hole</h3>
+      <div class="thru">Today a 200k-token subagent run evaporates into one summary paragraph.</div>
+      <ul>
+        <li><b>Auto-brief for subagents.</b> <code>cortex_brief</code> currently requires the <em>parent</em> to paste. Give subagents an inherited read-only scoped session instead.</li>
+        <li><b>Write-back.</b> Capture subagent conclusions as episodes automatically — the findings are the expensive part.</li>
+        <li><b>Claim bus.</b> Parallel agents share an append-only scratch scope: "agent 3 already checked src/db — clean." Fan-outs stop duplicating each other.</li>
+      </ul>
+    </div>
+
+    <div class="region" style="--c:var(--cool)">
+      <div class="tag">Region 04 · emerging</div>
+      <h3>Time-Shifted Memory</h3>
+      <div class="thru">Memory that fires at the right moment instead of waiting to be searched.</div>
+      <ul>
+        <li><b>Prospective memory is entirely missing.</b> <code>cortex_trigger(condition, message)</code> — "when anyone next touches <code>schema.ts</code>, remind them migrations need a backfill."</li>
+        <li><b>Invariants → lint.</b> A note asserting "we never import X in Y" compiles into a check. Decisions become enforceable.</li>
+        <li><b>PR contradiction checks.</b> Post to CI: "this PR contradicts decision X."</li>
+        <li><b>Blame anchoring</b> so "why does this line exist" resolves to the decision that produced it, and the anchor follows the code.</li>
+      </ul>
+    </div>
+
+    <div class="region" style="--c:var(--warm)">
+      <div class="tag">Region 05 · warm</div>
+      <h3>Legibility &amp; Operability</h3>
+      <div class="thru">You can't trust or debug what you can't see — and right now you can't see any of it.</div>
+      <ul>
+        <li><b>Basic CRUD is missing.</b> No <code>cortex ls</code>, no <code>show</code>, no edit. A wrong note is permanent.</li>
+        <li><b><code>cortex doctor</code>.</b> Hooks are bash + jq. On Windows that's Git Bash, and when it breaks it breaks silently.</li>
+        <li><b>Storage hygiene.</b> A 3.8 MB DB plus a 1.5 MB uncheckpointed WAL in the project root, colliding with worktrees. Move to <code>~/.cortex/&lt;hash&gt;/</code>; add a checkpoint policy.</li>
+        <li><b><code>docs/decisions.md</code> projection.</b> Memory rendered as a git-tracked ADR file — diffable, reviewable, readable by any agent with no MCP at all.</li>
+        <li><b>Package split:</b> <code>cortex-core</code> (zero-config, no hooks) + <code>cortex-ambient</code>. The install cliff is the adoption cliff.</li>
+      </ul>
+    </div>
+
+    <div class="region" style="--c:var(--cold)">
+      <div class="tag">Region 06 · cold</div>
+      <h3>Reach &amp; Substrate</h3>
+      <div class="thru">One memory substrate across agents and repos.</div>
+      <ul>
+        <li><b>User-global scope.</b> "Node's /tmp isn't Git Bash's /tmp on Windows" isn't project knowledge — and today it lives in a different memory system entirely.</li>
+        <li><b>Absorb the neighbours.</b> CLAUDE.md, AGENTS.md, and the Claude auto-memory MEMORY.md are three parallel memory systems with no shared substrate. That fragmentation <em>is</em> the pain.</li>
+        <li><b>Team memory</b> via signed JSONL export/import, so decisions travel with the repo.</li>
+        <li><b>Multi-runtime.</b> Codex, Cursor, Windsurf, Amp. Positioning: <em>your</em> memory, not your vendor's.</li>
+      </ul>
+    </div>
+
+    <div class="region" style="--c:var(--arch)">
+      <div class="tag">Region 07 · deep</div>
+      <h3>Ranking Depth</h3>
+      <div class="thru">Make ranking good enough that users never have to be sparing about what they save.</div>
+      <ul>
+        <li><b>Ship the semantic layer.</b> Plumbing exists and is gated <code>off</code>. A local ONNX model means no network, no key, no privacy cost.</li>
+        <li><b>Relevance feedback.</b> Log whether a recalled item was actually referenced in the next edit — a real training signal.</li>
+        <li><b>Chunking.</b> Notes always retrieved together should fuse, the way co-activated traces bind.</li>
+        <li><b>Two-stage retrieval:</b> handles and one-line gists first, bodies only on request.</li>
+      </ul>
+    </div>
+
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Convergence · Impact vs Effort</div>
+  <h2>Where to actually spend</h2>
+  <div class="matrix">
+    <span class="axis x">Effort →</span><span class="axis yl">Impact →</span>
+    <span class="dot t1" style="left:11%;top:11%">Surface rejected alternatives</span>
+    <span class="dot t1" style="left:24%;top:23%">Read ledger in brief</span>
+    <span class="dot t1" style="left:19%;top:36%">Token P&amp;L + cortex stats</span>
+    <span class="dot t1" style="left:12%;top:50%">cortex ls / show / doctor</span>
+    <span class="dot t2" style="left:44%;top:15%">Conflict detection</span>
+    <span class="dot t2" style="left:50%;top:28%">Negative + tool-output cache</span>
+    <span class="dot t2" style="left:41%;top:41%">Subagent auto-brief + write-back</span>
+    <span class="dot t2" style="left:54%;top:53%">Two-stage retrieval</span>
+    <span class="dot t2" style="left:37%;top:64%">Storage relocation + WAL policy</span>
+    <span class="dot t3" style="left:76%;top:19%">Full artifact cache</span>
+    <span class="dot t3" style="left:69%;top:33%">cortex_trigger</span>
+    <span class="dot t3" style="left:80%;top:47%">User-global scope</span>
+    <span class="dot t3" style="left:66%;top:60%">Symbol-level validation</span>
+    <span class="dot t4" style="left:86%;top:76%">Resident daemon</span>
+    <span class="dot t4" style="left:73%;top:86%">ANN / sharding</span>
+    <span class="dot t4" style="left:90%;top:90%">Hosted sync · IDE gutter</span>
+  </div>
+  <div class="legend">
+    <span><i style="background:var(--hot)"></i>Do first — high impact, low effort</span>
+    <span><i style="background:var(--warm)"></i>Next — the real build</span>
+    <span><i style="background:var(--cold)"></i>Big bets</span>
+    <span><i style="background:var(--arch)"></i>Parked until the P&amp;L proves value</span>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Synthesis</div>
+  <h2>The connections you'd miss</h2>
+  <div class="links">
+    <div class="link"><div class="h">Three hats, one idea</div><p>The artifact cache (lens 02), the negative cache (lens 02), and "memory that replaces work" (lens 03) look like three features. They're one move: <strong>make a recall cheaper than the action it prevents.</strong> That single sentence is the product.</p></div>
+    <div class="link"><div class="h">Already built, never switched on</div><p>The two highest value-to-work items in the entire codebase are dormant columns. <code>notes.conflict</code> — contradiction detection. <code>notes.alternatives</code> — already-rejected surfacing. The schema anticipated both. Nothing reads them.</p></div>
+    <div class="link"><div class="h">The hard part of the user's idea already shipped</div><p><code>ReferenceValidator</code>, <code>current_app_graphs</code>, and <code>file_renames</code> were built to answer "is this memory still true?" The <em>same</em> machinery answers "is this file still as I read it?" — which is the artifact cache. It just points at notes instead of at content.</p></div>
+    <div class="link"><div class="h">The 10-year view and the adoption bug are the same bug</div><p>Agents skip the tools because calling them costs more than not calling them. At 10M context, capacity stops being scarce and attention becomes scarce. Both say: Cortex wins on <strong>selection</strong>, not storage — and selection only gets called when it's cheaper than skipping it.</p></div>
+    <div class="link"><div class="h">Killing the crown jewel produced a keeper</div><p>Delete the ranking engine and what survives is <code>docs/decisions.md</code> — memory as a git-tracked, human-reviewable, diffable document. Not a replacement for the DB: a <em>projection</em> of it. It makes memory auditable, and it works in any agent with no MCP at all.</p></div>
+  </div>
+</section>
+
+<section>
+  <div class="climax">
+    <div class="eyebrow">The reframe</div>
+    <div class="from-to">
+      <div class="from"><span class="lbl">Today</span><span style="font-size:17px">"Cortex remembers things across sessions."</span></div>
+      <div class="arw">→</div>
+      <div class="to"><span class="lbl">The move</span><span style="font-size:17px;color:#fff">"Cortex makes long agent sessions cheap — and shows you the receipt."</span></div>
+    </div>
+    <p style="margin-top:26px;max-width:72ch">Memory-as-persistence is a crowded, unmeasurable claim: every tool says it, nobody can prove it, and the agent has no reason to call your tool over just re-reading the file. Memory-as-<em>economics</em> is measurable, demoable, and self-justifying — the more the agent uses it, the cheaper the session gets, and the number is right there.</p>
+    <div class="quote" style="margin-top:30px">Every recall should be able to answer: what did calling this <em>save</em> me?</div>
+    <p style="margin-top:26px;max-width:72ch;color:var(--faint);font-size:14px">This is also the honest fix for the adoption problem. One consult hint per session is a nudge. A tool that is <em>cheaper than the alternative</em> doesn't need nudging.</p>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Build order</div>
+  <h2>If only three things get built</h2>
+  <table>
+    <thead><tr><th>Move</th><th>Why it's first</th><th></th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Turn on the dormant columns<span class="why">conflict detection + rejected-alternatives in recall</span></td>
+        <td>Days of work against schema that already exists. Contradiction detection is a feature no competing tool has, and "already rejected: X, Y" is the single best defence against agents relitigating settled decisions.</td>
+        <td><span class="pill p1">Week 1</span></td>
+      </tr>
+      <tr>
+        <td>The read ledger + token P&amp;L<span class="why">the cheapest slice of the context economy</span></td>
+        <td>The ledger needs no interception — the spool already records every Read. Pair it with injected-vs-saved accounting in <code>cortex stats</code> and the product acquires a number it can be judged on. That number is also the demo.</td>
+        <td><span class="pill p2">Week 2–3</span></td>
+      </tr>
+      <tr>
+        <td>Subagent brief + write-back<span class="why">close the multi-agent hole</span></td>
+        <td>The largest single volume of wasted tokens in modern agent work. Every fan-out re-derives context the parent already has, then throws its findings away. Nothing else on the list moves as much token mass.</td>
+        <td><span class="pill p3">Week 3–5</span></td>
+      </tr>
+    </tbody>
+  </table>
+  <p style="margin-top:26px;font-size:14px">Everything else — the full artifact cache, <code>cortex_trigger</code>, symbol-level validation, global scope — gets easier to justify and easier to design once the P&amp;L exists to score it against.</p>
+</section>
+
+<footer>
+  BMad Brainstorming · Ideate-for-me · 94 ideas · 11 lenses · 7 clusters<br>
+  Source of record: <code>.memlog.md</code> · 112 entries · status: complete<br>
+  Grounded against Cortex @ ea56586 — 10,552 LOC, schema v4, 23 test files, 5 locked eval suites.
+</footer>
+
+</div>
+</body>
+</html>
