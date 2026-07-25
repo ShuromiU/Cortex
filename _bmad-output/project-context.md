@@ -93,7 +93,7 @@ node dist/transports/cli.js evaluate --suite eval/suites/<name>.json --compare e
   npm run build && npm run lint && npx vitest run
   ```
   plus the eval gate above when retrieval is touched.
-- **Documentation is part of the change, not follow-up.** When observable behavior changes, update `README.md`, `CLAUDE.md`, and `AGENTS.md` in the same commit. `AGENTS.md` holds the repository invariants; `CLAUDE.md` holds the expected-behavior contract.
+- **Documentation is part of the change, not follow-up.** When observable behavior changes, update `README.md` and `CLAUDE.md` in the same commit. `CLAUDE.md` holds the expected-behavior contract and the repository invariants; `README.md` is the user-facing surface.
 
 ### Critical Don't-Miss Rules
 
@@ -124,6 +124,6 @@ Similarly, `token_ledger` is written but never reported on.
 
 **For AI agents:** read this before implementing. Follow every rule exactly. When two rules could apply, take the more restrictive one. The four-command verification block is not optional and not deferrable to the user.
 
-**For humans:** keep it lean — this file is loaded as persistent context by every BMad skill and pays a token cost on every run. Delete rules that become obvious. `AGENTS.md` holds invariants, `CLAUDE.md` holds the behavior contract, this file holds implementation rules; don't duplicate across them.
+**For humans:** keep it lean — this file is loaded as persistent context by every BMad skill and pays a token cost on every run. Delete rules that become obvious. `CLAUDE.md` holds invariants and the behavior contract, this file holds implementation rules; don't duplicate across them.
 
 Last Updated: 2026-07-24
