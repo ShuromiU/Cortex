@@ -29,6 +29,7 @@ export { flushSpool, appendSpoolEntry, deriveSpoolPath, spoolSizeBytes, type Spo
 export { runGc, shouldAutoGc, type GcOptions, type GcReport } from './db/gc.js';
 export { estimateTokens, buildTextMetric, evaluateStore, evaluateDatabase, type TextMetric, type TopicEvaluation, type EvaluationResult, type EvaluationOptions, type QualityComparison, type QualityEvaluation, type QualityFixture, type QualityFixtureEvaluation, type QualityScoreBreakdown } from './eval/harness.js';
 export { seedStoreFromScenario, createSeededStore, type EvaluationScenario, type ScenarioMemoryItem, type ScenarioAppGraph, type SeededStore } from './eval/seed.js';
+export { runEvalGate, regenerateBaseline, checkKindCoverage, checkBaselineJustification, BASELINE_TRAILER, type EvalGateOptions, type GateResult, type GateSuiteResult, type GateKindCoverage, type RegenerationReport, type BaselineJustificationVerdict } from './eval/gate.js';
 // Transports
 export { createMcpServer, startServer, handleToolCall, TOOL_DEFINITIONS, deriveEngagementPath } from './transports/mcp.js';
 export { createProgram } from './transports/cli.js';

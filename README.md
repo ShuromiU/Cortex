@@ -14,6 +14,7 @@ Before:
 
 Now:
 - branch/worktree-aware sessions and snapshots, identified by `(scope_key, agent_id)` so subagent work lands in its own session
+- retrieval quality gated in CI against locked baselines, so ranking cannot regress silently
 - live `memory_items` retrieval layer with FTS search
 - command failures and test cycles captured as durable episodes
 - hot/warm/cold decay with reinforcement from actual use
@@ -139,6 +140,26 @@ The spool (`.cortex.spool.jsonl`) is flushed at turn end, at a 256 KiB threshold
 A session is identified by `(scope_key, agent_id)`. Each spool line carries the `agent_id` and `agent_type` the host reported, so the flush files a subagent's reads, edits and commands under a child session of its own — recording `parent_session_id` and inheriting the parent's scope — instead of merging them into the parent's timeline. A line without an `agent_id`, including every line written by a hook installed before this existed, resolves to the primary session. A subagent's tool call never rotates or ends the session that dispatched it, and ending a session ends its children so they stay reachable by consolidation and GC.
 
 Branch snapshots, scoped session listings and the recent-session tail read primary sessions only; child timelines are reached explicitly. If you upgraded the package but subagent activity still lands on the parent, your installed `cortex-capture.sh` predates the change — re-run `cortex install-hooks --claude`.
+
+## Retrieval Quality Gate
+
+Ranking is benchmarked by hermetic seeded suites in `eval/suites/`, each locked against a reference result in `eval/baselines/`. One command runs all of them:
+
+```bash
+node dist/transports/cli.js eval-gate
+```
+
+It fails, names the suite and the metric, and exits non-zero on a negative `top1_hit` delta, a negative `recall_at_3` delta, or a positive `output_tokens` delta — accuracy must not fall and output must not get more expensive. It also enforces AD-5: a `memory_items` kind that no fixture exercises is invisible to the suites rather than penalised by them, so a newly registered kind fails the gate until a fixture ships with it. `eval/kind-coverage.json` grandfathers the kinds that predate the gate.
+
+CI runs the gate on every push, after build, lint and tests.
+
+Baselines are locked artifacts. Regenerating one is deliberate:
+
+```bash
+node dist/transports/cli.js eval-gate --regenerate-baseline budget
+```
+
+The command prints the regressions it is about to bake in, and CI rejects the change unless a commit body in the range carries a `Baseline-Regenerated: <reason>` line. Regenerating is never the way to turn a red gate green.
 
 ## Codex Setup
 

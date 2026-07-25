@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "AD-5: a memory_items kind that no locked fixture seeds is not penalised by the",
+    "eval suites — it is invisible to them, and they report green. The gate therefore",
+    "checks the KIND_WEIGHTS registry, not the suites, for what must be covered.",
+    "",
+    "The kinds below predate the gate and are exempt so it can be green on arrival",
+    "without pretending coverage is complete. Adding a kind here is NOT how to pass",
+    "the gate — a locked fixture that exercises the kind is. Removing an entry as",
+    "coverage arrives is the point.",
+    "",
+    "Already covered by the suites: note:decision, note:insight, note:blocker,",
+    "episode:command_failure, episode:test_cycle, command_run."
+  ],
+  "grandfathered": [
+    "note:intent",
+    "note:focus",
+    "episode:session_summary",
+    "session_state",
+    "branch_snapshot",
+    "project_snapshot"
+  ]
+}

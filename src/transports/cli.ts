@@ -28,6 +28,7 @@ import {
   type EvaluationResult,
   type QualityFixture,
 } from '../eval/harness.js';
+import { BASELINE_TRAILER, regenerateBaseline, runEvalGate } from '../eval/gate.js';
 import type { EvaluationScenario } from '../eval/seed.js';
 import { buildHeader, formatTokens } from '../query/state.js';
 import { buildSessionBrief } from '../query/session-brief.js';
@@ -418,6 +419,52 @@ export function createProgram(): Command {
       };
       const result = evaluateDatabase(dbPath, rootPath, parseTopics(opts.topics), options);
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    });
+
+  program
+    .command('eval-gate')
+    .description('Run every locked retrieval-quality suite against its baseline (FR-44, AD-5)')
+    .option('--suites <dir>', 'Directory of locked suites', 'eval/suites')
+    .option('--baselines <dir>', 'Directory of locked baselines', 'eval/baselines')
+    .option('--coverage <path>', 'Kind-coverage manifest', 'eval/kind-coverage.json')
+    .option(
+      '--regenerate-baseline <suite>',
+      'Rewrite one locked baseline. Deliberate act — justify it in the commit body.',
+    )
+    .action((opts: {
+      suites: string;
+      baselines: string;
+      coverage: string;
+      regenerateBaseline?: string;
+    }) => {
+      const options = {
+        suitesDir: opts.suites,
+        baselinesDir: opts.baselines,
+        coveragePath: opts.coverage,
+        rootPath: process.cwd(),
+      };
+
+      if (opts.regenerateBaseline) {
+        const report = regenerateBaseline(opts.regenerateBaseline, options);
+        process.stdout.write(`rewrote ${report.baselinePath}\n`);
+        if (report.accepted.length > 0) {
+          process.stdout.write(
+            `accepting these regressions into the baseline:\n${report.accepted
+              .map(line => `  ${line}`)
+              .join('\n')}\n`,
+          );
+        }
+        process.stdout.write(
+          `\nState the reason in the commit body:\n  ${BASELINE_TRAILER} <why this quality change is intended>\n`,
+        );
+        return;
+      }
+
+      const result = runEvalGate(options);
+      process.stdout.write(`${result.lines.join('\n')}\n`);
+      if (!result.ok) {
+        process.exitCode = 1;
+      }
     });
 
   program

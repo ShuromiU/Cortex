@@ -109,7 +109,9 @@ Anti-patterns (still apply once engaged):
 - Run `npm run build`
 - Run `npm run lint`
 - Run `npx vitest run`
-- For retrieval changes, run the locked suites: `node dist/transports/cli.js evaluate --suite eval/suites/<name>.json --compare eval/baselines/<name>.json` — fail on negative `top1_hit`/`recall_at_3` deltas or positive `output_tokens` deltas.
+- Run `node dist/transports/cli.js eval-gate` — every locked suite against its baseline in one command, plus the AD-5 check that no registered `memory_items` kind is unexercised. Fails on a negative `top1_hit`/`recall_at_3` delta or a positive `output_tokens` delta, names the suite and metric, and exits non-zero. CI runs it on every push. (`evaluate --suite … --compare …` remains the single-suite human view; it always exits 0 and is not a gate.)
+- Baselines in `eval/baselines/` are locked artifacts. Rewriting one requires `cortex eval-gate --regenerate-baseline <suite>` and a `Baseline-Regenerated: <reason>` line in the commit body; CI rejects an unjustified baseline change. Regenerating is never the way to turn a red gate green.
+- A change introducing a new `memory_items` kind must add a locked fixture exercising it in the same change (AD-5). `eval/kind-coverage.json` grandfathers the kinds that predate the gate; adding to that list is not how to pass it.
 - If the change affects real Claude usage, verify:
   - `~/.claude/settings.json`
   - `~/.claude/hooks/cortex-capture.sh`, `cortex-reflect.sh`, `cortex-end-of-turn.sh` (installed via `cortex install-hooks --claude`)

@@ -31,3 +31,5 @@
 - Run `npm run build`.
 - Run `npm run test`.
 - Run `npm run lint`.
+- Run `node dist/transports/cli.js eval-gate` — every locked suite against its baseline, plus AD-5 kind coverage. Non-zero exit means retrieval quality regressed. CI runs it on every push.
+- Baselines in `eval/baselines/` are locked. Rewrite one only with `cortex eval-gate --regenerate-baseline <suite>`, and state why in the commit body under `Baseline-Regenerated:` — CI rejects an unjustified baseline change.

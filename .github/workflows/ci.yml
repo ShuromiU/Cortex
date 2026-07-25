@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is a first-class target, not a port (N-6). The suite has only
+        # ever run on Windows locally, so Linux coverage here is new information.
+        os: [ubuntu-latest, windows-latest]
+        node: [20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The baseline-justification check reads commit bodies in the range.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - run: npm run lint
+
+      - run: npx vitest run
+
+      # Runs against dist/, so it must follow the build.
+      - name: Retrieval quality gate
+        run: node dist/transports/cli.js eval-gate
+
+      - name: Baseline justification
+        if: runner.os == 'Linux' && matrix.node == 20
+        run: node scripts/check-baseline-justification.mjs "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
