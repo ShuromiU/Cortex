@@ -333,6 +333,21 @@ Both sides are seated together so they read as one disagreement rather than two 
 
 The marker costs three tokens and is trimmed with its line like any other content. Note that seating both sides together does reorder results: a contested counterpart is pulled up past whatever ranked between the two sides, so under a tight budget it can be kept while a higher-ranked uncontested item is dropped. That is the deliberate resolution of showing a whole disagreement versus showing strictly the best matches.
 
+### Rejected alternatives in retrieval
+
+A note written with `alternatives` renders them beneath the decision they lost to, so an agent about to re-propose one can see it was already considered:
+
+```
+Decision [2026-07-25 15:56Z]: [auth strategy] use OIDC with server-side sessions.
+  already rejected: session cookies (no SSO path), JWT-in-localStorage (XSS surface)
+```
+
+This appears in `cortex_recall` and `cortex_brief` — the two surfaces where an agent asks a question before proposing an approach. It deliberately does **not** appear in `cortex_state`, the SessionStart brief, or the reflex whisper. Those channels budget whole sections or truncate to a fixed width, so an extra line there could not be dropped independently of the decision above it, which is the property the whole feature turns on.
+
+**The alternatives line always loses to the decision it belongs to.** Output is assembled in two passes: every decision line that fits is placed first, and only the budget left over buys alternatives. So a recall never sacrifices a decision to show why another one won, and at a tight budget the alternatives are simply the first thing to go. In a two-decision recall the lines cost 47 tokens with room to spare and nothing at all once the budget binds.
+
+Written as `cortex_note(kind='decision', alternatives=['…'])`; the strings are reproduced exactly, so any rationale you put in them travels with the rejection.
+
 ## Reliability Evaluation
 
 `cortex evaluate` still reports table counts and output sizes. With `--suite`, it also runs retrieval-quality fixtures:

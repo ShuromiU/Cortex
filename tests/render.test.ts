@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import type { ParsedMemoryItem } from '../src/db/store.js';
 import {
+  ALREADY_REJECTED_PREFIX,
   CONTESTED_MARKER,
   groupContestedAdjacent,
   groupContestedWithinKind,
   isContested,
   renderMemoryLine,
+  renderedAlternatives,
 } from '../src/query/render.js';
 import { estimateTokens } from '../src/query/retrieval.js';
 
@@ -38,6 +40,18 @@ function makeItem(overrides: Partial<ParsedMemoryItem> = {}): ParsedMemoryItem {
 function contestedItem(overrides: Partial<ParsedMemoryItem> = {}): ParsedMemoryItem {
   const base = makeItem(overrides);
   return { ...base, text: `${base.text}\nSubject: ${base.subject}\nConflict: true` };
+}
+
+/** A note projected exactly as buildNoteMemoryText writes one carrying alternatives. */
+function itemWithAlternatives(
+  alternatives: string,
+  overrides: Partial<ParsedMemoryItem> = {},
+): ParsedMemoryItem {
+  const base = makeItem(overrides);
+  return {
+    ...base,
+    text: `${base.text}\nSubject: ${base.subject}\nAlternatives: ${alternatives}`,
+  };
 }
 
 function idsOf(items: ParsedMemoryItem[]): string[] {
@@ -239,6 +253,97 @@ describe('isContested — false-positive guards', () => {
     const mid = makeItem({ id: 'mid', kind: 'note:insight', subject: 'other' });
     const b = makeItem({ id: 'e2', kind: 'episode:command_failure', subject: 'npm test', text: episodeText });
     expect(idsOf(groupContestedAdjacent([a, mid, b]))).toEqual(['e1', 'mid', 'e2']);
+  });
+});
+
+// ── renderedAlternatives (FR-3, Story 1.3) ─────────────────────────────
+
+describe('renderedAlternatives', () => {
+  it('renders the projected alternatives as an already rejected line', () => {
+    const item = itemWithAlternatives('session cookies, JWT-in-localStorage');
+    expect(renderedAlternatives(item)).toBe(
+      '  already rejected: session cookies, JWT-in-localStorage',
+    );
+  });
+
+  it('preserves whatever the writer put in the array, rationale included', () => {
+    // prd.md:61 renders exactly this shape; the parentheticals are the author's
+    // own strings, not a structure Cortex imposes.
+    const item = itemWithAlternatives(
+      'session cookies (no SSO path), JWT-in-localStorage (XSS surface)',
+    );
+    expect(renderedAlternatives(item)).toBe(
+      '  already rejected: session cookies (no SSO path), JWT-in-localStorage (XSS surface)',
+    );
+  });
+
+  it('is null for a note carrying no alternatives', () => {
+    expect(renderedAlternatives(makeItem())).toBeNull();
+  });
+
+  it('is null when the projected line has an empty payload', () => {
+    // buildNoteMemoryText only writes the line when the array is non-empty, but
+    // a hand-seeded eval item is not bound by that.
+    expect(renderedAlternatives(makeItem({ text: 'decision: x\nAlternatives:   ' }))).toBeNull();
+  });
+
+  it('starts with the exported prefix, so callers can assert on one constant', () => {
+    expect(renderedAlternatives(itemWithAlternatives('a, b'))!.startsWith(
+      ALREADY_REJECTED_PREFIX,
+    )).toBe(true);
+    expect(ALREADY_REJECTED_PREFIX).toContain('already rejected: ');
+  });
+});
+
+describe('renderedAlternatives — false-positive guards', () => {
+  it('does not fire on the word appearing mid-sentence in note content', () => {
+    // Not hypothetical: this is the verbatim seed text of eval/suites/kind-ordering.json.
+    // A substring match renders these alternatives twice and pushes output_tokens
+    // positive on three locked suites at once.
+    const item = makeItem({
+      text: 'Decision: rotate jwt refresh tokens server-side after renewal. Alternatives: client cookie rotation rejected for XSS exposure.',
+    });
+    expect(renderedAlternatives(item)).toBeNull();
+  });
+
+  it('is null for kinds that have no alternatives column', () => {
+    // An episode carries captured stdout/stderr in its text.
+    for (const kind of ['episode:command_failure', 'branch_snapshot', 'command_run']) {
+      expect(
+        renderedAlternatives(makeItem({ kind, text: 'x\nAlternatives: a, b' })),
+      ).toBeNull();
+    }
+  });
+
+  it('takes the projected line, not an earlier decoy inside multi-line content', () => {
+    // Note content is free-form and may contain newlines. buildNoteMemoryText
+    // always writes the real line after the content and Subject lines.
+    const item = makeItem({
+      text: [
+        'decision: keep the plan',
+        'Alternatives: a decoy the author typed into the body',
+        'Subject: spool flush',
+        'Alternatives: the real one, and another',
+      ].join('\n'),
+    });
+    expect(renderedAlternatives(item)).toBe('  already rejected: the real one, and another');
+  });
+
+  it('tolerates surrounding whitespace on the projected line', () => {
+    expect(renderedAlternatives(makeItem({ text: 'decision: x\n  Alternatives: a, b  ' }))).toBe(
+      '  already rejected: a, b',
+    );
+  });
+});
+
+describe('renderMemoryLine — unchanged by alternatives', () => {
+  it('stays a single line and never absorbs the alternatives', () => {
+    // Everything downstream assumes one line — renderHeaderHighlights pipes this
+    // through renderMemorySnippet, which would fold a second line into a `|` join.
+    const line = renderMemoryLine(itemWithAlternatives('a, b'));
+    expect(line.split('\n')).toHaveLength(1);
+    expect(line).not.toContain('already rejected');
+    expect(line).toBe(renderMemoryLine(makeItem()));
   });
 });
 

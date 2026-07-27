@@ -142,6 +142,64 @@ export function groupContestedWithinKind<T extends ParsedMemoryItem>(items: T[])
   return ordered;
 }
 
+// ── Rejected alternatives (FR-3) ────────────────────────────────────────
+
+/**
+ * Prefix for the rejected-alternatives continuation line. The two-space indent
+ * subordinates it to the decision it belongs to.
+ */
+export const ALREADY_REJECTED_PREFIX = '  already rejected: ';
+
+/** How `buildNoteMemoryText` writes the alternatives array into item text. */
+const ALTERNATIVES_LINE_PREFIX = 'alternatives: ';
+
+/**
+ * The `already rejected:` line for an item, or null when it carries none.
+ *
+ * `notes.alternatives` is a real column, but `ParsedMemoryItem` carries no such
+ * field — the value survives projection only as the `Alternatives: a, b` line
+ * `buildNoteMemoryText` writes. Reading it back out of the text is forced rather
+ * than chosen, for the same reason as `isContested`: a real field needs a
+ * migration, and this release spends its single `SCHEMA_VERSION` bump elsewhere.
+ *
+ * Three guards keep the read honest, and all three are load-bearing.
+ *
+ * **Kind.** Only notes have an alternatives column. An episode carries captured
+ * stdout/stderr in its text, so a build log line starting `Alternatives:` would
+ * otherwise render a rejection list nobody wrote.
+ *
+ * **Line-exact, never a substring.** Three locked eval suites seed decision text
+ * whose *content* contains the word mid-sentence — "… after renewal.
+ * Alternatives: client cookie rotation rejected …". A substring match renders
+ * those alternatives a second time and pushes `output_tokens` positive on half
+ * the gate at once.
+ *
+ * **Last match, not first.** Note content is free-form and may contain newlines,
+ * so a content line can itself read `Alternatives: …`. The projected line always
+ * follows the content and `Subject:`, so the last match is right whenever a real
+ * one exists and no worse when none does. A note whose content *ends* with such
+ * a line still false-fires; that is unfixable without the column.
+ */
+export function renderedAlternatives(item: ParsedMemoryItem): string | null {
+  if (!item.kind.startsWith('note:')) {
+    return null;
+  }
+
+  let alternatives = '';
+  for (const line of item.text.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.toLowerCase().startsWith(ALTERNATIVES_LINE_PREFIX)) {
+      alternatives = trimmed.slice(ALTERNATIVES_LINE_PREFIX.length).trim();
+    }
+  }
+
+  if (alternatives.length === 0) {
+    return null;
+  }
+
+  return `${ALREADY_REJECTED_PREFIX}${alternatives}`;
+}
+
 export function renderMemorySnippet(
   text: string,
   maxLines = 3,

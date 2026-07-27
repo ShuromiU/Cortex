@@ -1,0 +1,212 @@
+{
+  "quality": {
+    "fixtures": [
+      {
+        "topic": "auth strategy",
+        "expected_top": "auth-strategy-decision",
+        "top_result_id": "auth-strategy-decision",
+        "top1_hit": true,
+        "recall_at_3": 1,
+        "noise_count": 0,
+        "stale_count": 0,
+        "output": {
+          "chars": 611,
+          "est_tokens": 153,
+          "preview": "Most relevant — Decision [auth strategy] (2d ago, refs OK)\nDecision [2026-07-25 17:37Z]: [auth strategy] use OIDC with server-side sessions in src/auth/oidc.ts.\n  already rejected: session cookies (no SSO path), JWT-in-localStorage (XSS surface)\nDecision [2026-07-24 17:37Z]: [auth session store] keep the auth session s"
+        },
+        "token_budget": {
+          "max_tokens": 160,
+          "actual_tokens": 153,
+          "passed": true
+        },
+        "output_assertions": {
+          "contains_missed": [],
+          "excludes_violated": [],
+          "passed": true
+        },
+        "score_breakdown": [
+          {
+            "id": "auth-strategy-decision",
+            "subject": "auth strategy",
+            "text_preview": "Decision: use OIDC with server-side sessions in src/auth/oidc.ts.\nSubject: auth strategy\nAlternatives: session cookies (no SSO path), JWT-in-localStorage (XSS s",
+            "scores": {
+              "retrieval_score": 49.39890342797796,
+              "lexical_score": 23.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 2,
+              "exact_phrase": true,
+              "fts_rank": -0.9977828748877917
+            }
+          },
+          {
+            "id": "auth-store-decision",
+            "subject": "auth session store",
+            "text_preview": "Decision: keep the auth session store in redis in src/auth/session-store.ts.\nSubject: auth session store\nAlternatives: in-process memory (breaks on every restar",
+            "scores": {
+              "retrieval_score": 34.59999828465544,
+              "lexical_score": 9,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 1,
+              "exact_phrase": false,
+              "fts_rank": -0.0000019748653500897667
+            }
+          },
+          {
+            "id": "auth-refresh-insight",
+            "subject": "auth token refresh",
+            "text_preview": "Insight: auth token refresh happens server-side only, so the browser never holds a refresh token at all.",
+            "scores": {
+              "retrieval_score": 29.29999826696981,
+              "lexical_score": 9,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0.3,
+              "token_hits": 1,
+              "exact_phrase": false,
+              "fts_rank": -0.000001995226730310263
+            }
+          }
+        ],
+        "passed": true
+      },
+      {
+        "topic": "auth session store",
+        "expected_top": "auth-store-decision",
+        "top_result_id": "auth-store-decision",
+        "top1_hit": true,
+        "recall_at_3": 1,
+        "noise_count": 0,
+        "stale_count": 0,
+        "output": {
+          "chars": 336,
+          "est_tokens": 84,
+          "preview": "Most relevant — Decision [auth session store] (3d ago, refs OK)\nDecision [2026-07-24 17:37Z]: [auth session store] keep the auth session store in redis in src/auth/session-store.ts.\nDecision [2026-07-25 17:37Z]: [auth strategy] use OIDC with server-side sessions in src/auth/oidc.ts.\n…1 more match trimmed (raise budget "
+        },
+        "token_budget": {
+          "max_tokens": 90,
+          "actual_tokens": 84,
+          "passed": true
+        },
+        "output_assertions": {
+          "contains_missed": [],
+          "excludes_violated": [],
+          "passed": true
+        },
+        "score_breakdown": [
+          {
+            "id": "auth-store-decision",
+            "subject": "auth session store",
+            "text_preview": "Decision: keep the auth session store in redis in src/auth/session-store.ts.\nSubject: auth session store\nAlternatives: in-process memory (breaks on every restar",
+            "scores": {
+              "retrieval_score": 50.14411977058087,
+              "lexical_score": 25,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0.15,
+              "token_hits": 3,
+              "exact_phrase": true,
+              "fts_rank": -1.0088157959373056
+            }
+          },
+          {
+            "id": "auth-strategy-decision",
+            "subject": "auth strategy",
+            "text_preview": "Decision: use OIDC with server-side sessions in src/auth/oidc.ts.\nSubject: auth strategy\nAlternatives: session cookies (no SSO path), JWT-in-localStorage (XSS s",
+            "scores": {
+              "retrieval_score": 43.149996912141205,
+              "lexical_score": 16.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0.15,
+              "token_hits": 3,
+              "exact_phrase": false,
+              "fts_rank": -0.000003555035128805621
+            }
+          },
+          {
+            "id": "auth-refresh-insight",
+            "subject": "auth token refresh",
+            "text_preview": "Insight: auth token refresh happens server-side only, so the browser never holds a refresh token at all.",
+            "scores": {
+              "retrieval_score": 27.449998266969807,
+              "lexical_score": 7,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0.44999999999999996,
+              "token_hits": 1,
+              "exact_phrase": false,
+              "fts_rank": -0.000001995226730310263
+            }
+          }
+        ],
+        "passed": true
+      }
+    ],
+    "top1_hit": 1,
+    "recall_at_3": 1,
+    "noise_count": 0,
+    "stale_count": 0,
+    "output_tokens": 237
+  },
+  "generated_at": "2026-07-27T17:37:11.809Z",
+  "schema_version": 4,
+  "tables": {
+    "sessions": 1,
+    "events": 0,
+    "notes": 0,
+    "state": 0,
+    "token_ledger": 0,
+    "command_runs": 0,
+    "episodes": 0,
+    "branch_snapshots": 0,
+    "project_snapshots": 0,
+    "memory_items": 3,
+    "memory_item_semantics": 0,
+    "current_app_graphs": 1,
+    "memory_references": 2,
+    "retrieval_log": 2,
+    "file_renames": 0
+  },
+  "header": {
+    "chars": 835,
+    "est_tokens": 209,
+    "preview": "Cortex: auth strategy | 1 session on project\nHot: Decision [2026-07-25 17:37Z]: [auth strategy] use OIDC with server-side sessions in src/auth/oidc.ts. | Decision [2026-07-24 17:37Z]: [auth session store] keep the auth session store in redis in src/auth/session-s…\nCortex is ambient: prior context may surface automatica"
+  },
+  "full_state": {
+    "chars": 393,
+    "est_tokens": 99,
+    "preview": "Decisions:\n- Decision [2026-07-25 17:37Z]: [auth strategy] use OIDC with server-side sessions in src/auth/oidc.ts.\n- Decision [2026-07-24 17:37Z]: [auth session store] keep the auth session store in redis in src/auth/session-store.ts.\n\nInsights:\n- Insight [2026-07-23 17:37Z]: [auth token refresh] auth token refresh hap"
+  },
+  "topics": [
+    {
+      "topic": "auth strategy",
+      "output": {
+        "chars": 611,
+        "est_tokens": 153,
+        "preview": "Most relevant — Decision [auth strategy] (2d ago, refs OK)\nDecision [2026-07-25 17:37Z]: [auth strategy] use OIDC with server-side sessions in src/auth/oidc.ts.\n  already rejected: session cookies (no SSO path), JWT-in-localStorage (XSS surface)\nDecision [2026-07-24 17:37Z]: [auth session store] keep the auth session s"
+      }
+    }
+  ]
+}

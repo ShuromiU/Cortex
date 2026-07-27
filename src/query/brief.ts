@@ -1,5 +1,9 @@
 import type { CortexStore } from '../db/store.js';
-import { groupContestedWithinKind, renderMemoryLine } from './render.js';
+import {
+  groupContestedWithinKind,
+  renderMemoryLine,
+  renderedAlternatives,
+} from './render.js';
 import { logRetrieval, retrieveMemory } from './retrieval.js';
 import {
   assembleBudgeted,
@@ -60,10 +64,13 @@ export function brief(
   const detail = options.detail ?? 'none';
   // Within each kind bucket only — the kind sort above is the primary ordering.
   const grouped = groupContestedWithinKind(ordered);
-  const evidence = grouped.map(
-    item =>
-      `${renderMemoryLine(item, 2)}${detail === 'scores' ? renderScoreDetail(item) : ''}`,
-  );
+  const evidence = grouped.map(item => {
+    const alternatives = renderedAlternatives(item);
+    return {
+      line: `${renderMemoryLine(item, 2)}${detail === 'scores' ? renderScoreDetail(item) : ''}`,
+      ...(alternatives !== null ? { continuation: alternatives } : {}),
+    };
+  });
 
   const lead = [...header, buildLeadLine(ordered[0]!)].join('\n');
   const rendered = assembleBudgeted(

@@ -21,6 +21,7 @@ export { buildHeader, buildFullState } from './query/state.js';
 export { recall } from './query/recall.js';
 export { brief } from './query/brief.js';
 export { CONTESTED_MARKER, isContested, groupContestedAdjacent } from './query/render.js';
+export { ALREADY_REJECTED_PREFIX, renderedAlternatives } from './query/render.js';
 export { buildRetrievalContext, retrieveMemory, logRetrieval, type RetrievedMemoryItem, type RetrievalContext, type RetrievalResult, type RetrieveMemoryOptions, type SemanticMode, type SemanticProvider } from './query/retrieval.js';
 export { validateMemoryReferences, referenceValidationScore, ReferenceValidator, type MemoryReferenceValidation, type MovedReference } from './query/reference-validation.js';
 export { validateMemory, type MemoryValidationReport, type MemoryValidationReportItem } from './query/validate-memory.js';

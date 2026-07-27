@@ -1,0 +1,61 @@
+{
+  "_comment": "FR-3 rejected-alternatives rendering. Two decisions carry an Alternatives line exactly as buildNoteMemoryText projects one (own line, after content and Subject). Locks both halves of the AC: the 'already rejected:' line is present at a generous budget, and — the half that needs a mechanism — under a binding budget the decision survives while its alternatives line does not. The second fixture fails against any implementation that glues the alternatives onto the decision's own line: either the line carries them (excludes violated) or the decision is dropped to afford them (contains missed). Timestamps are excluded from every needle because the scenario clock is generation-time. The two fixtures use different topics deliberately — findFixtureRegressions keys its baseline map on fixture.topic, so two fixtures sharing one topic would silently collapse into a single entry.",
+  "seed": {
+    "scope": { "type": "branch", "key": "eval/alternatives" },
+    "focus": "auth strategy",
+    "app_graph": {
+      "head_oid": "eval00000000000000000000000000000000000a",
+      "files": ["src/auth/oidc.ts", "src/auth/session-store.ts"]
+    },
+    "items": [
+      {
+        "id": "auth-strategy-decision",
+        "kind": "note:decision",
+        "subject": "auth strategy",
+        "text": "Decision: use OIDC with server-side sessions in src/auth/oidc.ts.\nSubject: auth strategy\nAlternatives: session cookies (no SSO path), JWT-in-localStorage (XSS surface)",
+        "state": "hot",
+        "importance": 2.5,
+        "age_days": 2
+      },
+      {
+        "id": "auth-store-decision",
+        "kind": "note:decision",
+        "subject": "auth session store",
+        "text": "Decision: keep the auth session store in redis in src/auth/session-store.ts.\nSubject: auth session store\nAlternatives: in-process memory (breaks on every restart), sticky sessions at the load balancer",
+        "state": "hot",
+        "importance": 2.2,
+        "age_days": 3
+      },
+      {
+        "id": "auth-refresh-insight",
+        "kind": "note:insight",
+        "subject": "auth token refresh",
+        "text": "Insight: auth token refresh happens server-side only, so the browser never holds a refresh token at all.",
+        "state": "warm",
+        "importance": 1.8,
+        "access_count": 2,
+        "age_days": 4
+      }
+    ]
+  },
+  "fixtures": [
+    {
+      "topic": "auth strategy",
+      "expected_top": "auth-strategy-decision",
+      "max_output_tokens": 160,
+      "expect_output_contains": [
+        "already rejected: session cookies (no SSO path), JWT-in-localStorage (XSS surface)"
+      ]
+    },
+    {
+      "topic": "auth session store",
+      "expected_top": "auth-store-decision",
+      "max_output_tokens": 90,
+      "expect_output_contains": [
+        "keep the auth session store in redis",
+        "use OIDC with server-side sessions"
+      ],
+      "expect_output_excludes": ["already rejected"]
+    }
+  ]
+}

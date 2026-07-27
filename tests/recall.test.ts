@@ -507,6 +507,243 @@ describe('recall — contested items', () => {
   });
 });
 
+// ── Rejected alternatives (FR-3, Story 1.3) ───────────────────────────
+
+/**
+ * Seeds two decisions carrying alternatives plus one insight that does not,
+ * through the real write path — so these exercise the projection
+ * `buildNoteMemoryText` actually produces rather than a hand-built text blob.
+ */
+function seedAlternatives(store: CortexStore): void {
+  const session = store.createSession();
+  store.insertNote({
+    sessionId: session.id,
+    kind: 'decision',
+    subject: 'auth strategy',
+    content: 'use OIDC for the auth strategy',
+    alternatives: ['session cookies (no SSO path)', 'JWT-in-localStorage (XSS surface)'],
+  });
+  store.insertNote({
+    sessionId: session.id,
+    kind: 'decision',
+    subject: 'auth session store',
+    content: 'keep the auth session store in redis',
+    alternatives: ['in-process memory (breaks on restart)'],
+  });
+  store.insertNote({
+    sessionId: session.id,
+    kind: 'insight',
+    subject: 'auth tokens',
+    content: 'auth token refresh happens on the server side only',
+  });
+}
+
+function primaryLines(rendered: string): string[] {
+  return rendered
+    .split('\n')
+    .filter(line => line.startsWith('Decision ') || line.startsWith('Insight '));
+}
+
+function continuationLines(rendered: string): string[] {
+  return rendered.split('\n').filter(line => line.trim().startsWith('already rejected:'));
+}
+
+describe('recall — rejected alternatives', () => {
+  it('lists the alternatives on their own line beneath the decision', () => {
+    const store = makeStore();
+    seedAlternatives(store);
+
+    const lines = recall(store, 'auth', { budget: 600 }).split('\n');
+    const decisionAt = lines.findIndex(line => line.includes('use OIDC for the auth strategy'));
+
+    expect(decisionAt).toBeGreaterThan(-1);
+    expect(lines[decisionAt + 1]).toBe(
+      '  already rejected: session cookies (no SSO path), JWT-in-localStorage (XSS surface)',
+    );
+  });
+
+  it('renders one continuation per decision that carries alternatives, and none for the insight', () => {
+    const store = makeStore();
+    seedAlternatives(store);
+
+    const rendered = recall(store, 'auth', { budget: 600 });
+    expect(continuationLines(rendered)).toHaveLength(2);
+    // The insight has no alternatives, so nothing follows it.
+    const lines = rendered.split('\n');
+    const insightAt = lines.findIndex(line => line.startsWith('Insight '));
+    expect(lines[insightAt + 1]).toBeUndefined();
+  });
+
+  it('leaves a decision written without alternatives untouched', () => {
+    const store = makeStore();
+    const session = store.createSession();
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'auth strategy',
+      content: 'use OIDC for the auth strategy',
+    });
+
+    expect(recall(store, 'auth')).not.toContain('already rejected');
+  });
+
+  it('renders the alternatives in brief as well as recall', () => {
+    const store = makeStore();
+    seedAlternatives(store);
+
+    const rendered = brief(store, 'auth', undefined, { budget: 600 });
+    expect(rendered).toContain('  already rejected: in-process memory (breaks on restart)');
+    // KIND_PRIORITY still holds with continuations interleaved.
+    expect(primaryLines(rendered).map(line => line.split(' ')[0])).toEqual([
+      'Decision',
+      'Decision',
+      'Insight',
+    ]);
+  });
+});
+
+describe('recall — the alternatives line drops before its decision (AC #2)', () => {
+  it('keeps every decision and drops both continuations at a budget that binds', () => {
+    const store = makeStore();
+    seedAlternatives(store);
+
+    // Precondition, asserted so this fails loudly if it ever stops being
+    // adversarial: at a generous budget both continuations are present, and the
+    // binding budget below is genuinely too tight to hold them.
+    const generous = recall(store, 'auth', { budget: 600 });
+    expect(continuationLines(generous)).toHaveLength(2);
+    const allPrimaries = primaryLines(generous);
+    expect(allPrimaries).toHaveLength(3);
+
+    const bound = recall(store, 'auth', { budget: 90 });
+
+    // Every primary line survives...
+    expect(primaryLines(bound)).toEqual(allPrimaries);
+    expect(bound).not.toContain('trimmed');
+    // ...and the continuations are what paid for it.
+    expect(continuationLines(bound)).toHaveLength(0);
+    expect(estimateTokens(bound)).toBeLessThanOrEqual(90);
+  });
+
+  it('shows every decision before it shows any alternatives, across a budget sweep', () => {
+    const store = makeStore();
+    seedAlternatives(store);
+
+    const sweep = [20, 40, 60, 70, 80, 90, 100, 110, 120, 200, 600].map(budget => {
+      const rendered = recall(store, 'auth', { budget });
+      return {
+        budget,
+        primaries: primaryLines(rendered),
+        continuations: continuationLines(rendered),
+      };
+    });
+
+    const total = sweep[sweep.length - 1]!.primaries.length;
+    expect(total).toBe(3);
+
+    const firstFullPrimaries = sweep.find(run => run.primaries.length === total)!.budget;
+    const firstContinuation = sweep.find(run => run.continuations.length > 0)!.budget;
+
+    // The whole of AC #2: the last decision is affordable strictly before the
+    // first alternatives line is.
+    expect(firstFullPrimaries).toBeLessThan(firstContinuation);
+
+    for (const run of sweep) {
+      // A continuation never appears while a decision that fits is missing, and
+      // primaries only ever grow with the budget.
+      const previous = sweep[sweep.indexOf(run) - 1];
+      if (previous) {
+        expect(run.primaries.length).toBeGreaterThanOrEqual(previous.primaries.length);
+      }
+      if (run.continuations.length > 0) {
+        expect(run.primaries.length).toBe(total);
+      }
+    }
+  });
+
+  it('drops continuations top-down, keeping the highest-ranked one last', () => {
+    const store = makeStore();
+    seedAlternatives(store);
+
+    // Between "all primaries, no continuations" and "everything", exactly one
+    // continuation fits — and it must be the top decision's, not the cheaper one
+    // further down.
+    const partial = recall(store, 'auth', { budget: 104 });
+    const continuations = continuationLines(partial);
+
+    expect(continuations).toHaveLength(1);
+    expect(continuations[0]).toContain('session cookies (no SSO path)');
+    expect(primaryLines(partial)).toHaveLength(3);
+  });
+
+  it('stops at the first continuation that does not fit rather than skipping it', () => {
+    const store = makeStore();
+    seedAlternatives(store);
+
+    // The discriminating window. After the primaries, 21 tokens remain unspent
+    // at budget 102 — enough for the top decision's alternatives. The second
+    // decision's are cheaper (13) and would fit from budget 94 upward. A greedy
+    // fill would therefore show the *second* decision's alternatives here while
+    // the top decision's are missing, which is not how anything else in this
+    // codebase drops content.
+    for (const budget of [94, 96, 98, 100]) {
+      const rendered = recall(store, 'auth', { budget });
+      expect(primaryLines(rendered)).toHaveLength(3);
+      expect(continuationLines(rendered)).toHaveLength(0);
+    }
+
+    // Precondition: 102 really is where the top one starts fitting, so this test
+    // fails loudly if the window ever moves rather than passing vacuously.
+    expect(continuationLines(recall(store, 'auth', { budget: 102 }))).toHaveLength(1);
+  });
+});
+
+describe('recall — decisions without alternatives render byte-identically (AC #3)', () => {
+  function renderFixedClock(budget: number): string {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-06-06T05:18:24.000Z'));
+      const store = makeStore();
+      const session = store.createSession();
+      store.insertNote({
+        sessionId: session.id,
+        kind: 'decision',
+        subject: 'cache policy',
+        content: 'cache invalidation uses tags',
+      });
+      store.insertNote({
+        sessionId: session.id,
+        kind: 'insight',
+        subject: 'cache warmup',
+        content: 'cache warmup runs before the first request',
+      });
+      return recall(store, 'cache', { budget });
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it('produces exactly the pre-1.3 output at a generous budget', () => {
+    expect(renderFixedClock(600)).toBe(
+      [
+        'Most relevant — Decision [cache policy] (today, no file refs)',
+        'Decision [2026-06-06 05:18Z]: [cache policy] cache invalidation uses tags',
+        'Insight [2026-06-06 05:18Z]: [cache warmup] cache warmup runs before the first request',
+      ].join('\n'),
+    );
+  });
+
+  it('produces exactly the pre-1.3 output when the budget binds', () => {
+    expect(renderFixedClock(30)).toBe(
+      [
+        'Most relevant — Decision [cache policy] (today, no file refs)',
+        'Decision [2026-06-06 05:18Z]: [cache policy] cache invalidation uses tags',
+        '…1 more match trimmed (raise budget or refine topic)',
+      ].join('\n'),
+    );
+  });
+});
+
 describe('brief — contested items', () => {
   it('marks a contested note', () => {
     const store = makeStore();
