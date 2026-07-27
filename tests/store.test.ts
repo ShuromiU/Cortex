@@ -1585,6 +1585,41 @@ describe('CortexStore — the AD-17 veto holds over time', () => {
     expect(memoryStateFor(first.id)).toBe('archived');
   });
 
+  it('uses an IMMEDIATE transaction, not the deferred default', () => {
+    // db.transaction() is deferred: it takes the write lock lazily, so a
+    // read-then-write that reads before a concurrent writer commits fails the
+    // upgrade with SQLITE_BUSY_SNAPSHOT — which bypasses the busy handler, so
+    // busy_timeout never applies. That loses the veto AND discards the note.
+    const modes: string[] = [];
+    const originalTransaction = db.transaction.bind(db);
+    // @ts-expect-error — narrowing better-sqlite3's overloads is not worth it here
+    db.transaction = (fn: () => unknown) => {
+      const tx = originalTransaction(fn);
+      const wrapped = (...args: unknown[]) => {
+        modes.push('deferred');
+        return (tx as unknown as (...a: unknown[]) => unknown)(...args);
+      };
+      wrapped.immediate = (...args: unknown[]) => {
+        modes.push('immediate');
+        return (tx.immediate as unknown as (...a: unknown[]) => unknown)(...args);
+      };
+      return wrapped;
+    };
+    try {
+      store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'brief caching',
+        content: 'we cache the rendered session brief between runs',
+      });
+    } finally {
+      db.transaction = originalTransaction;
+    }
+    // The OUTERMOST transaction must be immediate. Nested ones (the
+    // memory_references upsert) become savepoints inside it and are unaffected.
+    expect(modes[0]).toBe('immediate');
+  });
+
   it('performs the note INSERT inside a transaction', () => {
     // Detect -> supersede -> insert -> mark are four statements. Without a
     // transaction a concurrent writer landing between the detection SELECT and
@@ -1720,6 +1755,49 @@ describe('CortexStore — contradiction detection is scope-aware', () => {
       content: 'we do not cache the rendered session brief between runs',
     });
     expect(contested.conflicts).toHaveLength(1);
+  });
+
+  it('a decision on one branch cannot bury an open contest on another', () => {
+    // The veto set is deliberately NOT scope-filtered even though detection is.
+    // Auto-supersede is scope-blind, so without this a feature-branch decision
+    // supersedes — and `memoryStateForNote` therefore archives — one side of a
+    // contest main has not settled. The branch's own supersede chain still
+    // works; only the other branch's contested notes are protected.
+    const main = store.createSession({ scopeKey: 'branch:/repo:main' });
+    const feature = store.createSession({ scopeKey: 'branch:/repo:feature' });
+
+    store.insertNote({
+      sessionId: main.id,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+    const contested = store.insertNote({
+      sessionId: main.id,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we do not cache the rendered session brief between runs',
+    });
+    expect(contested.conflicts).toHaveLength(1);
+
+    const onFeature = store.insertNote({
+      sessionId: feature.id,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'store rendered artifacts under the user home directory',
+    });
+    store.insertNote({
+      sessionId: feature.id,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'store rendered artifacts inside the repository cache folder',
+    });
+
+    // The feature branch's own chain still supersedes normally...
+    expect(store.getNote(onFeature.id)!.status).toBe('superseded');
+    // ...but main's open contest is untouched by it.
+    expect(store.getNote(contested.conflicts![0]!.id)!.status).toBe('active');
+    expect(store.getNote(contested.id)!.status).toBe('active');
   });
 
   it('leaves auto-supersede scope-blind, as it has always been', () => {

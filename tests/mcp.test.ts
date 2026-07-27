@@ -690,7 +690,7 @@ describe('cortex_resolve — contested subjects', () => {
     const output = callTool('cortex_resolve', { subject: 'brief caching' });
 
     expect(output).toContain('Error:');
-    expect(output).toContain('2 active notes');
+    expect(output).toContain('2 contested notes');
     expect(output).toContain(loser);
     expect(output).toContain(winner);
     // Nothing was resolved.
@@ -706,6 +706,53 @@ describe('cortex_resolve — contested subjects', () => {
     });
     const output = callTool('cortex_resolve', { subject: 'primary store' });
     expect(output).toContain('Marked decision[primary store] as resolved');
+  });
+
+  it('still resolves by subject with several uncontested notes on it', () => {
+    // A decision plus a blocker on one subject is ordinary usage, and
+    // findActiveNoteBySubject has always picked the newest. Refusing on any
+    // two active notes — rather than on two CONTESTED ones — broke that
+    // documented workflow. The earlier version of this test wrote a single
+    // note, so it never covered the case that broke.
+    callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'auth',
+      content: 'use short lived tokens for auth',
+    });
+    callTool('cortex_note', {
+      kind: 'blocker',
+      subject: 'auth',
+      content: 'the auth secret is not provisioned in ci',
+    });
+    const active = store.getActiveNotesBySubject('auth');
+    expect(active).toHaveLength(2);
+    expect(active.every(note => !note.conflict)).toBe(true);
+
+    const output = callTool('cortex_resolve', { subject: 'auth' });
+    expect(output).toContain('as resolved');
+    expect(output).not.toContain('Error:');
+  });
+
+  it('does not close an unrelated contest when an uncontested note is resolved', () => {
+    // Contested priors are exempt from auto-supersede, so an uncontested third
+    // decision can be active alongside a live contest. Resolving it must not
+    // wipe markers it has nothing to do with.
+    const { loser, winner } = openContest();
+    callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'use redis for storing rendered artifacts instead',
+    });
+    const third = store
+      .getActiveNotesBySubject('brief caching')
+      .find(note => note.content.includes('redis'))!;
+    expect(third.conflict).toBe(false);
+
+    const output = callTool('cortex_resolve', { note_id: third.id });
+
+    expect(output).not.toContain('Contest closed');
+    expect(store.getNote(loser)!.conflict).toBe(true);
+    expect(store.getNote(winner)!.conflict).toBe(true);
   });
 
   it('clears the contest on both sides when one side is resolved', () => {

@@ -138,6 +138,28 @@ const ANTONYM_MIN_RATIO = 0.8;
 /** How far past a negator to look for the predicate it governs. */
 const NEGATION_SCOPE_WINDOW = 4;
 
+/**
+ * Adverbs that sit between a negator and the predicate it governs. Without
+ * skipping these, "we no longer flush the spool" resolves its head to `longer`
+ * — a word the other note never uses — and the negation is discarded. `no
+ * longer` is the canonical way to record a reversal, so this is the shape that
+ * matters most.
+ */
+const NEGATION_ADVERBS = new Set(
+  [
+    'longer', 'currently', 'again', 'ever', 'anymore', 'necessarily',
+    'really', 'actually', 'strictly', 'explicitly', 'generally', 'usually',
+    'normally', 'typically', 'automatically',
+  ].map(stemLite),
+);
+
+/**
+ * `not only` / `not just` is additive, not contradictory: "runs at the
+ * threshold, not only at turn end" refines "runs at turn end" rather than
+ * denying it. A negator immediately followed by one of these is ignored.
+ */
+const SCOPE_LIMITERS = new Set(['only', 'just', 'solely', 'merely', 'simply'].map(stemLite));
+
 /** Analyzing a note is linear in its length; cap it so a huge paste cannot stall a write. */
 const MAX_ANALYZED_TOKENS = 4000;
 
@@ -204,10 +226,17 @@ function negatedHeads(analyzed: AnalyzedNote): string[] {
   const heads: string[] = [];
   for (let i = 0; i < analyzed.tokens.length; i++) {
     if (!isNegator(analyzed.tokens[i]!)) continue;
+
+    // "not only X" adds a case rather than denying one.
+    const next = analyzed.tokens[i + 1];
+    if (next && SCOPE_LIMITERS.has(next.stem)) continue;
+
     const limit = Math.min(analyzed.tokens.length, i + 1 + NEGATION_SCOPE_WINDOW);
     for (let j = i + 1; j < limit; j++) {
       const candidate = analyzed.tokens[j]!;
-      if (isCarrier(candidate)) continue;
+      // Skip structural words, other polarity carriers, and the adverbs that
+      // routinely sit between a negator and its predicate ("no longer flush").
+      if (isCarrier(candidate) || NEGATION_ADVERBS.has(candidate.stem)) continue;
       heads.push(candidate.stem);
       break;
     }

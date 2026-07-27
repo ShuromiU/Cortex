@@ -314,7 +314,7 @@ Divergent choices (`use postgres` vs `use mysql`) and refinements (`use postgres
 
 A contested prior is **not** auto-superseded. Normally a new decision supersedes the old one on that subject, which retires it to the archived tier; suppressing that for contested pairs keeps both sides visible until you resolve one. That exemption also covers notes already contested, so a later unrelated decision cannot quietly close an open contest by archiving both sides.
 
-Resolving either side with `cortex_resolve` closes the contest and clears the marker on both. While a contest is open, resolving *by subject* is refused — with more than one active note on the subject, picking one would be a guess, and guessing wrong leaves the retracted decision as the live one.
+Resolving either side with `cortex_resolve` closes the contest and clears the marker on both. While a contest is open, resolving *by subject* is refused — picking one of two contested notes would be a guess, and guessing wrong leaves the retracted decision as the live one. Several uncontested notes on a subject (a decision plus a blocker, say) resolve by subject as they always have.
 
 Known limit: token matching is ASCII-only, so non-Latin note content never conflicts. A silent miss rather than a wrong answer.
 

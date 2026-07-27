@@ -443,7 +443,7 @@ export function handleToolCall(
       const status = (args['status'] as 'resolved' | 'superseded' | undefined) ?? 'resolved';
       const replacement = args['replacement'] as string | undefined;
 
-      const scopeKey = ensureScopedSession(store, cwd).scope_key;
+      ensureScopedSession(store, cwd);
 
       // Resolving by subject used to lean on an invariant that no longer holds:
       // before contested priors were exempted from auto-supersede, a
@@ -451,17 +451,24 @@ export function handleToolCall(
       // `findActiveNoteBySubject`'s LIMIT 1 was unambiguous. With a live contest
       // there are two, and taking the newest resolved the agent's *current*
       // position while leaving the retracted one as the sole active decision —
-      // telling the next session the opposite of what was last decided. When the
-      // subject is contested, make the caller name the side.
+      // telling the next session the opposite of what was last decided.
+      //
+      // Only a live contest is ambiguous. A decision plus a blocker on one
+      // subject is ordinary usage and `findActiveNoteBySubject` has always
+      // picked the newest of those; refusing there would break a documented
+      // workflow. The lookup is scope-blind, so this guard is too — a scoped
+      // guard over a scope-blind resolution let the ambiguity through.
       if (!noteId && subject) {
-        const active = store.getActiveNotesBySubjectAndScope(subject, scopeKey);
-        if (active.length > 1) {
-          const lines = active.map(candidate => {
+        const contested = store
+          .getActiveNotesBySubject(subject)
+          .filter(candidate => candidate.conflict);
+        if (contested.length > 1) {
+          const lines = contested.map(candidate => {
             const stamp = formatMemoryTimestamp(candidate.timestamp);
             return `  - ${candidate.id}${stamp ? ` [${stamp}]` : ''}: ${notePreview(candidate.content)}`;
           });
           return [
-            `Error: subject "${subject}" has ${active.length} active ${note0Plural(active.length)} — resolving by subject would pick one arbitrarily.`,
+            `Error: subject "${subject}" has ${contested.length} contested notes — resolving by subject would pick one arbitrarily.`,
             'Re-run with the note_id of the side you want to close:',
             ...lines,
           ].join('\n');
@@ -476,6 +483,10 @@ export function handleToolCall(
       if (!note) {
         return `Error: no ${noteId ? `note with id ${noteId}` : `active note with subject "${subject ?? ''}"`} found.`;
       }
+      // The contest lives in the resolved note's scope, not the caller's — a
+      // branch switch between writing and resolving would otherwise leave the
+      // markers set forever.
+      const scopeKey = store.getScopeKeyForNote(note.id);
 
       try {
         if (replacement) {
@@ -495,7 +506,7 @@ export function handleToolCall(
           // Set the outgoing note's status explicitly rather than leaning on
           // insertNote's auto-supersede, which the AD-17 veto can suppress.
           store.updateNoteStatus(note.id, status === 'resolved' ? 'resolved' : 'superseded');
-          if (note.subject) {
+          if (note.conflict && note.subject) {
             store.clearConflictsForSubject(note.subject, scopeKey);
           }
           return `Superseded (${note.kind}${note.subject ? `[${note.subject}]` : ''}) with note ${replacementNote.id}.`;
@@ -503,8 +514,14 @@ export function handleToolCall(
 
         store.updateNoteStatus(note.id, status);
         // Closing a side closes the contest — otherwise the survivor renders
-        // `[contested]` forever against a note nobody is arguing with.
-        const cleared = note.subject ? store.clearConflictsForSubject(note.subject, scopeKey) : [];
+        // `[contested]` forever against a note nobody is arguing with. Gated on
+        // the resolved note actually being contested: an uncontested third
+        // decision can be active on the same subject, and resolving it must not
+        // wipe the markers of a contest it has nothing to do with.
+        const cleared =
+          note.conflict && note.subject
+            ? store.clearConflictsForSubject(note.subject, scopeKey)
+            : [];
         const clearedNote = cleared.length > 0 ? ' Contest closed.' : '';
         return `Marked ${note.kind}${note.subject ? `[${note.subject}]` : ''} as ${status}.${clearedNote}`;
       } catch (err) {

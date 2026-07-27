@@ -1489,6 +1489,14 @@ export class CortexStore {
       // exact outcome the veto exists to prevent.
       const contestedIds = new Set([
         ...conflicts.map(conflict => conflict.id),
+        // Deliberately NOT scope-filtered, even though detection is. Auto-
+        // supersede is scope-blind, so a decision written on one branch would
+        // otherwise supersede — and therefore archive — one side of an open
+        // contest on another branch, burying a question that branch has not
+        // settled. Scoping this to the writer only looks symmetric with
+        // detection; it hands an unrelated branch the power to close a contest.
+        // The cost is that a contested note on another branch is never
+        // auto-superseded, which is the conservative direction.
         ...priors.filter(prior => prior.conflict === 1).map(prior => prior.id),
       ]);
 
@@ -1545,7 +1553,13 @@ export class CortexStore {
       return { supersededIds, conflicts };
     });
 
-    const { conflicts } = run();
+    // `.immediate()`, not the default deferred mode. A deferred transaction
+    // takes its write lock lazily, so a read-then-write that reads before a
+    // concurrent writer commits fails the upgrade with SQLITE_BUSY_SNAPSHOT —
+    // which bypasses the busy handler, so `busy_timeout` never applies. That
+    // loses the veto *and* discards the note. IMMEDIATE takes the write lock up
+    // front, so the second writer waits out `busy_timeout` instead.
+    const { conflicts } = run.immediate();
     const note = this.getNote(id)!;
     return conflicts.length > 0 ? { ...note, conflicts } : note;
   }
@@ -1685,17 +1699,31 @@ export class CortexStore {
     return rows.map(row => row.id);
   }
 
-  /** Active notes on a subject within a scope — the contest set, if any. */
-  getActiveNotesBySubjectAndScope(subject: string, scopeKey: string | null): ParsedNote[] {
+  /**
+   * Active notes on a subject, newest first. Deliberately scope-blind to match
+   * `findActiveNoteBySubject`, which is what callers resolve through.
+   */
+  getActiveNotesBySubject(subject: string): ParsedNote[] {
     const rows = this.db
       .prepare(
-        `SELECT n.* FROM notes n
-           INNER JOIN sessions s ON s.id = n.session_id
-          WHERE n.subject = ? AND n.status = 'active' AND s.scope_key IS ?
-          ORDER BY n.timestamp DESC`,
+        `SELECT * FROM notes
+          WHERE subject = ? COLLATE NOCASE AND status = 'active'
+          ORDER BY timestamp DESC`,
       )
-      .all(subject.trim().toLowerCase(), scopeKey) as NoteRow[];
+      .all(subject.trim().toLowerCase()) as NoteRow[];
     return rows.map(parseNoteRow);
+  }
+
+  /** Scope key of the session that wrote a note, or null. */
+  getScopeKeyForNote(noteId: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT s.scope_key FROM notes n
+           INNER JOIN sessions s ON s.id = n.session_id
+          WHERE n.id = ?`,
+      )
+      .get(noteId) as { scope_key: string | null } | undefined;
+    return row?.scope_key ?? null;
   }
 
   // ── State ─────────────────────────────────────────────────────────

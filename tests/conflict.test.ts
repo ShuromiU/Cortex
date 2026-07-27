@@ -409,3 +409,53 @@ describe('conflict module invariants', () => {
     expect(polarityStopwordOverlap()).toEqual([]);
   });
 });
+
+describe('detectContradiction — reversal phrasings the scope window must not swallow', () => {
+  // negatedHeads takes the first non-carrier token after the negator as the
+  // governed predicate. An intervening content adverb became the "head", was
+  // absent from the other note, and the negation was discarded — silently
+  // dropping "no longer", the canonical way to record a reversal.
+  const REVERSALS: Array<[string, string, string]> = [
+    ['no longer', 'we flush the spool at turn end', 'we no longer flush the spool at turn end'],
+    ['not currently', 'the reranker is enabled for recall', 'the reranker is not currently enabled for recall'],
+    ['never again', 'we retry the flaky upload step', 'we never again retry the flaky upload step'],
+    ['do not ever', 'we vendor the sqlite binary', 'we do not ever vendor the sqlite binary'],
+    ['is not required', 'the semantic provider is required for recall', 'the semantic provider is not required for recall'],
+  ];
+
+  for (const [name, prior, incoming] of REVERSALS) {
+    it(`detects a "${name}" reversal`, () => {
+      expect(detectContradiction(prior, incoming)?.signal).toBe('negation');
+    });
+  }
+
+  it('does NOT treat "not only" as a reversal', () => {
+    // "not only X" adds a case rather than denying one.
+    expect(
+      detectContradiction(
+        'the spool flush runs at turn end',
+        'the spool flush runs at the 256 kib threshold, not only at turn end',
+      ),
+    ).toBeNull();
+  });
+
+  it('does NOT treat "not just" as a reversal', () => {
+    expect(
+      detectContradiction(
+        'the gate runs on every push',
+        'the gate runs on every push, not just on pull requests',
+      ),
+    ).toBeNull();
+  });
+
+  it('still ignores a negation whose predicate the other note never asserts', () => {
+    // The adverb skip must not become a general "any token in the window" rule
+    // — that would make this double negation fire.
+    expect(
+      detectContradiction(
+        'we do not skip caching the session brief',
+        'we cache the session brief',
+      ),
+    ).toBeNull();
+  });
+});
