@@ -73,7 +73,7 @@ development_status:
   # no way to tell which change bought what.
   epic-1: in-progress
   1-1-detect-contradictions-at-note-write-time: done
-  1-2-render-contested-items-in-retrieval: review
+  1-2-render-contested-items-in-retrieval: done
   1-3-surface-rejected-alternatives-at-recall: backlog
   1-4-auto-demote-superseded-decisions-without-resolving-contests: backlog
   1-5-gate-retrieval-quality-in-ci: done

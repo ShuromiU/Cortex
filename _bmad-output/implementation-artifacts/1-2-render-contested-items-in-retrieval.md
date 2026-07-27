@@ -4,7 +4,7 @@ baseline_commit: c259710
 
 # Story 1.2: Render contested items in retrieval
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
