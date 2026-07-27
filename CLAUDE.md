@@ -34,7 +34,9 @@ Persistent working memory for coding agents.
 - `src/memory/hotness.ts` — decay/reinforcement scoring
 - `src/memory/kind-weights.ts` — single source of truth for kind weighting (retrieval vs working-set profiles)
 - `src/memory/references.ts` — file/path reference extraction from memory text
-- `src/query/tokenize.ts` — topic tokenization + substring-safe stemming for the rerank layer
+- `src/memory/text.ts` — `TOKEN_PATTERN` + `stemLite`, the text primitives shared by the write path and the rerank layer
+- `src/memory/conflict.ts` — deterministic contradiction detection over note content
+- `src/query/tokenize.ts` — topic tokenization for the rerank layer; re-exports the `memory/text.ts` primitives
 - `src/query/retrieval.ts` — retrieval/reranking
 - `src/query/reference-validation.ts` — `ReferenceValidator` (memoized, batched), rename/moved resolution, graduated stale scoring
 - `src/query/validate-memory.ts` — diagnostic memory validation reports
@@ -77,6 +79,9 @@ Persistent working memory for coding agents.
 - Ending a session ends its still-active children, so subagent sessions stay reachable by consolidation and event GC, both of which require `status = 'ended'`.
 - Stale notes should decay out of the default state unless reinforced by actual retrieval/use.
 - Resolved notes should remain cold even when retrieved, and should not trigger reflex `additionalContext`; `cortex_resolve` is the explicit close-out path.
+- Writing a note whose content **opposes** an active `note:decision` on the same subject marks both sides `conflict = 1` and returns a payload naming the prior's id, subject, timestamp and text. The write always succeeds — a conflict is advisory metadata, never a rejection. A note with no subject issues no detection query at all.
+- Detection is deterministic and offline: an explicit polarity flip (negation asymmetry or a curated antonym pair) over demonstrably shared context. It is deliberately conservative — divergent choices (`use postgres` vs `use mysql`) and refinements are **not** contradictions, because a false positive costs more than a miss.
+- Conflict detection runs **before** auto-supersede and vetoes it (AD-17): a contested prior stays `active` rather than being flipped to `superseded`, which `memoryStateForNote` would map to `archived` — burying one side of the contest at write time. Non-contested priors supersede exactly as before. `cortex_resolve` is explicit user resolution and sets the outgoing note's status itself, so the veto never blocks it.
 - The UserPromptSubmit hook may add a one-line consult hint **at most once per session** for memory-relevant prompts; there is no PreToolUse gate. Route/state/recall/brief/engage or topic-based validate-memory suppresses it.
 - The Stop hook nudges (`decision:block`) only when a subagent ran this turn AND suggest-notes returns high-confidence candidates, embedding them; otherwise it is silent. `CORTEX_STOP_NUDGE=off` disables it.
 - Per-tool-call capture must not spawn Node: PostToolUse appends to the spool; flush happens at turn end, the 256 KiB threshold, or next session start, exactly once per batch (atomic claim + processed marker).

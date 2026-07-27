@@ -549,3 +549,97 @@ describe('createMcpServer', () => {
     expect(server).toBeInstanceOf(Server);
   });
 });
+
+// ── cortex_note conflict reporting (FR-1, story 1.1) ──────────────────
+
+describe('cortex_note — contradiction reporting', () => {
+  let store: CortexStore;
+  let cwd: string;
+
+  function callTool(toolName: string, args: Record<string, unknown> = {}): string {
+    return handleToolCall(store, toolName, args, cwd);
+  }
+
+  beforeEach(() => {
+    store = createStore().store;
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-note-conflict-'));
+    configureEngagementPath(path.join(cwd, '.cortex.state'));
+  });
+
+  it('reports the contested prior alongside a successful write', () => {
+    callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'the flush validates every spooled entry before replay',
+    });
+
+    const output = callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'the flush does not validate spooled entries before replay',
+    });
+
+    // The write still succeeds — conflict is advisory, never a rejection.
+    expect(output).toContain('Noted (decision[spool flush])');
+    expect(output).toContain('Contested');
+    expect(output).toContain('opposes 1 active decision');
+    expect(output).toContain('the flush validates every spooled entry before rep');
+    expect(output).toContain('cortex_resolve');
+  });
+
+  it('says nothing about conflicts when there are none', () => {
+    callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'primary store',
+      content: 'use postgres for the primary store',
+    });
+    const output = callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'primary store',
+      content: 'use mysql for the primary store',
+    });
+
+    expect(output).toContain('Noted (decision[primary store])');
+    expect(output).not.toContain('Contested');
+    expect(output.split('\n')).toHaveLength(1);
+  });
+
+  it('supersedes the outgoing note even when the replacement contradicts it', () => {
+    // cortex_resolve is the explicit close-out path. insertNote's auto-supersede
+    // is vetoed for contradicting writes (AD-17), so this branch must set the
+    // status itself — a replacement that reverses its predecessor is the
+    // common case here, not an edge case.
+    const first = callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+    expect(first).toContain('Noted');
+
+    const noteId = store.getNotesByKindAndSubject('decision', 'brief caching')[0]!.id;
+
+    callTool('cortex_resolve', {
+      note_id: noteId,
+      status: 'superseded',
+      replacement: 'we do not cache the rendered session brief between runs',
+    });
+
+    expect(store.getNote(noteId)!.status).toBe('superseded');
+  });
+
+  it('resolves the outgoing note when the replacement contradicts it', () => {
+    callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+    const noteId = store.getNotesByKindAndSubject('decision', 'brief caching')[0]!.id;
+
+    callTool('cortex_resolve', {
+      note_id: noteId,
+      replacement: 'we do not cache the rendered session brief between runs',
+    });
+
+    expect(store.getNote(noteId)!.status).toBe('resolved');
+  });
+});

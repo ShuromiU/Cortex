@@ -15,6 +15,15 @@ import {
   type MemoryItemState,
 } from '../memory/items.js';
 import { extractMemoryReferences, type ExtractedMemoryReference } from '../memory/references.js';
+import { detectContradiction } from '../memory/conflict.js';
+
+/** Row shape the contradiction lookup selects; also feeds the supersede veto. */
+interface NoteConflictCandidate {
+  id: string;
+  subject: string;
+  timestamp: string;
+  content: string;
+}
 
 // ── Row types (raw DB rows) ───────────────────────────────────────────
 
@@ -343,6 +352,23 @@ export interface ParsedNote {
   status: string;
   conflict: boolean; // parsed
 }
+
+/** A prior note the incoming write was found to contradict (FR-1). */
+export interface NoteConflict {
+  id: string;
+  subject: string;
+  timestamp: string;
+  content: string;
+  /** Which detector fired — see `src/memory/conflict.ts`. */
+  signal: 'negation' | 'antonym';
+}
+
+/**
+ * `insertNote`'s return. Widened rather than replaced so every existing caller
+ * that expects a `ParsedNote` keeps compiling. `conflicts` is present only when
+ * the write actually contradicted something.
+ */
+export type InsertedNote = ParsedNote & { conflicts?: NoteConflict[] };
 
 export interface InsertStateOpts {
   sessionId?: string;
@@ -1378,7 +1404,7 @@ export class CortexStore {
 
   // ── Notes ─────────────────────────────────────────────────────────
 
-  insertNote(opts: InsertNoteOpts): ParsedNote {
+  insertNote(opts: InsertNoteOpts): InsertedNote {
     const kindsRequiringSubject = ['decision', 'intent', 'blocker', 'focus'];
     if (kindsRequiringSubject.includes(opts.kind) && !opts.subject) {
       throw new Error(`Subject is required for ${opts.kind} notes`);
@@ -1391,30 +1417,84 @@ export class CortexStore {
       opts.alternatives !== undefined ? JSON.stringify(opts.alternatives) : null;
 
     const supersededIds: string[] = [];
+    const conflicts: NoteConflict[] = [];
 
-    // Auto-supersede: for decision and intent kinds, supersede existing active notes with same kind+subject
+    // FR-1 contradiction detection. AC #2: a subjectless note issues no query
+    // at all, so everything below is gated on having a subject. AC #1 scopes the
+    // *prior* to an active note:decision; the incoming note may be any kind.
+    let priorDecisions: NoteConflictCandidate[] = [];
+    if (subject !== null) {
+      priorDecisions = this.db
+        .prepare(
+          `SELECT id, subject, timestamp, content FROM notes
+           WHERE kind = 'decision' AND subject = ? AND status = 'active'`,
+        )
+        .all(subject) as NoteConflictCandidate[];
+
+      for (const prior of priorDecisions) {
+        const evidence = detectContradiction(prior.content, opts.content);
+        if (evidence) {
+          conflicts.push({
+            id: prior.id,
+            subject: prior.subject,
+            timestamp: prior.timestamp,
+            content: prior.content,
+            signal: evidence.signal,
+          });
+        }
+      }
+    }
+    const contestedIds = new Set(conflicts.map(conflict => conflict.id));
+
+    // Auto-supersede: for decision and intent kinds, supersede existing active
+    // notes with same kind+subject — EXCEPT any the incoming note contradicts.
+    // AD-17: conflict detection runs first and vetoes automatic resolution.
+    // Without the veto, `memoryStateForNote` maps the superseded prior to
+    // 'archived', so the write would flag a contest and bury one side of it in
+    // the same transaction.
     if ((opts.kind === 'decision' || opts.kind === 'intent') && subject !== null) {
-      const existing = this.db
-        .prepare(
-          `SELECT id FROM notes
-           WHERE kind = ? AND subject = ? AND status = 'active'`,
-        )
-        .all(opts.kind, subject) as Array<{ id: string }>;
-      supersededIds.push(...existing.map(row => row.id));
-      this.db
-        .prepare(
-          `UPDATE notes SET status = 'superseded'
-           WHERE kind = ? AND subject = ? AND status = 'active'`,
-        )
-        .run(opts.kind, subject);
+      // For a decision the detection lookup already selected exactly the rows
+      // this needs; only an intent has to ask separately.
+      const existing =
+        opts.kind === 'decision'
+          ? priorDecisions.map(row => ({ id: row.id }))
+          : (this.db
+              .prepare(
+                `SELECT id FROM notes
+                 WHERE kind = ? AND subject = ? AND status = 'active'`,
+              )
+              .all(opts.kind, subject) as Array<{ id: string }>);
+
+      supersededIds.push(...existing.map(row => row.id).filter(rowId => !contestedIds.has(rowId)));
+      if (supersededIds.length > 0) {
+        const placeholders = supersededIds.map(() => '?').join(', ');
+        this.db
+          .prepare(`UPDATE notes SET status = 'superseded' WHERE id IN (${placeholders})`)
+          .run(...supersededIds);
+      }
     }
 
     this.db
       .prepare(
         `INSERT INTO notes (id, session_id, timestamp, kind, subject, content, alternatives, status, conflict)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 0)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
       )
-      .run(id, opts.sessionId, now, opts.kind, subject, opts.content, alternativesJson);
+      .run(
+        id,
+        opts.sessionId,
+        now,
+        opts.kind,
+        subject,
+        opts.content,
+        alternativesJson,
+        conflicts.length > 0 ? 1 : 0,
+      );
+
+    // Mark the prior side of each contested pair. `markConflict` re-syncs its
+    // own memory item; the new note's projection is written below.
+    for (const conflict of conflicts) {
+      this.markConflict(conflict.id);
+    }
 
     // Side effects for focus updates
     if (opts.kind === 'focus' && subject !== null) {
@@ -1431,7 +1511,7 @@ export class CortexStore {
       this.syncMemoryItemForNote(supersededId);
     }
     this.syncMemoryItemForNote(id);
-    return note;
+    return conflicts.length > 0 ? { ...note, conflicts } : note;
   }
 
   getNote(id: string): ParsedNote | undefined {

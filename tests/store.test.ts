@@ -1201,3 +1201,294 @@ describe('CortexStore — token ledger', () => {
     expect(entries).toEqual([]);
   });
 });
+
+// ── Contradiction detection at write time (FR-1, story 1.1) ───────────
+
+describe('CortexStore — contradiction detection on insertNote', () => {
+  let db: Database.Database;
+  let store: CortexStore;
+  let sessionId: string;
+
+  beforeEach(() => {
+    db = createTestDb();
+    store = new CortexStore(db);
+    sessionId = store.createSession().id;
+  });
+
+  function memoryStateFor(noteId: string): string | undefined {
+    const row = db
+      .prepare('SELECT state FROM memory_items WHERE source_id = ? AND source_table = ?')
+      .get(noteId, 'notes') as { state: string } | undefined;
+    return row?.state;
+  }
+
+  it('returns a payload naming the prior id, subject, timestamp and text', () => {
+    const prior = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'the flush validates every spooled entry before replay',
+    });
+
+    const next = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'the flush does not validate spooled entries before replay',
+    });
+
+    expect(next.conflicts).toHaveLength(1);
+    expect(next.conflicts![0]).toEqual({
+      id: prior.id,
+      subject: 'spool flush',
+      timestamp: prior.timestamp,
+      content: prior.content,
+      signal: 'negation',
+    });
+  });
+
+  it('sets conflict = 1 on both the prior and the new note', () => {
+    const prior = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'the flush validates every spooled entry before replay',
+    });
+    const next = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'the flush does not validate spooled entries before replay',
+    });
+
+    expect(store.getNote(prior.id)!.conflict).toBe(true);
+    expect(store.getNote(next.id)!.conflict).toBe(true);
+  });
+
+  it('vetoes the auto-supersede so the contested prior stays active (AD-17)', () => {
+    const prior = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'the flush validates every spooled entry before replay',
+    });
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'the flush does not validate spooled entries before replay',
+    });
+
+    expect(store.getNote(prior.id)!.status).toBe('active');
+  });
+
+  it('keeps the contested prior out of the archived tier', () => {
+    // The point of the veto: `memoryStateForNote` maps 'superseded' to
+    // 'archived', which would bury one side of the contest at write time.
+    const prior = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'the flush validates every spooled entry before replay',
+    });
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'the flush does not validate spooled entries before replay',
+    });
+
+    expect(memoryStateFor(prior.id)).not.toBe('archived');
+  });
+
+  it('still supersedes a non-contradicting decision on the same subject', () => {
+    const prior = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'primary store',
+      content: 'use postgres for the primary store',
+    });
+    const next = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'primary store',
+      content: 'use mysql for the primary store',
+    });
+
+    expect(next.conflicts).toBeUndefined();
+    expect(store.getNote(prior.id)!.status).toBe('superseded');
+    expect(memoryStateFor(prior.id)).toBe('archived');
+  });
+
+  it('detects a non-decision note contradicting a prior decision', () => {
+    // AC #1 is asymmetric: the prior must be a decision, the incoming note
+    // may be any kind.
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'the flush validates every spooled entry before replay',
+    });
+    const insight = store.insertNote({
+      sessionId,
+      kind: 'insight',
+      subject: 'spool flush',
+      content: 'the flush does not validate spooled entries before replay',
+    });
+
+    expect(insight.conflicts).toHaveLength(1);
+  });
+
+  it('produces no conflict when the subject has no active decision', () => {
+    const note = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'brand new subject',
+      content: 'we do not cache anything on this path',
+    });
+    expect(note.conflicts).toBeUndefined();
+  });
+
+  it('ignores superseded decisions as contradiction candidates', () => {
+    const first = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'primary store',
+      content: 'we cache the rendered brief between runs',
+    });
+    // Divergent choice — supersedes without contest.
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'primary store',
+      content: 'use mysql for the primary store',
+    });
+    expect(store.getNote(first.id)!.status).toBe('superseded');
+
+    // Contradicts the now-superseded note, but it is no longer active.
+    const third = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'primary store',
+      content: 'we do not cache the rendered brief between runs',
+    });
+    expect(third.conflicts).toBeUndefined();
+  });
+
+  it('issues no conflict query for a note written with no subject (AC #2)', () => {
+    const prepared: string[] = [];
+    const originalPrepare = db.prepare.bind(db);
+    // @ts-expect-error — narrowing the better-sqlite3 overloads is not worth it here
+    db.prepare = (sql: string) => {
+      prepared.push(sql);
+      return originalPrepare(sql);
+    };
+
+    try {
+      store.insertNote({ sessionId, kind: 'insight', content: 'a subjectless insight' });
+    } finally {
+      db.prepare = originalPrepare;
+    }
+
+    const conflictQueries = prepared.filter(sql => sql.includes("kind = 'decision'"));
+    expect(conflictQueries).toEqual([]);
+  });
+
+  it('issues exactly one conflict query for a subject-bearing decision', () => {
+    // Guards the "reuse the lookup" requirement: detection and the supersede
+    // veto must share a single round-trip, not take one each.
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'the flush validates every spooled entry before replay',
+    });
+
+    const prepared: string[] = [];
+    const originalPrepare = db.prepare.bind(db);
+    // @ts-expect-error — narrowing the better-sqlite3 overloads is not worth it here
+    db.prepare = (sql: string) => {
+      prepared.push(sql);
+      return originalPrepare(sql);
+    };
+
+    try {
+      store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'spool flush',
+        content: 'the flush does not validate spooled entries before replay',
+      });
+    } finally {
+      db.prepare = originalPrepare;
+    }
+
+    // Match on the shape rather than the literal `kind = 'decision'`: the
+    // supersede lookup this must NOT issue is parameterized (`kind = ?`), so a
+    // literal filter would let a second round-trip through unnoticed.
+    const subjectLookups = prepared.filter(
+      sql => /FROM notes/.test(sql) && sql.includes('subject = ?'),
+    );
+    expect(subjectLookups).toHaveLength(1);
+  });
+});
+
+describe('CortexStore — contradiction detection cost (AC #4)', () => {
+  it('adds under 5 ms to a write against 10,000 memory items', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const sessionId = store.createSession().id;
+
+    // Seed 10,000 memory items. `memory_items` is the table AC #4 names and the
+    // one that actually grows; the notes lookup rides `idx_notes_kind_subject`
+    // regardless of its size.
+    const insertItem = db.prepare(
+      `INSERT INTO memory_items (id, session_id, scope_type, scope_key, kind, text, state, importance, created_at)
+       VALUES (?, ?, 'project', 'project:/perf', ?, ?, 'warm', 0.5, ?)`,
+    );
+    const now = new Date().toISOString();
+    db.transaction(() => {
+      for (let i = 0; i < 10_000; i++) {
+        insertItem.run(`perf:${i}`, sessionId, 'episode:command_failure', `filler item ${i}`, now);
+      }
+    })();
+    const { n } = db.prepare('SELECT COUNT(*) AS n FROM memory_items').get() as { n: number };
+    expect(n).toBeGreaterThanOrEqual(10_000);
+
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'the flush validates every spooled entry before replay',
+    });
+
+    // A/B on `insight`, which never auto-supersedes — so the only difference
+    // between the two arms is contradiction detection itself. The subjectless
+    // arm issues no conflict query at all (AC #2).
+    const ITERATIONS = 60;
+    const median = (values: number[]): number => {
+      const sorted = [...values].sort((a, b) => a - b);
+      return sorted[Math.floor(sorted.length / 2)]!;
+    };
+
+    const withDetection: number[] = [];
+    const withoutDetection: number[] = [];
+    for (let i = 0; i < ITERATIONS; i++) {
+      let start = performance.now();
+      store.insertNote({
+        sessionId,
+        kind: 'insight',
+        subject: 'spool flush',
+        content: 'the flush does not validate spooled entries before replay',
+      });
+      withDetection.push(performance.now() - start);
+
+      start = performance.now();
+      store.insertNote({ sessionId, kind: 'insight', content: 'a subjectless insight' });
+      withoutDetection.push(performance.now() - start);
+    }
+
+    const overhead = median(withDetection) - median(withoutDetection);
+    expect(overhead).toBeLessThan(5);
+  });
+});

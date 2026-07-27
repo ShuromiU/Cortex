@@ -236,7 +236,7 @@ For new projects, keep the global `~/.codex/AGENTS.md` Cortex section aligned wi
 |------|---------|
 | `cortex_route` | Explain ambient memory behavior and route to the right Cortex tool |
 | `cortex_state` | Return current-session notes first, then the scored working set, budgeted; empty state returns next-step guidance |
-| `cortex_note` | Record an `insight`, `decision`, `intent`, `blocker`, or `focus` |
+| `cortex_note` | Record an `insight`, `decision`, `intent`, `blocker`, or `focus`; reports any active decision the write contradicts |
 | `cortex_resolve` | Mark a note resolved or superseded (optionally with replacement content) |
 | `cortex_recall` | Retrieve evidence for a topic: lead line + timestamped, validity-labeled evidence within a budget |
 | `cortex_brief` | Return a smaller topical brief, optionally for an agent, budgeted |
@@ -297,6 +297,14 @@ Retrieval is hybrid:
 - current-checkout reference validation so repo-valid memories beat memories pointing at deleted files or missing plans
 - optional semantic shadow/rank candidates when a semantic provider is configured
 
+### Contradiction detection
+
+Writing a note whose content opposes an active `decision` on the same subject marks both sides contested and returns a payload naming the prior note. The write always succeeds — the conflict is advisory metadata, never a rejection, and choosing a winner stays yours via `cortex_resolve`.
+
+Detection is deterministic and offline. It fires on an explicit polarity flip — a negation carried by exactly one side, or a curated antonym pair such as `enable`/`disable` — and only when the two notes demonstrably talk about the same thing. It is deliberately conservative: a divergent choice (`use postgres` vs `use mysql`) and a refinement (`use postgres` vs `use postgres with pooling`) are **not** contradictions. A detector that cries wolf gets ignored, so misses are the cheaper failure.
+
+A contested prior is **not** auto-superseded. Normally a new decision supersedes the old one on that subject, which retires it to the archived tier; suppressing that for contested pairs is what keeps both sides visible until you resolve one.
+
 ## Reliability Evaluation
 
 `cortex evaluate` still reports table counts and output sizes. With `--suite`, it also runs retrieval-quality fixtures:
@@ -327,7 +335,7 @@ Cortex leads with value instead of demands: the session brief shows validated pr
 - Use `cortex_route` when you need the capability map; if deferred discovery is needed, discover by callable name (`cortex_route`, `cortex_recall`, `cortex_state`) or by server name (`Cortex`).
 - Use `cortex_recall(topic)` proactively before non-trivial work in familiar areas, recurring bugs, resumed features, or systems with prior decisions; use `cortex_state` when you need the broader working set.
 - Use `cortex_brief(topic)` before dispatching a subagent when topic history matters.
-- Use `cortex_note(decision, alternatives=[...])`, `cortex_note(insight)`, or `cortex_note(blocker)` for load-bearing memory only.
+- Use `cortex_note(decision, alternatives=[...])`, `cortex_note(insight)`, or `cortex_note(blocker)` for load-bearing memory only. If the note opposes an active decision on the same subject, the write still succeeds and the response names the note it contradicts — both sides are marked contested until you close one with `cortex_resolve`.
 - Use `cortex_suggest_notes` / `cortex suggest-notes` to review possible load-bearing notes before explicitly saving them.
 - Use `cortex_validate_memory` / `cortex validate-memory --topic ...` when a memory mentions files, plans, or app structure that may have changed.
 - Use `cortex_summarize` at the end of a dense work session so the next one resumes gracefully.

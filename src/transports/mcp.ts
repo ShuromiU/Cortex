@@ -151,6 +151,15 @@ function refreshCurrentGraphQuietly(store: CortexStore, cwd: string): void {
   }
 }
 
+const NOTE_PREVIEW_LIMIT = 60;
+
+/** Note text trimmed for agent-facing confirmation lines. */
+function notePreview(content: string): string {
+  return content.length > NOTE_PREVIEW_LIMIT
+    ? `${content.slice(0, NOTE_PREVIEW_LIMIT)}…`
+    : content;
+}
+
 export const TOOL_DEFINITIONS = [
   {
     name: 'cortex_route',
@@ -386,12 +395,27 @@ export function handleToolCall(
         });
         syncBranchSnapshotForSession(store, sessionId);
         const subjectStr = note.subject ? `[${note.subject}]` : '';
-        const preview = note.content.length > 60
-          ? `${note.content.slice(0, 60)}…`
-          : note.content;
         const timestamp = formatMemoryTimestamp(note.timestamp);
         const timestampPart = timestamp ? ` [${timestamp}]` : '';
-        return `Noted (${note.kind}${subjectStr})${timestampPart}: ${preview}`;
+        const confirmation = `Noted (${note.kind}${subjectStr})${timestampPart}: ${notePreview(note.content)}`;
+
+        // FR-1: the write always succeeds; a conflict is advisory metadata
+        // reported alongside it, never a rejection.
+        if (!note.conflicts || note.conflicts.length === 0) {
+          return confirmation;
+        }
+        const lines = [
+          confirmation,
+          `Contested — opposes ${note.conflicts.length} active decision${note.conflicts.length === 1 ? '' : 's'} on this subject. Both sides are now marked contested:`,
+        ];
+        for (const conflict of note.conflicts) {
+          const priorStamp = formatMemoryTimestamp(conflict.timestamp);
+          lines.push(
+            `  - ${conflict.id}${priorStamp ? ` [${priorStamp}]` : ''}: ${notePreview(conflict.content)}`,
+          );
+        }
+        lines.push('Close it with cortex_resolve(note_id) once you know which one holds.');
+        return lines.join('\n');
       } catch (err) {
         return `Error: ${err instanceof Error ? err.message : String(err)}`;
       }
@@ -422,9 +446,12 @@ export function handleToolCall(
             content: replacement,
             ...(note.subject ? { subject: note.subject } : {}),
           });
-          if (status === 'resolved') {
-            store.updateNoteStatus(note.id, 'resolved');
-          }
+          // Set the outgoing note's status explicitly rather than leaning on
+          // insertNote's auto-supersede: that is vetoed when the replacement
+          // contradicts the note it replaces (AD-17), and a replacement that
+          // reverses its predecessor is the common case here. cortex_resolve is
+          // the explicit close-out path — the user has already broken the tie.
+          store.updateNoteStatus(note.id, status === 'resolved' ? 'resolved' : 'superseded');
           return `Superseded (${note.kind}${note.subject ? `[${note.subject}]` : ''}) with note ${replacementNote.id}.`;
         }
 
