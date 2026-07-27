@@ -1,5 +1,5 @@
 import type { CortexStore, ParsedMemoryItem } from '../db/store.js';
-import { demoteMemoryState, isSupersededMemoryText, type MemoryItemState } from './items.js';
+import { demoteMemoryState, isSupersededMemoryItem, type MemoryItemState } from './items.js';
 import { workingSetKindBonus } from './kind-weights.js';
 
 const STATE_WEIGHT: Record<MemoryItemState, number> = {
@@ -91,7 +91,8 @@ function stalePenalty(item: ParsedMemoryItem, createdDays: number): number {
     penalty -= 1.6;
   }
   // Superseded guidance is retired guidance: same decay push as resolved.
-  if (isSupersededMemoryText(item.text)) {
+  // Kind-guarded: an episode's captured stderr can carry the line.
+  if (isSupersededMemoryItem(item)) {
     penalty -= 1.6;
   }
 
@@ -146,7 +147,7 @@ export function deriveMemoryItemState(
   // hot-scoring predecessor straight back to hot — and reinforcement (touch
   // raises the score) caps at warm rather than resurrecting retired guidance.
   // Floor at cold: history stays retrievable, never re-archived.
-  if (isSupersededMemoryText(item.text)) {
+  if (isSupersededMemoryItem(item)) {
     return demoteMemoryState(tier);
   }
 

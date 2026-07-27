@@ -6,7 +6,7 @@ import {
   resolveProjectScopeKey,
   resolveWorkingScopeKeys,
 } from './state.js';
-import { isSupersededMemoryText } from '../memory/items.js';
+import { isSupersededMemoryItem } from '../memory/items.js';
 import { CONTESTED_MARKER, formatAgeLabel, isContested } from './render.js';
 import { estimateTokens } from './retrieval.js';
 
@@ -98,7 +98,7 @@ export function buildSessionBrief(
     // BRIEF_STATES, unlike resolved, which lands cold and filters itself. This
     // channel prints unprompted on every SessionStart; a retired decision here
     // would read as settled context.
-    if (isSupersededMemoryText(item.text)) {
+    if (isSupersededMemoryItem(item)) {
       continue;
     }
 

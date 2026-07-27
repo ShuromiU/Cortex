@@ -1,7 +1,7 @@
 import type { BranchSnapshotRow, CortexStore, ParsedMemoryItem } from '../db/store.js';
 import { consolidateLevel1, renderCompressed } from '../capture/consolidate.js';
 import { selectWorkingMemoryItems } from '../memory/hotness.js';
-import { isSupersededMemoryText } from '../memory/items.js';
+import { isSupersededMemoryItem } from '../memory/items.js';
 import { deriveProjectScopeKey } from '../scope/keys.js';
 import { getPreferredScope } from './scope.js';
 import { validateMemoryReferences } from './reference-validation.js';
@@ -120,12 +120,20 @@ function renderHeaderHighlights(items: ParsedMemoryItem[]): string | null {
     // Truncate first, then re-attach the marker. The 110-char cap is
     // unconditional — not the output budget — so appending it beforehand loses
     // it outright on any note longer than ~97 chars, presenting one side of an
-    // open contest as settled on every SessionStart.
+    // open contest as settled on every SessionStart. The (superseded) label
+    // gets the same treatment: a live-path superseded item caps at warm and
+    // cannot reach this hot/pinned surface, but a PINNED one superseded later
+    // stays pinned by design, and truncation would strip the one thing marking
+    // it as retired.
     .map(item => {
-      const snippet = renderMemorySnippet(renderMemoryLine(item, 1), 1, 110);
-      return isContested(item) && !snippet.includes(CONTESTED_MARKER.trim())
-        ? `${snippet}${CONTESTED_MARKER}`
-        : snippet;
+      let snippet = renderMemorySnippet(renderMemoryLine(item, 1), 1, 110);
+      if (isContested(item) && !snippet.includes(CONTESTED_MARKER.trim())) {
+        snippet = `${snippet}${CONTESTED_MARKER}`;
+      }
+      if (isSupersededMemoryItem(item) && !snippet.includes('(superseded)')) {
+        snippet = `${snippet} (superseded)`;
+      }
+      return snippet;
     });
 
   if (highlights.length === 0) {
@@ -184,9 +192,12 @@ function renderResumeCandidate(items: ParsedMemoryItem[]): string | null {
   // An intent can carry conflict = 1: detection scopes only the prior to
   // decision, so the incoming note may be any kind. Without this the resume
   // pointer hands back one retracted side of an open contest as the thing to
-  // pick up next.
+  // pick up next. Same for superseded: only a PINNED item can be superseded
+  // and still reach this hot/pinned surface, but handing back a retired
+  // intent as "the thing to resume" is exactly what the label prevents.
   const contested = isContested(candidate) ? CONTESTED_MARKER : '';
-  return `Resume: ${subjectPart}${content}${contested}`;
+  const superseded = isSupersededMemoryItem(candidate) ? ' (superseded)' : '';
+  return `Resume: ${subjectPart}${content}${contested}${superseded}`;
 }
 
 function renderSnapshotSection(snapshot: BranchSnapshotRow): string {
@@ -259,10 +270,15 @@ function extractNoteContent(item: ParsedMemoryItem): string {
 function renderNoteBullet(item: ParsedMemoryItem): string {
   const subject = item.subject ? `[${item.subject}] ` : '';
   const contested = isContested(item) ? CONTESTED_MARKER : '';
-  const resolved = item.text.toLowerCase().includes('status: resolved') ? ' (resolved)' : '';
   // A warm superseded decision can rank into the working set (FR-4 demotes to
-  // warm at best); unlabeled it would read as live guidance.
-  const superseded = isSupersededMemoryText(item.text) ? ' (superseded)' : '';
+  // warm at best); unlabeled it would read as live guidance. The superseded
+  // check wins the shared slot — the resolved sniff is a substring and could
+  // otherwise double-label (see renderMemoryLine).
+  const superseded = isSupersededMemoryItem(item) ? ' (superseded)' : '';
+  const resolved =
+    superseded === '' && item.text.toLowerCase().includes('status: resolved')
+      ? ' (resolved)'
+      : '';
   const timestamp = formatMemoryTimestamp(item.created_at);
   const timestampPart = timestamp ? ` [${timestamp}]` : '';
   return `- ${humanizeMemoryKind(item.kind)}${timestampPart}: ${subject}${extractNoteContent(item)}${contested}${superseded}${resolved}`;

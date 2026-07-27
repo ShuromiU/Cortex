@@ -1,5 +1,5 @@
 import type { ParsedMemoryItem } from '../db/store.js';
-import { isSupersededMemoryText } from '../memory/items.js';
+import { isSupersededMemoryItem, noteTrailerLines } from '../memory/items.js';
 import type { MemoryReferenceValidation } from './reference-validation.js';
 
 function titleCase(value: string): string {
@@ -154,44 +154,9 @@ export const ALREADY_REJECTED_PREFIX = '  already rejected: ';
 /** Payload cap, so the whole line stays inside `renderMemorySnippet`'s 260. */
 const MAX_ALTERNATIVES_CHARS = 240;
 
-/**
- * The trailer `buildNoteMemoryText` appends after a note's content, in the
- * order it writes them. Each is optional; the order never varies.
- */
-const NOTE_TRAILER_LABELS = ['Subject: ', 'Alternatives: ', 'Conflict: ', 'Status: '];
-
-/**
- * The lines `buildNoteMemoryText` appended, separated from free-form content.
- *
- * Note content is a free-form string that may contain newlines, so `text` is
- * content lines followed by the trailer with nothing marking the boundary.
- * Walking back from the end and requiring the labels to appear in their
- * canonical order recovers it: a real `Alternatives:` line always sits *after*
- * `Subject:`, while one typed into the content necessarily sits *before* it.
- * That single ordering fact is what separates a written rejection list from a
- * sentence about one, and it needs no schema change to exploit.
- *
- * Matching is exact-case because `buildNoteMemoryText` only ever emits these
- * literals. Lowercasing would admit `ALTERNATIVES:` shouted in a log tail
- * without ever matching something the writer produces.
- */
-function noteTrailerLines(text: string): string[] {
-  const lines = text.split('\n');
-  const trailer: string[] = [];
-  let maxLabel = NOTE_TRAILER_LABELS.length - 1;
-
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index]!.trim();
-    const label = NOTE_TRAILER_LABELS.findIndex(candidate => line.startsWith(candidate));
-    if (label < 0 || label > maxLabel) {
-      break;
-    }
-    maxLabel = label;
-    trailer.unshift(line);
-  }
-
-  return trailer;
-}
+// `noteTrailerLines` was born here in Story 1.3; it moved to `memory/items.ts`
+// in 1.4 so `hotness.ts` could trailer-scope its superseded read too — the
+// layer direction forbids `memory/ → query/`. Same function, same discipline.
 
 /**
  * The `already rejected:` line for an item, or null when it carries none.
@@ -346,10 +311,16 @@ export function renderMemoryLine(item: ParsedMemoryItem, maxLines = 3): string {
       : firstLine;
     const subject = item.subject ? `[${item.subject}] ` : '';
     const contested = isContested(item) ? CONTESTED_MARKER : '';
-    // Superseded items are retrievable since FR-4; a status is exactly one of
-    // active/resolved/superseded, so the two labels share a slot.
-    const resolved = item.text.toLowerCase().includes('status: resolved') ? ' (resolved)' : '';
-    const superseded = isSupersededMemoryText(item.text) ? ' (superseded)' : '';
+    // Superseded items are retrievable since FR-4. A status is exactly one of
+    // active/resolved/superseded, so the two labels share a slot — and the
+    // superseded check wins it, because the resolved sniff is a substring and
+    // a superseded note whose content merely mentions "status: resolved"
+    // would otherwise render both.
+    const superseded = isSupersededMemoryItem(item) ? ' (superseded)' : '';
+    const resolved =
+      superseded === '' && item.text.toLowerCase().includes('status: resolved')
+        ? ' (resolved)'
+        : '';
     const timestamp = formatMemoryTimestamp(item.created_at);
     const timestampPart = timestamp ? ` [${timestamp}]` : '';
     return `${label}${timestampPart}: ${subject}${content}${contested}${superseded}${resolved}${renderReferenceLabel(item)}`;

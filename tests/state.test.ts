@@ -695,3 +695,58 @@ describe('buildHeader - contested notes', () => {
     expect(resumeLine).toContain('[contested]');
   });
 });
+
+// ── Pinned superseded items keep their label (FR-4 review round) ───────
+
+describe('buildHeader — pinned superseded items', () => {
+  it('re-attaches (superseded) after the Hot: truncation, like [contested]', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const session = store.createSession({ scopeType: 'branch', scopeKey: 'branch:repo:main' });
+
+    // Long enough that the 110-char snippet cap eats the trailing label; pinned
+    // so it survives demotion and stays on the hot/pinned surface — the one
+    // path a superseded item can still reach it.
+    const note = store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'auth strategy',
+      content:
+        'use OIDC with the enterprise gateway and rotate refresh tokens on the server side behind the session guard for every tenant',
+    });
+    const item = store.getMemoryItemBySource('notes', note.id)!;
+    store.updateMemoryItemStates([{ id: item.id, state: 'pinned' }]);
+    store.updateNoteStatus(note.id, 'superseded');
+    // Pre-assert the fixture is genuinely the hazardous shape: still pinned,
+    // and long enough to truncate.
+    expect(store.getMemoryItemBySource('notes', note.id)!.state).toBe('pinned');
+
+    const header = buildHeader(store);
+    const hotLine = header.split('\n').find(line => line.startsWith('Hot:'));
+    expect(hotLine).toBeDefined();
+    expect(hotLine).toContain('…');
+    expect(hotLine).toContain('(superseded)');
+  });
+
+  it('labels a pinned superseded intent on the Resume: line', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const session = store.createSession({ scopeType: 'branch', scopeKey: 'branch:repo:main' });
+
+    const note = store.insertNote({
+      sessionId: session.id,
+      kind: 'intent',
+      subject: 'retry path',
+      content: 'finish the retry path in the flush loop',
+    });
+    const item = store.getMemoryItemBySource('notes', note.id)!;
+    store.updateMemoryItemStates([{ id: item.id, state: 'pinned' }]);
+    store.updateNoteStatus(note.id, 'superseded');
+    expect(store.getMemoryItemBySource('notes', note.id)!.state).toBe('pinned');
+
+    const header = buildHeader(store);
+    const resumeLine = header.split('\n').find(line => line.startsWith('Resume:'));
+    expect(resumeLine).toBeDefined();
+    expect(resumeLine).toContain('(superseded)');
+  });
+});

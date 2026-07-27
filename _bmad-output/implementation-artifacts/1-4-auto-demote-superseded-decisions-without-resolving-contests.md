@@ -4,7 +4,7 @@ baseline_commit: 1ba3949
 
 # Story 1.4: Auto-demote superseded decisions without resolving contests
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -193,3 +193,34 @@ The first campaign run reported 6/12 with six "anchor missing" — every multi-l
 ### Change Log
 
 - 2026-07-27 — Story 1.4 implemented. Supersede demotes one tier (floor cold) instead of archiving; durable via the derive layer; `(superseded)` label; brief/reflex exclusion; new locked eval suite. 737 tests (+32), 8 gate suites, 12/12 mutations killed.
+- 2026-07-27 — Round-2 repair: 8 review findings addressed across 9 files; 749 tests (+12), 8 gate suites unchanged, 6/6 repair mutations killed.
+
+## Senior Developer Review (AI)
+
+**Reviewed:** `7c4ecda` vs `1ba3949` · three parallel layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) · 2026-07-27
+**Outcome:** Changes Requested → addressed in the round-2 repair.
+
+The Auditor's verdict was a clean bill of health on all three ACs, verified end-to-end through the real write path including the refresh — the load-bearing design (derive-layer demotion surviving `refreshMemoryHotness` with a hot-range score) held under independent probing, as did the veto interplay, the resume-after-resolve clause, the blocker exclusion, forward-only archived rows, and every declared metric (737/+32, 8 suites, zero delta, 12/12 mutations spot-checked at 3). The two hunters found the defects exactly where the story stopped looking.
+
+### The through-line
+
+1.3's review taught me not to declare a limitation unfixable and then build the weaker guard the excuse justified. This round's version of the same failure: **I imported half of a discipline and claimed the whole.** `isSupersededMemoryText` said "matching `isContested`'s discipline" while copying only the line-exact half — no kind guard (which `isContested` has, with a docstring naming captured stderr as the reason) and no trailer scoping (which 1.3's own review had already engineered for the identical spoofing class, one file away). Both hunters found it independently, and the blast radius here is worse than a label: demote cap, stale penalty, and unprompted-channel exclusion, all unclearable on an active note.
+
+### Action items — all addressed
+
+- [x] **[Med] A content line `Status: superseded` permanently retired an active note** (blind+edge). Multi-line content quoting the line made the note derive capped at warm, take −1.6, render `(superseded)`, and vanish from the SessionStart brief — while `notes.status` stayed `active` and nothing could clear it. `noteTrailerLines` moved from `render.ts` to `memory/items.ts` (pure string logic; the layer direction was an excuse about *location*, not a reason to skip trailer scoping) and the predicate now reads the trailer only, exact-case. The residual — a subject-less insight ending with the line — is the same bounded exposure `renderedAlternatives` documents, now pinned by a test.
+- [x] **[Med] No kind guard — an episode whose stderr carried the line was demote-capped by its own log** (blind). This repo's own vitest failure output prints exactly that line, so dogfooding hit it deterministically. New `isSupersededMemoryItem` guards kind at every call site; the reflex filter in particular must not let a spoofed episode silence a legitimate command-failure whisper.
+- [x] **[Med] Docs stated "warm→cold" as durable; it is transient** (blind+edge). The transition steps from the *stored* tier, the first refresh re-settles at *scored*-tier-minus-one — a fresh decision (stored warm, scoring hot) goes cold-then-warm, net zero. AC #1's literal hot case holds; the docs now state the real rule ("one tier below what its score would grant") and its consequences. The store test that pinned the transient cold — the precise trap the story document itself warned about — now refreshes and asserts the settle.
+- [x] **[Med] README promised "ranked below the current one"; unenforced** (blind). Reproduced inversion under access asymmetry. Softened to what is true — the label, not the rank, is the guarantee — and the principled ordering fix is logged in deferred-work.
+- [x] **[Low] `(superseded) (resolved)` could double-render** (blind+edge), contradicting the adjacent "labels share a slot" comment — the resolved sniff is a substring. Superseded now wins the slot in both renderers.
+- [x] **[Low] Pinned superseded items reached `Hot:` with the label truncated off and `Resume:` with no label at all** (blind+edge). Unreachable via MCP/CLI today (only pinned items can still be hot after a supersede), but the library API reaches it and `Hot:` already re-attaches `[contested]` for exactly this failure mode. Both surfaces now carry the label.
+- [x] **[Low] `updateNoteStatus`'s read→flip→sync→demote was not transactional** (blind) while `insertNote` wraps its equivalent for the stated two-sessions-one-database reason. Now one IMMEDIATE transaction; nested calls degrade to savepoints.
+- [x] **[Low] Two stale CLAUDE.md sentences** (auditor): the scope-veto bullet still said "archive one side"; the decay-tier line still listed `archived` as a live tier when no current path produces it. Both corrected.
+
+### Accepted, not changed
+
+- **Superseded items are never GC-collected — growth is unbounded on the automatic path** (blind). Real, and a product call about lifecycle (aged-cold → archived? a GC category?) that belongs with Story 4.6's eviction work. Deferred with the reviewer's numbers.
+- **The eval suite gates only the rendering half** (blind). Stated honestly in the suite's own comment; the write path, derive cap, touch, and channel exclusions are unit-tested. The framing cost ("lock it in the eval gate") is noted.
+- **`before` is not a temporal keyword** (blind) — deliberate and story-stated; the AC's example query works through lexical overlap, which the Auditor confirmed is the generic behavior for any query, superseded or not.
+- **Backfill timing nuance** (blind): a pre-memory_items database migrating after 1.4 lands its whole superseded history cold/retrievable; one migrated earlier keeps it archived. Internally consistent with forward-only; recorded.
+- **Touch's substring LIKE divergence** — pre-existing shape shared with resolved, self-healing via derive; folded into the existing deferred sniff-consolidation item.

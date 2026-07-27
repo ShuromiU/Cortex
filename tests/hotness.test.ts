@@ -283,3 +283,45 @@ describe('memory hotness — superseded stale penalty', () => {
     expect(computeMemoryHotness(retiredItem)).toBeLessThan(computeMemoryHotness(activeItem));
   });
 });
+
+describe('memory hotness — the superseded read is kind-guarded', () => {
+  it('an episode whose stderr carries the line is neither capped nor penalized', () => {
+    const store = new CortexStore(createTestDb());
+    const scopeKey = 'branch:/repo:main';
+    const session = store.createSession({ scopeKey });
+
+    // Twin episodes, identical but for the stderr content — this repo's own
+    // failing-test output prints exactly this line.
+    const base = {
+      sessionId: session.id,
+      scopeType: 'branch',
+      scopeKey,
+      kind: 'episode:command_failure',
+      sourceTable: 'episodes' as const,
+      subject: 'npx vitest run',
+      state: 'hot' as const,
+      importance: 2.2,
+      createdAt: new Date().toISOString(),
+    };
+    store.upsertMemoryItem({
+      ...base,
+      id: 'ep-plain',
+      sourceId: 'ep-plain',
+      text: 'Test failure: items suite\nStderr: expected false to be true',
+    });
+    store.upsertMemoryItem({
+      ...base,
+      id: 'ep-spoof',
+      sourceId: 'ep-spoof',
+      text: 'Test failure: items suite\nStderr: expected text to contain\nStatus: superseded\nbut it did not',
+    });
+
+    refreshMemoryHotness(store, [scopeKey]);
+
+    const plain = store.getMemoryItem('ep-plain')!;
+    const spoof = store.getMemoryItem('ep-spoof')!;
+    expect(computeMemoryHotness(spoof)).toBe(computeMemoryHotness(plain));
+    expect(spoof.state).toBe(plain.state);
+    expect(spoof.state).toBe('hot');
+  });
+});

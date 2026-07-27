@@ -1675,15 +1675,22 @@ export class CortexStore {
     // Transition-aware: a manual supersede (cortex_resolve) demotes exactly
     // like the automatic one, but writing 'superseded' onto an already-
     // superseded note is a re-assertion, not a transition, and must not step
-    // the tier again (FR-4).
-    const previous = this.getNote(id)?.status;
-    this.db
-      .prepare('UPDATE notes SET status = ? WHERE id = ?')
-      .run(status, id);
-    this.syncMemoryItemForNote(id);
-    if (status === 'superseded' && previous !== 'superseded') {
-      this.demoteMemoryItemForNote(id);
-    }
+    // the tier again (FR-4). One transaction for the same reason insertNote
+    // uses one: two sessions share a database file, and a concurrent writer
+    // between the read and the demote could double-step the tier or strand
+    // the status flip without its demotion. Nested calls (the MCP resolve
+    // flow) degrade to savepoints.
+    const run = this.db.transaction(() => {
+      const previous = this.getNote(id)?.status;
+      this.db
+        .prepare('UPDATE notes SET status = ? WHERE id = ?')
+        .run(status, id);
+      this.syncMemoryItemForNote(id);
+      if (status === 'superseded' && previous !== 'superseded') {
+        this.demoteMemoryItemForNote(id);
+      }
+    });
+    run.immediate();
   }
 
   findActiveNoteBySubject(subject: string): ParsedNote | undefined {

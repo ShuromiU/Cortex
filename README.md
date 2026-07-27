@@ -316,7 +316,7 @@ A contested prior is **not** auto-superseded. Normally a new decision supersedes
 
 ### Superseded decisions cool instead of vanishing
 
-When a new decision lands on a subject, its predecessor is demoted one tier — hot to warm, warm to cold, floored at cold — instead of being archived out of retrieval, as it was before. The old decision stays reachable, ranked below the current one and labeled so it cannot read as live:
+When a new decision lands on a subject, its predecessor is demoted instead of being archived out of retrieval, as it was before. The durable rule lives in the decay layer: a superseded item always sits **one tier below what its activity score would grant** — a decision that would derive hot settles at warm, one that would derive warm settles at cold, floored at cold. The old decision stays reachable, demoted in rank below the current one in the ordinary case, and labeled so it cannot read as live:
 
 ```
 Decision [2026-07-25 15:56Z]: [queue engine] use kafka for the queue engine.
@@ -325,7 +325,7 @@ Decision [2026-06-17 15:56Z]: [queue engine] use rabbitmq for the queue engine. 
 
 Historical questions — `old queue decisions`, `queue engine history`, `what did we decide before` — reach it through ordinary recall. Blockers are never demoted by a decision: an unresolved blocker on the subject is not superseded guidance.
 
-The demotion is durable, not a one-time write: the decay layer derives a superseded item's tier one notch below what its activity score would grant, so recalling it cannot reheat it past warm, and it keeps cooling as it ages. It is also honest about its reach — the SessionStart brief and the reflex whisper never carry a superseded decision at all, because those channels present a single remembered item as settled context. Manual close-outs behave identically: `cortex_resolve(status='superseded')` demotes the same way, and pre-existing archived rows from before this behavior stay archived.
+Because the tier is re-derived from the score on every refresh, recalling a superseded decision cannot reheat it past warm, and it keeps cooling as it ages. Two consequences worth knowing: a freshly superseded decision usually settles at warm (its score is still hot-range), so it can appear in the working set — labeled — until it decays; and the label, not the rank, is the guarantee, since heavy access to the old item can in principle rank it near the new one. The unprompted channels are stricter — the SessionStart brief and the reflex whisper never carry a superseded decision at all, because those channels present a single remembered item as settled context. Manual close-outs behave identically: `cortex_resolve(status='superseded')` demotes the same way, and pre-existing archived rows from before this behavior stay archived.
 
 Resolving either side with `cortex_resolve` closes the contest and clears the marker on both. While a contest is open, resolving *by subject* is refused — picking one of two contested notes would be a guess, and guessing wrong leaves the retracted decision as the live one. Several uncontested notes on a subject (a decision plus a blocker, say) resolve by subject as they always have.
 

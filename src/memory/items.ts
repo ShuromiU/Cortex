@@ -50,19 +50,76 @@ export function demoteMemoryState(state: MemoryItemState): MemoryItemState {
 }
 
 /**
+ * The trailer `buildNoteMemoryText` appends after a note's content, in the
+ * order it writes them. Each is optional; the order never varies.
+ */
+const NOTE_TRAILER_LABELS = ['Subject: ', 'Alternatives: ', 'Conflict: ', 'Status: '];
+
+/**
+ * The lines `buildNoteMemoryText` appended, separated from free-form content.
+ *
+ * Note content may contain newlines, so `text` is content lines followed by
+ * the trailer with nothing marking the boundary. Walking back from the end and
+ * requiring the labels to appear in their canonical order recovers it: a real
+ * trailer line always sits after the content, while one typed *into* the
+ * content sits before whatever trailer the projection appended. Matching is
+ * exact-case because the projection only ever emits these literals —
+ * lowercasing would admit shouted text from captured logs.
+ *
+ * Lives here rather than in `query/render.ts` (where Story 1.3 first built it)
+ * because `memory/hotness.ts` needs trailer-scoped reads too and the layer
+ * direction only permits `query/ → memory/`.
+ */
+export function noteTrailerLines(text: string): string[] {
+  const lines = text.split('\n');
+  const trailer: string[] = [];
+  let maxLabel = NOTE_TRAILER_LABELS.length - 1;
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!.trim();
+    const label = NOTE_TRAILER_LABELS.findIndex(candidate => line.startsWith(candidate));
+    if (label < 0 || label > maxLabel) {
+      break;
+    }
+    maxLabel = label;
+    trailer.unshift(line);
+  }
+
+  return trailer;
+}
+
+/**
  * Whether projected note text carries the `Status: superseded` trailer line.
  *
- * Line-exact, matching `isContested`'s discipline: a note whose content merely
- * *mentions* the status must not read as retired. Lives here rather than in
- * `query/render.ts` because `memory/hotness.ts` needs it too, and the layer
- * direction only permits `query/ → memory/`. The `touchMemoryItems` SQL CASE
- * necessarily stays a substring LIKE — same pre-existing divergence the
- * resolved branch has.
+ * Trailer-scoped, not merely line-exact — the lesson Story 1.3's review taught
+ * for `Alternatives:` applies identically here: a note whose free-form content
+ * contains its own `Status: superseded` line would otherwise read as retired
+ * while `notes.status` is `active`, and nothing could ever clear it —
+ * `cortex_resolve` writes columns while this reads text. The consequences here
+ * are worse than a label: the demotion cap, the stale penalty, and exclusion
+ * from the SessionStart brief and reflex. The trailer scan rejects a content
+ * line because `Subject:` (mandatory for every kind but `insight`) always
+ * follows content, and a `Status:` above a `Subject:` breaks canonical order.
+ * The residual — a subject-less insight whose content *ends* with the line —
+ * is the same bounded, documented exposure `renderedAlternatives` carries.
+ *
+ * The `touchMemoryItems` SQL CASE necessarily stays a substring LIKE — same
+ * pre-existing divergence the resolved branch has; the derive layer re-settles
+ * any disagreement on the next refresh.
  */
 export function isSupersededMemoryText(text: string): boolean {
-  return text
-    .split('\n')
-    .some(line => line.trim().toLowerCase() === 'status: superseded');
+  return noteTrailerLines(text).some(line => line === 'Status: superseded');
+}
+
+/**
+ * The predicate call sites should use: kind-guarded, because only notes have a
+ * status at all. An episode's captured stderr can contain a `Status:
+ * superseded` line (this repo's own test output does), and without the guard a
+ * fresh command-failure episode — which exists precisely to land hot — would
+ * be demote-capped and stale-penalized by its own log text.
+ */
+export function isSupersededMemoryItem(item: { kind: string; text: string }): boolean {
+  return item.kind.startsWith('note:') && isSupersededMemoryText(item.text);
 }
 
 export function noteImportance(kind: string): number {

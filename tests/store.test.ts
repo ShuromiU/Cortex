@@ -6,6 +6,7 @@ import {
   parseEventRow,
   parseNoteRow,
 } from '../src/db/store.js';
+import { refreshMemoryHotness } from '../src/memory/hotness.js';
 import type { SessionRow, EventRow, NoteRow } from '../src/db/store.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -2010,12 +2011,20 @@ describe('CortexStore — auto-demotion on supersede', () => {
     expect(itemFor(first.id).state).toBe('warm');
   });
 
-  it('demotes a warm predecessor to cold', () => {
+  it('steps a warm-stored predecessor to cold at the transition; the derive layer then settles it against the score', () => {
     const first = decide('auth strategy', 'use OIDC for the auth strategy');
     expect(itemFor(first.id).state).toBe('warm'); // fresh decisions land warm
 
     decide('auth strategy', 'use SAML for the auth strategy via the same gateway');
+    // Transition-time semantics: one step colder from the STORED tier.
     expect(itemFor(first.id).state).toBe('cold');
+
+    // The durable rule is the derive layer's: one tier below what the SCORE
+    // would grant. A fresh decision still scores hot-range, so the first
+    // refresh settles this item at warm — the cold above is transient, and
+    // pinning it as durable was a review finding, not a feature.
+    refreshMemoryHotness(store, ['branch:/repo:main']);
+    expect(itemFor(first.id).state).toBe('warm');
   });
 
   it('floors at cold — a cold predecessor stays cold, never archived', () => {

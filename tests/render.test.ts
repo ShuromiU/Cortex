@@ -284,6 +284,25 @@ describe('renderMemoryLine — superseded label', () => {
     });
     expect(renderMemoryLine(item)).not.toContain('(superseded)');
   });
+
+  it('never renders both labels — superseded wins the shared slot', () => {
+    // The resolved sniff is a substring; a superseded note whose content
+    // mentions "status: resolved" would otherwise render
+    // "(superseded) (resolved)", contradicting the one-status-per-note fact.
+    const item = makeItem({
+      text: 'decision: document the status: resolved flag\nSubject: flags\nStatus: superseded',
+    });
+    const line = renderMemoryLine(item);
+    expect(line).toContain('(superseded)');
+    expect(line).not.toContain('(resolved)');
+  });
+
+  it('is trailer-scoped — quoted content lines do not label an active note', () => {
+    const item = makeItem({
+      text: 'decision: keep the old entry\nStatus: superseded\nfor the audit trail\nSubject: audit trail',
+    });
+    expect(renderMemoryLine(item)).not.toContain('(superseded)');
+  });
 });
 
 // ── renderedAlternatives (FR-3, Story 1.3) ─────────────────────────────
