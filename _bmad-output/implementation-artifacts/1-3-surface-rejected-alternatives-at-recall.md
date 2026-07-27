@@ -4,7 +4,7 @@ baseline_commit: 4fb59c8
 
 # Story 1.3: Surface rejected alternatives at recall
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
