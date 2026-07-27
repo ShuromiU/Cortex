@@ -256,3 +256,47 @@ describe('buildSessionBrief — contested notes', () => {
     expect(Math.ceil(brief.length / 4)).toBeLessThanOrEqual(150);
   });
 });
+
+// ── Superseded exclusion (FR-4, Story 1.4) ─────────────────────────────
+
+describe('buildSessionBrief — superseded items', () => {
+  it('never briefs a superseded decision, even one hot enough to qualify', () => {
+    // The demoted tier is warm at best, and warm is inside BRIEF_STATES — so
+    // without an explicit filter this channel would present a just-retracted
+    // decision as settled context on every SessionStart. Resolved never needed
+    // the filter because it lands cold, outside the set; superseded does.
+    const store = createStore();
+    const session = store.createSession({
+      scopeType: 'branch',
+      scopeKey: 'branch:repo:main',
+      branchRef: 'main',
+    });
+
+    // An active twin proves the fixture qualifies on every other axis: same
+    // kind, same state, same importance, same age — only the status line
+    // differs. If the twin stops rendering, the fixture stopped being
+    // adversarial and this test fails loudly.
+    seedNote(
+      store,
+      session.id,
+      'branch:repo:main',
+      'brief-active-twin',
+      'note:decision',
+      'queue engine',
+      'decision: use kafka for the queue engine.',
+    );
+    seedNote(
+      store,
+      session.id,
+      'branch:repo:main',
+      'brief-superseded',
+      'note:decision',
+      'auth strategy',
+      'decision: use oauth1 for the auth strategy.\nSubject: auth strategy\nStatus: superseded',
+    );
+
+    const brief = buildSessionBrief(store);
+    expect(brief).toContain('use kafka for the queue engine');
+    expect(brief).not.toContain('oauth1');
+  });
+});

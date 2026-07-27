@@ -1,5 +1,5 @@
 import type { CortexStore, ParsedMemoryItem } from '../db/store.js';
-import type { MemoryItemState } from './items.js';
+import { demoteMemoryState, isSupersededMemoryText, type MemoryItemState } from './items.js';
 import { workingSetKindBonus } from './kind-weights.js';
 
 const STATE_WEIGHT: Record<MemoryItemState, number> = {
@@ -90,6 +90,10 @@ function stalePenalty(item: ParsedMemoryItem, createdDays: number): number {
   if (item.text.toLowerCase().includes('status: resolved')) {
     penalty -= 1.6;
   }
+  // Superseded guidance is retired guidance: same decay push as resolved.
+  if (isSupersededMemoryText(item.text)) {
+    penalty -= 1.6;
+  }
 
   return penalty;
 }
@@ -135,13 +139,18 @@ export function deriveMemoryItemState(
   }
 
   const score = computeMemoryHotness(item, now);
-  if (score >= 7) {
-    return 'hot';
+  const tier: MemoryItemState = score >= 7 ? 'hot' : score >= 4.2 ? 'warm' : 'cold';
+
+  // FR-4: a superseded item derives one tier below what its score would grant,
+  // so refreshes AGREE with the transition-time demotion instead of flipping a
+  // hot-scoring predecessor straight back to hot — and reinforcement (touch
+  // raises the score) caps at warm rather than resurrecting retired guidance.
+  // Floor at cold: history stays retrievable, never re-archived.
+  if (isSupersededMemoryText(item.text)) {
+    return demoteMemoryState(tier);
   }
-  if (score >= 4.2) {
-    return 'warm';
-  }
-  return 'cold';
+
+  return tier;
 }
 
 function scopeBonus(item: ParsedMemoryItem, preferredScopeKey: string | null): number {

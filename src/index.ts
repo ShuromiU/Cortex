@@ -9,6 +9,7 @@ export { handleReadEvent, handleEditEvent, handleWriteEvent, handleCmdEvent, han
 export { redactCommand, redactSensitiveText, captureOutputTail, classifyCommand, extractTouchedFiles } from './capture/redact.js';
 export { consolidateLevel1, renderCompressed, getPendingConsolidation, writeSessionSummary, promoteSubagentNotes, mergeProjectState, type CompressedEvent } from './capture/consolidate.js';
 export { computeMemoryHotness, deriveMemoryItemState, refreshMemoryHotness, selectWorkingMemoryItems, type ScoredMemoryItem } from './memory/hotness.js';
+export { demoteMemoryState, isSupersededMemoryText } from './memory/items.js';
 export { extractMemoryReferences, type ExtractedMemoryReference, type MemoryReferenceType } from './memory/references.js';
 export { detectContradiction, type ContradictionEvidence } from './memory/conflict.js';
 // Scope

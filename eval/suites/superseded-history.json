@@ -1,0 +1,55 @@
+{
+  "_comment": "FR-4 superseded demotion. An active decision and its superseded predecessor share a subject; the predecessor's text carries `Status: superseded` exactly as buildNoteMemoryText projects it, state cold as the demotion floor leaves it. Locks the rendering half of the AC: the plain-topic fixture asserts the current decision wins top1 while the predecessor is reachable and labeled `(superseded)`, and the temporal fixture asserts an `old`/`history` query still reaches the predecessor's content. Scope of the gate, stated honestly: scenarios seed memory_items directly and never pass through insertNote, so the archived-vs-cold WRITE-path mapping is invisible here (the seeded state is taken as given) — that half is pinned by unit tests. What goes red without the feature is the `(superseded)` label needle, which the pre-1.4 renderer never emits. Timestamps are excluded from every needle because the scenario clock is generation-time. The two fixtures use different topics because findFixtureRegressions keys its baseline map on fixture.topic.",
+  "seed": {
+    "scope": { "type": "branch", "key": "eval/superseded" },
+    "focus": "queue engine",
+    "app_graph": {
+      "head_oid": "eval00000000000000000000000000000000000d",
+      "files": ["src/queue/engine.ts"]
+    },
+    "items": [
+      {
+        "id": "queue-current",
+        "kind": "note:decision",
+        "subject": "queue engine",
+        "text": "Decision: use kafka for the queue engine in src/queue/engine.ts.\nSubject: queue engine",
+        "state": "hot",
+        "importance": 2.5,
+        "age_days": 2
+      },
+      {
+        "id": "queue-superseded",
+        "kind": "note:decision",
+        "subject": "queue engine",
+        "text": "Decision: use rabbitmq for the queue engine.\nSubject: queue engine\nStatus: superseded",
+        "state": "cold",
+        "importance": 1.0,
+        "age_days": 40
+      },
+      {
+        "id": "queue-insight",
+        "kind": "note:insight",
+        "subject": "queue batching",
+        "text": "Insight: queue batching amortizes the broker round trip, so producers flush on a 50ms window.",
+        "state": "warm",
+        "importance": 1.8,
+        "access_count": 2,
+        "age_days": 5
+      }
+    ]
+  },
+  "fixtures": [
+    {
+      "topic": "queue engine",
+      "expected_top": "queue-current",
+      "allowed": ["queue-superseded"],
+      "expect_output_contains": ["use kafka", "use rabbitmq for the queue engine. (superseded)"]
+    },
+    {
+      "topic": "old queue engine history",
+      "expected_top": "queue-current",
+      "allowed": ["queue-superseded"],
+      "expect_output_contains": ["use rabbitmq for the queue engine. (superseded)"]
+    }
+  ]
+}

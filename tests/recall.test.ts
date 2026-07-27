@@ -72,19 +72,39 @@ describe('recall — finds notes matching topic', () => {
     );
   });
 
-  it('excludes superseded notes (only shows active and resolved)', () => {
+  it('ranks the active decision above its superseded predecessor and labels the old one', () => {
+    // Pre-1.4 the predecessor was archived and SQL-excluded — invisible, not
+    // merely cold. FR-4 demotes instead: history stays reachable, ranked
+    // below the current decision and labeled so it cannot read as live.
     const store = makeStore();
     const session = store.createSession();
-    // Insert a decision that gets superseded by a second one
-    store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'caching', content: 'use Redis' });
-    // This supersedes the first
-    store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'caching', content: 'use in-memory cache' });
+    store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'caching', content: 'use Redis for caching' });
+    store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'caching', content: 'use in-memory cache for caching' });
 
     const result = recall(store, 'caching');
-    // Only the active one (in-memory) should be in the result
     expect(result).toContain('in-memory cache');
-    // The superseded one should NOT appear
-    expect(result).not.toContain('use Redis');
+    expect(result).toContain('use Redis for caching');
+
+    const lines = result.split('\n');
+    const activeAt = lines.findIndex(line => line.includes('in-memory cache'));
+    const supersededAt = lines.findIndex(line => line.includes('use Redis for caching'));
+    expect(activeAt).toBeGreaterThan(-1);
+    expect(supersededAt).toBeGreaterThan(activeAt);
+    expect(lines[supersededAt]).toContain('(superseded)');
+  });
+
+  it('reaches superseded history through temporal queries', () => {
+    const store = makeStore();
+    const session = store.createSession();
+    store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'caching', content: 'use Redis for caching' });
+    store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'caching', content: 'use in-memory cache for caching' });
+
+    // AC #1's examples: `old`, `history`, `what did we decide before`. None of
+    // them needs a ranking flip — the claim is retrievability.
+    for (const topic of ['old caching decisions', 'caching history', 'what did we decide before about caching']) {
+      const result = recall(store, topic);
+      expect(result, `topic: ${topic}`).toContain('use Redis for caching');
+    }
   });
 
   it('includes resolved notes with lower relevance score', () => {

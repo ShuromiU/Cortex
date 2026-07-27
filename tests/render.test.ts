@@ -256,6 +256,36 @@ describe('isContested — false-positive guards', () => {
   });
 });
 
+// ── (superseded) label (FR-4, Story 1.4) ───────────────────────────────
+
+describe('renderMemoryLine — superseded label', () => {
+  function supersededItem(overrides: Partial<ParsedMemoryItem> = {}): ParsedMemoryItem {
+    const base = makeItem(overrides);
+    return { ...base, text: `${base.text}\nSubject: ${base.subject}\nStatus: superseded` };
+  }
+
+  it('labels a superseded note', () => {
+    // Superseded items are retrievable now (FR-4); unlabeled, a retired
+    // decision reads as live guidance — the exact failure demotion exists
+    // to stop.
+    expect(renderMemoryLine(supersededItem())).toContain('(superseded)');
+  });
+
+  it('leaves active and resolved notes unlabeled and unchanged', () => {
+    expect(renderMemoryLine(makeItem())).not.toContain('(superseded)');
+    const resolved = makeItem({ text: 'decision: x\nStatus: resolved' });
+    expect(renderMemoryLine(resolved)).toContain('(resolved)');
+    expect(renderMemoryLine(resolved)).not.toContain('(superseded)');
+  });
+
+  it('is line-exact — content that mentions the status does not label', () => {
+    const item = makeItem({
+      text: 'decision: the tracker shows status: superseded for the old epic',
+    });
+    expect(renderMemoryLine(item)).not.toContain('(superseded)');
+  });
+});
+
 // ── renderedAlternatives (FR-3, Story 1.3) ─────────────────────────────
 
 describe('renderedAlternatives', () => {

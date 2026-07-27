@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { CortexStore } from '../db/store.js';
+import { isSupersededMemoryText } from '../memory/items.js';
 import { renderMemoryLine } from './render.js';
 import { estimateTokens, logRetrieval, retrieveMemory } from './retrieval.js';
 
@@ -142,6 +143,13 @@ export function reflectMemory(store: CortexStore, options: ReflexOptions): strin
       return false;
     }
     if (!LOAD_BEARING_KINDS.has(item.kind)) {
+      return false;
+    }
+    // A superseded decision demotes to warm at best (FR-4), which is inside
+    // ACTIVE_REFLEX_STATES — resolved never needed this check because it lands
+    // cold. The whisper injects one item as settled context; a retired
+    // decision is the one thing it must never be.
+    if (isSupersededMemoryText(item.text)) {
       return false;
     }
     if (item.retrieval_score < HIGH_CONFIDENCE_SCORE) {

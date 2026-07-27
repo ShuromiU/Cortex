@@ -1,0 +1,212 @@
+{
+  "quality": {
+    "fixtures": [
+      {
+        "topic": "queue engine",
+        "expected_top": "queue-current",
+        "top_result_id": "queue-current",
+        "top1_hit": true,
+        "recall_at_3": 1,
+        "noise_count": 0,
+        "stale_count": 0,
+        "output": {
+          "chars": 381,
+          "est_tokens": 96,
+          "preview": "Most relevant — Decision [queue engine] (2d ago, refs OK)\nDecision [2026-07-25 18:57Z]: [queue engine] use kafka for the queue engine in src/queue/engine.ts.\nDecision [2026-06-17 18:57Z]: [queue engine] use rabbitmq for the queue engine. (superseded)\nInsight [2026-07-22 18:57Z]: [queue batching] queue batching amortize"
+        },
+        "token_budget": {
+          "max_tokens": null,
+          "actual_tokens": 96,
+          "passed": true
+        },
+        "output_assertions": {
+          "contains_missed": [],
+          "excludes_violated": [],
+          "passed": true
+        },
+        "score_breakdown": [
+          {
+            "id": "queue-current",
+            "subject": "queue engine",
+            "text_preview": "Decision: use kafka for the queue engine in src/queue/engine.ts.\nSubject: queue engine",
+            "scores": {
+              "retrieval_score": 49.99999652722962,
+              "lexical_score": 23.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 2,
+              "exact_phrase": true,
+              "fts_rank": -0.000003998182644252613
+            }
+          },
+          {
+            "id": "queue-superseded",
+            "subject": "queue engine",
+            "text_preview": "Decision: use rabbitmq for the queue engine.\nSubject: queue engine\nStatus: superseded",
+            "scores": {
+              "retrieval_score": 39.29999652205819,
+              "lexical_score": 23.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 0.2,
+              "hotness_bonus": 0.2,
+              "access_bonus": 0,
+              "token_hits": 2,
+              "exact_phrase": true,
+              "fts_rank": -0.000004004136504653568
+            }
+          },
+          {
+            "id": "queue-insight",
+            "subject": "queue batching",
+            "text_preview": "Insight: queue batching amortizes the broker round trip, so producers flush on a 50ms window.",
+            "scores": {
+              "retrieval_score": 29.299998312284323,
+              "lexical_score": 9,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0.3,
+              "token_hits": 1,
+              "exact_phrase": false,
+              "fts_rank": -0.0000019430563625798957
+            }
+          }
+        ],
+        "passed": true
+      },
+      {
+        "topic": "old queue engine history",
+        "expected_top": "queue-current",
+        "top_result_id": "queue-current",
+        "top1_hit": true,
+        "recall_at_3": 1,
+        "noise_count": 0,
+        "stale_count": 0,
+        "output": {
+          "chars": 381,
+          "est_tokens": 96,
+          "preview": "Most relevant — Decision [queue engine] (2d ago, refs OK)\nDecision [2026-07-25 18:57Z]: [queue engine] use kafka for the queue engine in src/queue/engine.ts.\nDecision [2026-06-17 18:57Z]: [queue engine] use rabbitmq for the queue engine. (superseded)\nInsight [2026-07-22 18:57Z]: [queue batching] queue batching amortize"
+        },
+        "token_budget": {
+          "max_tokens": null,
+          "actual_tokens": 96,
+          "passed": true
+        },
+        "output_assertions": {
+          "contains_missed": [],
+          "excludes_violated": [],
+          "passed": true
+        },
+        "score_breakdown": [
+          {
+            "id": "queue-current",
+            "subject": "queue engine",
+            "text_preview": "Decision: use kafka for the queue engine in src/queue/engine.ts.\nSubject: queue engine",
+            "scores": {
+              "retrieval_score": 43.13874761828091,
+              "lexical_score": 15.5,
+              "temporal_bonus": 0.9887510910512982,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0.15,
+              "token_hits": 2,
+              "exact_phrase": false,
+              "fts_rank": -0.000003998182644252613
+            }
+          },
+          {
+            "id": "queue-superseded",
+            "subject": "queue engine",
+            "text_preview": "Decision: use rabbitmq for the queue engine.\nSubject: queue engine\nStatus: superseded",
+            "scores": {
+              "retrieval_score": 34.792211384378646,
+              "lexical_score": 15.5,
+              "temporal_bonus": 3.3422148623204624,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 0.2,
+              "hotness_bonus": 0.2,
+              "access_bonus": 0.15,
+              "token_hits": 2,
+              "exact_phrase": false,
+              "fts_rank": -0.000004004136504653568
+            }
+          },
+          {
+            "id": "queue-insight",
+            "subject": "queue batching",
+            "text_preview": "Insight: queue batching amortizes the broker round trip, so producers flush on a 50ms window.",
+            "scores": {
+              "retrieval_score": 29.06258185021457,
+              "lexical_score": 7,
+              "temporal_bonus": 1.6125835379302493,
+              "scope_bonus": 6,
+              "kind_bonus": 2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0.44999999999999996,
+              "token_hits": 1,
+              "exact_phrase": false,
+              "fts_rank": -0.0000019430563625798957
+            }
+          }
+        ],
+        "passed": true
+      }
+    ],
+    "top1_hit": 1,
+    "recall_at_3": 1,
+    "noise_count": 0,
+    "stale_count": 0,
+    "output_tokens": 192
+  },
+  "generated_at": "2026-07-27T18:57:40.701Z",
+  "schema_version": 4,
+  "tables": {
+    "sessions": 1,
+    "events": 0,
+    "notes": 0,
+    "state": 0,
+    "token_ledger": 0,
+    "command_runs": 0,
+    "episodes": 0,
+    "branch_snapshots": 0,
+    "project_snapshots": 0,
+    "memory_items": 3,
+    "memory_item_semantics": 0,
+    "current_app_graphs": 1,
+    "memory_references": 1,
+    "retrieval_log": 2,
+    "file_renames": 0
+  },
+  "header": {
+    "chars": 832,
+    "est_tokens": 208,
+    "preview": "Cortex: queue engine | 1 session on project\nHot: Decision [2026-07-25 18:57Z]: [queue engine] use kafka for the queue engine in src/queue/engine.ts. | Insight [2026-07-22 18:57Z]: [queue batching] queue batching amortizes the broker round trip, so producers fl…\nCortex is ambient: prior context may surface automatically"
+  },
+  "full_state": {
+    "chars": 256,
+    "est_tokens": 64,
+    "preview": "Decisions:\n- Decision [2026-07-25 18:57Z]: [queue engine] use kafka for the queue engine in src/queue/engine.ts.\n\nInsights:\n- Insight [2026-07-22 18:57Z]: [queue batching] queue batching amortizes the broker round trip, so producers flush on a 50ms window."
+  },
+  "topics": [
+    {
+      "topic": "queue engine",
+      "output": {
+        "chars": 381,
+        "est_tokens": 96,
+        "preview": "Most relevant — Decision [queue engine] (2d ago, refs OK)\nDecision [2026-07-25 18:57Z]: [queue engine] use kafka for the queue engine in src/queue/engine.ts.\nDecision [2026-06-17 18:57Z]: [queue engine] use rabbitmq for the queue engine. (superseded)\nInsight [2026-07-22 18:57Z]: [queue batching] queue batching amortize"
+      }
+    }
+  ]
+}

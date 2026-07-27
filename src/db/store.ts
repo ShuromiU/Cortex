@@ -10,6 +10,7 @@ import {
   commandRunState,
   episodeImportance,
   episodeState,
+  demoteMemoryState,
   memoryStateForNote,
   noteImportance,
   type MemoryItemState,
@@ -767,6 +768,17 @@ export class CortexStore {
       return;
     }
 
+    // A superseded note's tier is set exactly once, at the status transition
+    // (FR-4). Re-syncs happen — markConflict, clearing a contest — and if each
+    // re-derived the state here, the tier would step downward on every one.
+    // Preserve the existing item's state instead; `memoryStateForNote` is only
+    // the landing for a projection with no prior item (backfill, fresh seed).
+    // This also keeps pre-1.4 rows archived: forward-only, no resurrection.
+    const existing =
+      note.status === 'superseded'
+        ? this.getMemoryItemBySource('notes', note.id)
+        : undefined;
+
     this.upsertMemoryItem({
       id: `notes:${note.id}`,
       sessionId: note.session_id,
@@ -777,10 +789,26 @@ export class CortexStore {
       sourceId: note.id,
       subject: note.subject,
       text: buildNoteMemoryText(note),
-      state: memoryStateForNote(note.kind, note.status),
+      state: existing ? existing.state : memoryStateForNote(note.kind, note.status),
       importance: noteImportance(note.kind),
       createdAt: note.timestamp,
     });
+  }
+
+  /**
+   * The FR-4 demotion step: one tier colder, exactly once, at the moment a
+   * note becomes superseded. Kept out of `syncMemoryItemForNote` so re-syncs
+   * cannot repeat it.
+   */
+  private demoteMemoryItemForNote(noteId: string): void {
+    const item = this.getMemoryItemBySource('notes', noteId);
+    if (!item) {
+      return;
+    }
+    const demoted = demoteMemoryState(item.state);
+    if (demoted !== item.state) {
+      this.updateMemoryItemStates([{ id: item.id, state: demoted }]);
+    }
   }
 
   private syncMemoryItemForCommandRun(commandRunId: string): void {
@@ -1548,6 +1576,9 @@ export class CortexStore {
 
       for (const supersededId of supersededIds) {
         this.syncMemoryItemForNote(supersededId);
+        // The status flip above is the transition, so the demotion happens
+        // here and nowhere downstream (FR-4).
+        this.demoteMemoryItemForNote(supersededId);
       }
       this.syncMemoryItemForNote(id);
       return { supersededIds, conflicts };
@@ -1641,10 +1672,18 @@ export class CortexStore {
   }
 
   updateNoteStatus(id: string, status: 'active' | 'superseded' | 'resolved'): void {
+    // Transition-aware: a manual supersede (cortex_resolve) demotes exactly
+    // like the automatic one, but writing 'superseded' onto an already-
+    // superseded note is a re-assertion, not a transition, and must not step
+    // the tier again (FR-4).
+    const previous = this.getNote(id)?.status;
     this.db
       .prepare('UPDATE notes SET status = ? WHERE id = ?')
       .run(status, id);
     this.syncMemoryItemForNote(id);
+    if (status === 'superseded' && previous !== 'superseded') {
+      this.demoteMemoryItemForNote(id);
+    }
   }
 
   findActiveNoteBySubject(subject: string): ParsedNote | undefined {
@@ -2424,6 +2463,11 @@ export class CortexStore {
                WHERE memory_item_id = memory_items.id AND status = 'missing'
              ) THEN state
              WHEN lower(text) LIKE '%status: resolved%' THEN 'cold'
+             -- Superseded items are never reheated by access (FR-4): the state
+             -- is preserved here and the derive layer caps reinforcement at
+             -- warm. LIKE is substring, not line-exact — same pre-existing
+             -- divergence the resolved branch above carries.
+             WHEN lower(text) LIKE '%status: superseded%' THEN state
              ELSE 'hot'
            END
        WHERE id = ?`,

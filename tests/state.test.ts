@@ -265,15 +265,53 @@ describe('buildFullState - notes and events', () => {
     expect(state).toContain('[contested]');
   });
 
-  it('does not render superseded notes', () => {
-    const store = makeStore();
+  it('an aged superseded predecessor decays out of the working sections', () => {
+    // FR-4's durable rule lives in the derive layer: a superseded item sits one
+    // tier below what its score would grant. Aged past the recency bonuses the
+    // score is sub-warm, so it derives cold — and the working set only admits
+    // cold episodes/snapshots, so the default state leads with current
+    // guidance while the old decision stays reachable through recall.
+    const db = createTestDb();
+    const store = new CortexStore(db);
     const session = store.createSession();
-    store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'auth', content: 'use sessions' });
+    const first = store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'auth', content: 'use sessions' });
     store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'auth', content: 'use JWT' });
+
+    const aged = new Date(Date.now() - 120 * 24 * 3600 * 1000).toISOString();
+    db.prepare('UPDATE memory_items SET created_at = ? WHERE source_id = ?').run(aged, first.id);
 
     const state = buildFullState(store);
     expect(state).toContain('use JWT');
     expect(state).not.toContain('use sessions');
+  });
+
+  it('labels a warm superseded decision that ranks into the working set', () => {
+    // A hot predecessor demotes to warm, which the working set does admit.
+    // Showing it is the graduated model working; showing it UNLABELED would
+    // present retired guidance as live.
+    const store = makeStore();
+    const session = store.createSession();
+    const first = store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'auth',
+      content: 'use sessions for auth',
+    });
+    store.touchMemoryItems([`notes:${first.id}`]); // heat to hot pre-supersede
+    store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'auth', content: 'use JWT for auth' });
+
+    // Pre-assert the demotion landed warm, so the fixture is genuinely the
+    // working-set-eligible case rather than the filtered cold one.
+    const item = store.getMemoryItemBySource('notes', first.id)!;
+    expect(item.state).toBe('warm');
+
+    const state = buildFullState(store);
+    expect(state).toContain('use JWT for auth');
+    const supersededLine = state
+      .split('\n')
+      .find(line => line.includes('use sessions for auth'));
+    expect(supersededLine).toBeDefined();
+    expect(supersededLine).toContain('(superseded)');
   });
 
   it('keeps unresolved current blockers ahead of resolved stale blockers', () => {

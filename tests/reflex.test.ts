@@ -7,6 +7,7 @@ import { applySchema, initializeMeta } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import { handleCmdEvent } from '../src/capture/hooks.js';
 import { reflectMemory } from '../src/query/reflex.js';
+import { retrieveMemory } from '../src/query/retrieval.js';
 
 function createTestStore(): { store: CortexStore; sessionId: string } {
   const db = new Database(':memory:');
@@ -180,5 +181,52 @@ describe('reflectMemory', () => {
     });
 
     expect(result).toBe('');
+  });
+});
+
+// ── Superseded exclusion (FR-4, Story 1.4) ─────────────────────────────
+
+describe('reflectMemory — superseded items', () => {
+  it('never whispers a superseded decision, even one that clears every other gate', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-06-06T05:18:24.000Z'));
+      const { store, sessionId } = createTestStore();
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-'));
+
+      const note = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'src/db/store.ts',
+        content: 'Keep memory_items as the canonical retrieval layer in src/db/store.ts.',
+      });
+      // Heat it so the post-supersede tier is warm — inside
+      // ACTIVE_REFLEX_STATES, where resolved (cold) never reaches. Then
+      // retire it with no successor, so it stays the only candidate.
+      store.touchMemoryItems([`notes:${note.id}`]);
+      store.updateNoteStatus(note.id, 'superseded');
+
+      // Pre-assert the candidate clears every gate EXCEPT the superseded
+      // filter: right state, right kind, high enough score, anchor in text.
+      // If any of this drifts, the test fails loudly instead of passing
+      // because the candidate never qualified at all.
+      const item = store.getMemoryItemBySource('notes', note.id)!;
+      expect(item.state).toBe('warm');
+      const ranked = retrieveMemory(store, 'src/db/store.ts', 6).results.find(
+        candidate => candidate.source_id === note.id,
+      )!;
+      expect(ranked.retrieval_score).toBeGreaterThanOrEqual(9);
+      expect(ranked.scope_bonus).toBeGreaterThanOrEqual(2);
+
+      const result = reflectMemory(store, {
+        event: 'edit',
+        file: 'src/db/store.ts',
+        sessionId,
+        stateDir,
+      });
+      expect(result).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

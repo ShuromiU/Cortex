@@ -15,10 +15,11 @@ function pushLine(lines: string[], label: string, value?: string | null): void {
 }
 
 export function memoryStateForNote(kind: string, status: string): MemoryItemState {
-  if (status === 'superseded') {
-    return 'archived';
-  }
-
+  // 'cold', not 'archived' (FR-4): archived is excluded from retrieval by SQL,
+  // so an archived predecessor is not merely demoted — it is invisible, and
+  // "what did we decide before" cannot reach it. This is the fresh-projection
+  // landing (backfill, or a sync with no pre-existing item); a live supersede
+  // demotes the existing item one tier at the transition site instead.
   if (status !== 'active') {
     return 'cold';
   }
@@ -28,6 +29,40 @@ export function memoryStateForNote(kind: string, status: string): MemoryItemStat
   }
 
   return 'warm';
+}
+
+/**
+ * One tier colder (FR-4): hot→warm, warm→cold, floor at cold. The floor is the
+ * point — demoting into `archived` would silently re-create the invisibility
+ * this story removes. Pinned is explicit user intent and is never auto-demoted;
+ * archived rows (pre-1.4 supersedes) stay where they were, forward-only.
+ */
+export function demoteMemoryState(state: MemoryItemState): MemoryItemState {
+  switch (state) {
+    case 'hot':
+      return 'warm';
+    case 'warm':
+    case 'cold':
+      return 'cold';
+    default:
+      return state;
+  }
+}
+
+/**
+ * Whether projected note text carries the `Status: superseded` trailer line.
+ *
+ * Line-exact, matching `isContested`'s discipline: a note whose content merely
+ * *mentions* the status must not read as retired. Lives here rather than in
+ * `query/render.ts` because `memory/hotness.ts` needs it too, and the layer
+ * direction only permits `query/ → memory/`. The `touchMemoryItems` SQL CASE
+ * necessarily stays a substring LIKE — same pre-existing divergence the
+ * resolved branch has.
+ */
+export function isSupersededMemoryText(text: string): boolean {
+  return text
+    .split('\n')
+    .some(line => line.trim().toLowerCase() === 'status: superseded');
 }
 
 export function noteImportance(kind: string): number {

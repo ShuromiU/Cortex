@@ -1283,8 +1283,10 @@ describe('CortexStore — contradiction detection on insertNote', () => {
   });
 
   it('keeps the contested prior out of the archived tier', () => {
-    // The point of the veto: `memoryStateForNote` maps 'superseded' to
-    // 'archived', which would bury one side of the contest at write time.
+    // The point of the veto when it was written: superseding a contested prior
+    // buried one side of the contest at write time (pre-1.4, superseded mapped
+    // straight to 'archived'). FR-4 demotes instead of archiving now, but the
+    // veto still matters — a contested prior must not even *demote* (AD-17).
     const prior = store.insertNote({
       sessionId,
       kind: 'decision',
@@ -1317,7 +1319,9 @@ describe('CortexStore — contradiction detection on insertNote', () => {
 
     expect(next.conflicts).toBeUndefined();
     expect(store.getNote(prior.id)!.status).toBe('superseded');
-    expect(memoryStateFor(prior.id)).toBe('archived');
+    // FR-4: demoted one tier (a fresh decision is warm → cold), never archived —
+    // archived is SQL-excluded from retrieval, and history must stay reachable.
+    expect(memoryStateFor(prior.id)).toBe('cold');
   });
 
   it('detects a non-decision note contradicting a prior decision', () => {
@@ -1582,7 +1586,8 @@ describe('CortexStore — the AD-17 veto holds over time', () => {
       content: 'use mysql for the primary store',
     });
     expect(store.getNote(first.id)!.status).toBe('superseded');
-    expect(memoryStateFor(first.id)).toBe('archived');
+    // FR-4: demoted (fresh warm decision -> cold), no longer archived.
+    expect(memoryStateFor(first.id)).toBe('cold');
   });
 
   it('uses an IMMEDIATE transaction, not the deferred default', () => {
@@ -1962,5 +1967,158 @@ describe('CortexStore — one lookup per write, every kind', () => {
       });
     });
     expect(count).toBe(1);
+  });
+});
+
+// ── Auto-demotion on supersede (FR-4, Story 1.4) ───────────────────────
+
+describe('CortexStore — auto-demotion on supersede', () => {
+  let db: Database.Database;
+  let store: CortexStore;
+  let sessionId: string;
+
+  beforeEach(() => {
+    db = createTestDb();
+    store = new CortexStore(db);
+    sessionId = store.createSession({ scopeKey: 'branch:/repo:main' }).id;
+  });
+
+  function itemFor(noteId: string): { id: string; state: string } {
+    const row = db
+      .prepare('SELECT id, state FROM memory_items WHERE source_id = ? AND source_table = ?')
+      .get(noteId, 'notes') as { id: string; state: string } | undefined;
+    expect(row).toBeDefined();
+    return row!;
+  }
+
+  function heatToHot(noteId: string): void {
+    store.touchMemoryItems([itemFor(noteId).id]);
+    expect(itemFor(noteId).state).toBe('hot');
+  }
+
+  function decide(subject: string, content: string) {
+    return store.insertNote({ sessionId, kind: 'decision', subject, content });
+  }
+
+  it('demotes a hot predecessor to warm — the AC #1 case', () => {
+    const first = decide('auth strategy', 'use OIDC for the auth strategy');
+    heatToHot(first.id); // pre-assert: genuinely hot before the supersede
+
+    decide('auth strategy', 'use SAML for the auth strategy via the same gateway');
+
+    expect(store.getNote(first.id)!.status).toBe('superseded');
+    expect(itemFor(first.id).state).toBe('warm');
+  });
+
+  it('demotes a warm predecessor to cold', () => {
+    const first = decide('auth strategy', 'use OIDC for the auth strategy');
+    expect(itemFor(first.id).state).toBe('warm'); // fresh decisions land warm
+
+    decide('auth strategy', 'use SAML for the auth strategy via the same gateway');
+    expect(itemFor(first.id).state).toBe('cold');
+  });
+
+  it('floors at cold — a cold predecessor stays cold, never archived', () => {
+    const first = decide('auth strategy', 'use OIDC for the auth strategy');
+    db.prepare("UPDATE memory_items SET state = 'cold' WHERE source_id = ?").run(first.id);
+
+    decide('auth strategy', 'use SAML for the auth strategy via the same gateway');
+    expect(itemFor(first.id).state).toBe('cold');
+  });
+
+  it('the projected text carries the superseded status line for downstream sniffs', () => {
+    const first = decide('auth strategy', 'use OIDC for the auth strategy');
+    decide('auth strategy', 'use SAML for the auth strategy via the same gateway');
+
+    const text = db
+      .prepare('SELECT text FROM memory_items WHERE source_id = ?')
+      .get(first.id) as { text: string };
+    expect(text.text.split('\n')).toContain('Status: superseded');
+  });
+
+  it('demotes exactly once — re-syncs and repeated status writes do not step the tier again', () => {
+    const first = decide('auth strategy', 'use OIDC for the auth strategy');
+    heatToHot(first.id);
+    decide('auth strategy', 'use SAML for the auth strategy via the same gateway');
+    expect(itemFor(first.id).state).toBe('warm');
+
+    // Same-status write is not a transition; it must not demote again.
+    store.updateNoteStatus(first.id, 'superseded');
+    expect(itemFor(first.id).state).toBe('warm');
+
+    // markConflict re-syncs the item; the sync must preserve, not re-derive.
+    store.markConflict(first.id);
+    expect(itemFor(first.id).state).toBe('warm');
+    store.clearConflict(first.id);
+    expect(itemFor(first.id).state).toBe('warm');
+  });
+
+  it('manual supersede through updateNoteStatus demotes identically', () => {
+    const note = decide('auth strategy', 'use OIDC for the auth strategy');
+    heatToHot(note.id);
+
+    store.updateNoteStatus(note.id, 'superseded');
+    expect(itemFor(note.id).state).toBe('warm');
+  });
+
+  it('leaves the resolved path exactly as it was — resolved lands cold', () => {
+    const note = decide('auth strategy', 'use OIDC for the auth strategy');
+    heatToHot(note.id);
+
+    store.updateNoteStatus(note.id, 'resolved');
+    expect(itemFor(note.id).state).toBe('cold');
+  });
+
+  it('AC #2 end to end: demotion pauses during a contest and resumes after resolve', () => {
+    const a = decide('spool flush', 'flush the spool at turn end');
+    const b = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'do not flush the spool at turn end',
+    });
+    expect(b.conflicts).toHaveLength(1);
+    const stateA = itemFor(a.id).state;
+    const stateB = itemFor(b.id).state;
+
+    // A third, non-contradicting decision: veto holds — statuses AND states.
+    const third = decide('spool flush', 'flush the spool when the size threshold is crossed');
+    expect(third.conflicts).toBeUndefined();
+    expect(store.getNote(a.id)!.status).toBe('active');
+    expect(store.getNote(b.id)!.status).toBe('active');
+    expect(itemFor(a.id).state).toBe(stateA);
+    expect(itemFor(b.id).state).toBe(stateB);
+
+    // Close the contest the way cortex_resolve does: retract the negated side,
+    // clear the subject's conflict flags. The survivor is A ("flush at turn
+    // end") — retracting A instead would leave "do not flush" live, and any
+    // later "flush …" decision would legitimately open a NEW contest with it
+    // and be vetoed again, which is the detector working, not demotion pausing.
+    store.updateNoteStatus(b.id, 'resolved');
+    store.clearConflictsForSubject('spool flush', 'branch:/repo:main');
+    expect(store.getNote(a.id)!.conflict).toBe(false);
+
+    // Demotion resumes: a same-polarity refinement supersedes AND demotes the
+    // survivor (and the third decision) instead of being vetoed.
+    const aBefore = itemFor(a.id).state;
+    decide('spool flush', 'flush the spool at both turn end and the size threshold');
+    expect(store.getNote(a.id)!.status).toBe('superseded');
+    const expected = aBefore === 'hot' ? 'warm' : 'cold';
+    expect(itemFor(a.id).state).toBe(expected);
+  });
+
+  it('AC #3: a decision write never demotes a blocker on the same subject', () => {
+    const blocker = store.insertNote({
+      sessionId,
+      kind: 'blocker',
+      subject: 'auth strategy',
+      content: 'auth strategy blocked on the vendor sandbox account',
+    });
+    expect(itemFor(blocker.id).state).toBe('hot'); // blockers land hot
+
+    decide('auth strategy', 'use OIDC for the auth strategy');
+
+    expect(store.getNote(blocker.id)!.status).toBe('active');
+    expect(itemFor(blocker.id).state).toBe('hot');
   });
 });

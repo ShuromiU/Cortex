@@ -1,6 +1,7 @@
 import type { BranchSnapshotRow, CortexStore, ParsedMemoryItem } from '../db/store.js';
 import { consolidateLevel1, renderCompressed } from '../capture/consolidate.js';
 import { selectWorkingMemoryItems } from '../memory/hotness.js';
+import { isSupersededMemoryText } from '../memory/items.js';
 import { deriveProjectScopeKey } from '../scope/keys.js';
 import { getPreferredScope } from './scope.js';
 import { validateMemoryReferences } from './reference-validation.js';
@@ -259,9 +260,12 @@ function renderNoteBullet(item: ParsedMemoryItem): string {
   const subject = item.subject ? `[${item.subject}] ` : '';
   const contested = isContested(item) ? CONTESTED_MARKER : '';
   const resolved = item.text.toLowerCase().includes('status: resolved') ? ' (resolved)' : '';
+  // A warm superseded decision can rank into the working set (FR-4 demotes to
+  // warm at best); unlabeled it would read as live guidance.
+  const superseded = isSupersededMemoryText(item.text) ? ' (superseded)' : '';
   const timestamp = formatMemoryTimestamp(item.created_at);
   const timestampPart = timestamp ? ` [${timestamp}]` : '';
-  return `- ${humanizeMemoryKind(item.kind)}${timestampPart}: ${subject}${extractNoteContent(item)}${contested}${resolved}`;
+  return `- ${humanizeMemoryKind(item.kind)}${timestampPart}: ${subject}${extractNoteContent(item)}${contested}${superseded}${resolved}`;
 }
 
 function renderWorkingNotes(items: ParsedMemoryItem[]): string[] {

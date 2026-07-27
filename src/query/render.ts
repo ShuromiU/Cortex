@@ -1,4 +1,5 @@
 import type { ParsedMemoryItem } from '../db/store.js';
+import { isSupersededMemoryText } from '../memory/items.js';
 import type { MemoryReferenceValidation } from './reference-validation.js';
 
 function titleCase(value: string): string {
@@ -345,10 +346,13 @@ export function renderMemoryLine(item: ParsedMemoryItem, maxLines = 3): string {
       : firstLine;
     const subject = item.subject ? `[${item.subject}] ` : '';
     const contested = isContested(item) ? CONTESTED_MARKER : '';
+    // Superseded items are retrievable since FR-4; a status is exactly one of
+    // active/resolved/superseded, so the two labels share a slot.
     const resolved = item.text.toLowerCase().includes('status: resolved') ? ' (resolved)' : '';
+    const superseded = isSupersededMemoryText(item.text) ? ' (superseded)' : '';
     const timestamp = formatMemoryTimestamp(item.created_at);
     const timestampPart = timestamp ? ` [${timestamp}]` : '';
-    return `${label}${timestampPart}: ${subject}${content}${contested}${resolved}${renderReferenceLabel(item)}`;
+    return `${label}${timestampPart}: ${subject}${content}${contested}${superseded}${resolved}${renderReferenceLabel(item)}`;
   }
 
   if (item.kind === 'session_state' || item.kind === 'episode:session_summary') {
