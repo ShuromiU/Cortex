@@ -4,7 +4,7 @@ baseline_commit: 51817893da2d09659453ee6465512c660a826ddc
 
 # Story 1.1: Detect contradictions at note write time
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 

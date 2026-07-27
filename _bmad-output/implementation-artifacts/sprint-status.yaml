@@ -51,7 +51,7 @@
 # measurable on arrival, and Epic 5 depends on Epic 0's session identity fix.
 
 generated: 2026-07-24
-last_updated: 2026-07-25
+last_updated: 2026-07-27
 project: cortex
 project_key: NOKEY
 tracking_system: file-system
@@ -72,7 +72,7 @@ development_status:
   # caused it. Gate last, and the accumulated drift arrives as one red build with
   # no way to tell which change bought what.
   epic-1: in-progress
-  1-1-detect-contradictions-at-note-write-time: review
+  1-1-detect-contradictions-at-note-write-time: done
   1-2-render-contested-items-in-retrieval: backlog
   1-3-surface-rejected-alternatives-at-recall: backlog
   1-4-auto-demote-superseded-decisions-without-resolving-contests: backlog
