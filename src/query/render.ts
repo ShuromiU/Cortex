@@ -150,8 +150,47 @@ export function groupContestedWithinKind<T extends ParsedMemoryItem>(items: T[])
  */
 export const ALREADY_REJECTED_PREFIX = '  already rejected: ';
 
-/** How `buildNoteMemoryText` writes the alternatives array into item text. */
-const ALTERNATIVES_LINE_PREFIX = 'alternatives: ';
+/** Payload cap, so the whole line stays inside `renderMemorySnippet`'s 260. */
+const MAX_ALTERNATIVES_CHARS = 240;
+
+/**
+ * The trailer `buildNoteMemoryText` appends after a note's content, in the
+ * order it writes them. Each is optional; the order never varies.
+ */
+const NOTE_TRAILER_LABELS = ['Subject: ', 'Alternatives: ', 'Conflict: ', 'Status: '];
+
+/**
+ * The lines `buildNoteMemoryText` appended, separated from free-form content.
+ *
+ * Note content is a free-form string that may contain newlines, so `text` is
+ * content lines followed by the trailer with nothing marking the boundary.
+ * Walking back from the end and requiring the labels to appear in their
+ * canonical order recovers it: a real `Alternatives:` line always sits *after*
+ * `Subject:`, while one typed into the content necessarily sits *before* it.
+ * That single ordering fact is what separates a written rejection list from a
+ * sentence about one, and it needs no schema change to exploit.
+ *
+ * Matching is exact-case because `buildNoteMemoryText` only ever emits these
+ * literals. Lowercasing would admit `ALTERNATIVES:` shouted in a log tail
+ * without ever matching something the writer produces.
+ */
+function noteTrailerLines(text: string): string[] {
+  const lines = text.split('\n');
+  const trailer: string[] = [];
+  let maxLabel = NOTE_TRAILER_LABELS.length - 1;
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!.trim();
+    const label = NOTE_TRAILER_LABELS.findIndex(candidate => line.startsWith(candidate));
+    if (label < 0 || label > maxLabel) {
+      break;
+    }
+    maxLabel = label;
+    trailer.unshift(line);
+  }
+
+  return trailer;
+}
 
 /**
  * The `already rejected:` line for an item, or null when it carries none.
@@ -171,33 +210,53 @@ const ALTERNATIVES_LINE_PREFIX = 'alternatives: ';
  * **Line-exact, never a substring.** Three locked eval suites seed decision text
  * whose *content* contains the word mid-sentence — "… after renewal.
  * Alternatives: client cookie rotation rejected …". A substring match renders
- * those alternatives a second time and pushes `output_tokens` positive on half
- * the gate at once.
+ * those alternatives a second time and pushes `output_tokens` positive on two
+ * of them at once.
  *
- * **Last match, not first.** Note content is free-form and may contain newlines,
- * so a content line can itself read `Alternatives: …`. The projected line always
- * follows the content and `Subject:`, so the last match is right whenever a real
- * one exists and no worse when none does. A note whose content *ends* with such
- * a line still false-fires; that is unfixable without the column.
+ * **Trailer-only, and the first one there.** A line-exact match anywhere in the
+ * text is not enough: a note whose *content* contains its own `Alternatives:`
+ * line fabricates a rejection list for a note whose column is `NULL`, and
+ * nothing could ever clear it. `noteTrailerLines` restricts the search to the
+ * lines the projection actually appended. Taking the first match inside that
+ * trailer — rather than the last — matters because an alternative containing a
+ * newline splits into extra `Alternatives:` lines, and the *later* ones are
+ * attacker-controlled content that would otherwise replace the real list
+ * wholesale rather than merely truncating it.
+ *
+ * One residual case survives and is bounded: a content line landing *last*,
+ * with no trailer after it, is byte-identical to what a subject-less
+ * `note:insight` legitimately projects. It is not separable from the text alone.
+ * It does not reach a `decision`, `intent`, `blocker` or `focus` note, because
+ * `insertNote` requires a subject for those and the `Subject:` line therefore
+ * always lands after the content — which is exactly the ordering this scan
+ * keys on.
  */
 export function renderedAlternatives(item: ParsedMemoryItem): string | null {
   if (!item.kind.startsWith('note:')) {
     return null;
   }
 
-  let alternatives = '';
-  for (const line of item.text.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed.toLowerCase().startsWith(ALTERNATIVES_LINE_PREFIX)) {
-      alternatives = trimmed.slice(ALTERNATIVES_LINE_PREFIX.length).trim();
-    }
+  const prefix = 'Alternatives: ';
+  const line = noteTrailerLines(item.text).find(candidate => candidate.startsWith(prefix));
+  if (line === undefined) {
+    return null;
   }
 
+  const alternatives = line.slice(prefix.length).trim();
   if (alternatives.length === 0) {
     return null;
   }
 
-  return `${ALREADY_REJECTED_PREFIX}${alternatives}`;
+  // Nothing bounds how long an alternatives array is, and the budget pass stops
+  // at the first continuation that does not fit — so one runaway list would
+  // suppress every other decision's alternatives and leave most of the budget
+  // unspent. Capped like `renderMemorySnippet` caps a snippet.
+  const capped =
+    alternatives.length <= MAX_ALTERNATIVES_CHARS
+      ? alternatives
+      : `${alternatives.slice(0, MAX_ALTERNATIVES_CHARS - 1).trimEnd()}…`;
+
+  return `${ALREADY_REJECTED_PREFIX}${capped}`;
 }
 
 export function renderMemorySnippet(

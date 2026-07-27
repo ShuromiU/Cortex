@@ -51,8 +51,17 @@ export function buildNoteMemoryText(note: ParsedNote): string {
   const lines: string[] = [];
   lines.push(`${note.kind}: ${note.content}`);
   pushLine(lines, 'Subject', note.subject);
-  if (note.alternatives && note.alternatives.length > 0) {
-    lines.push(`Alternatives: ${note.alternatives.join(', ')}`);
+  // Joined onto one line, so an alternative carrying a newline would split the
+  // projection into a second `Alternatives:` line — truncating the list at best
+  // and, since the reader has to pick one of them, letting note content pose as
+  // the real list at worst. Collapse the whitespace here rather than teaching
+  // every reader to cope with it. Empty entries are dropped so a trailing one
+  // cannot render as a dangling comma.
+  const alternatives = (note.alternatives ?? [])
+    .map(alternative => alternative.replace(/\s+/g, ' ').trim())
+    .filter(alternative => alternative.length > 0);
+  if (alternatives.length > 0) {
+    lines.push(`Alternatives: ${alternatives.join(', ')}`);
   }
   if (note.conflict) {
     lines.push('Conflict: true');

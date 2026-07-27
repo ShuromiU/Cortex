@@ -288,3 +288,45 @@ claude-opus-5
 ### Change Log
 
 - 2026-07-27 — Story 1.3 implemented. `already rejected:` line in recall and brief, two-pass budgeting so it drops before its decision, new locked eval suite. 690 tests (+20), 7 gate suites, 9/10 mutations killed (1 proven equivalent).
+- 2026-07-27 — Round-2 repair: 13 review findings addressed across 6 files; 705 tests (+15), 7 gate suites unchanged.
+
+## Senior Developer Review (AI)
+
+**Reviewed:** `ea94c7a` vs `4fb59c8` · three parallel layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) · 2026-07-27
+**Outcome:** Changes Requested → addressed in the round-2 repair.
+
+Independent confirmations worth recording: all three layers verified AC #2's mechanism by differential testing rather than sampling — the Auditor built a feature-neutered `dist/` and compared budgets 1–400 on both recall and brief, the Blind Hunter fuzzed `assembleBudgeted` over 6,000 trials at all budgets, and both found the primary-line set identical with and without continuations everywhere. The Auditor also checked out `4fb59c8` into a worktree and diffed 600 real output strings to confirm AC #3 against the actual pre-story build, and independently re-derived Task 3's surface table rather than trusting it.
+
+### The through-line
+
+Two of my claims were wrong, and both were wrong in the same direction: I declared a limitation unfixable and then built the guard that the limitation justified.
+
+1. **"A note whose content ends with such a line still false-fires; that is unfixable without the column."** It is fixable, with no schema change. `insertNote` requires a subject for `decision`, `intent`, `blocker` and `focus`, and `buildNoteMemoryText` writes `Subject:` *after* the content — so a real `Alternatives:` line always follows `Subject:` and a typed one always precedes it. That single ordering fact separates them. Having written the excuse, I then chose "last match wins" *because* of it — which turned a benign truncation into total substitution, since the later lines are the ones note content controls.
+2. **"Pin the invariant, not one sample point"** — my own Task 4 instruction, which my own sweep test then violated. It asserted that a continuation never appears while any decision is missing. That is false for the shipped code at **117 consecutive budgets** on a three-item fixture I constructed in a minute. AC #2 is per-decision and holds; the assertion was strictly stronger than the AC and stronger than the mechanism.
+
+### Action items — all addressed
+
+- [x] **[High] A content line fabricated an `already rejected:` list for a note whose `alternatives` column is `NULL`** (blind+edge). `cortex_note(decision, content: 'adopt tRPC\nAlternatives: REST, GraphQL')` rendered `already rejected: REST, GraphQL`, and nothing could ever clear it — `cortex_resolve` clears columns, and this was read from text. Replaced the whole-text scan with `noteTrailerLines`, which recovers the projection's trailer by canonical label order.
+- [x] **[High] A newline inside an alternative let note content replace the real list wholesale** (blind). `['mysql', 'sqlite\nAlternatives: nothing was ever rejected']` rendered only the injected text. Fixed twice over: `buildNoteMemoryText` now collapses whitespace so the split cannot happen, and the reader takes the *first* trailer match so a split could not substitute even if one occurred.
+- [x] **[Med] A newline inside an alternative silently truncated the list**, dropping the rationale and every later entry, while `README.md` promised the strings were reproduced exactly (blind+edge).
+- [x] **[Med] One oversized alternatives list suppressed every other decision's** (edge). Pass 2 stops at the first continuation that does not fit and nothing bounded the length: 60 alternatives on the top result produced zero lines and left 514 of 600 tokens unspent. Payload now capped at 240 chars, like `renderMemorySnippet` caps a snippet.
+- [x] **[Med] The AC #2 sweep test pinned its fixture's shape, not the invariant** (auditor). Replaced with a direct `assembleBudgeted` assertion: primary lines identical with and without continuations, across budgets 0–400, with a precondition that the fixture actually exercises continuations. The end-to-end sweep stays but now claims only what is true of that data.
+- [x] **[Med] `README.md` overstated the drop order** (auditor+blind) — "the alternatives are simply the first thing to go" is false when pass 1's greedy prefix trims a long lower-ranked decision first. Rewritten around the claim that is actually true and verified, with the two misreadable consequences stated.
+- [x] **[Med] Task 6's `recall.ts` Core Files subtask was marked `[x]` and not done** (auditor). The entry said nothing about two-pass budgeting — the file where the entire AC #2 mechanism lives. Now updated.
+- [x] **[Med] Case-insensitive matching had no true positive to gain** (blind+edge). `buildNoteMemoryText` only ever emits `Alternatives: `, so lowercasing could only ever match note prose or a captured log tail. Now exact-case.
+- [x] **[Low] An empty array entry rendered a dangling comma** (blind+edge). Empty entries are dropped at projection.
+- [x] **[Low] A carriage return interior to an alternative leaked into output** (edge), returning the terminal cursor to column 0 and hiding the prefix. Covered by the same whitespace collapse.
+- [x] **[Low] The all-note-kinds behavior was a second undeclared superset** (auditor). Recorded here rather than narrowed: `cortex_note` accepts `alternatives` for every kind, so rendering it for every note kind is the consistent reading. Only AC #1's Given names `note:decision`, and a superset does not violate it.
+- [x] **[Low] `CLAUDE.md` undercounted the suites seeding the hazard text** (auditor) — three seed it, two detonate. Corrected; the detonation count of 2 was right.
+- [x] **[Low] PRD Open Question 8 was answered halfway** (auditor). See below.
+
+### Corrected: what OQ8 actually got answered
+
+The Completion Notes claim above ("+47 / +0") is the alternatives-line half only. OQ8 asks the cost of *both* new lines and whether §4.1 pays for itself under **SM-C1** (total tokens injected per session must not rise). The marker was measured in 1.2 (3 tokens) and this line here (5 tokens of prefix plus payload; 21 and 26 in realistic two-item lists; +47 unbudgeted, +0 once the budget binds). **SM-C1 is not answerable from this repo** — it is a per-session field measurement over real usage, and no telemetry for it exists yet. OQ8 should stay open on that half rather than be marked closed by this story.
+
+### Accepted, not changed
+
+- **Pass 1 is a greedy prefix and can leave budget unspent** while trimming a decision that would have fit (blind). Pre-existing in `assembleBudgeted`, unchanged by this story, and it is what makes the drop order misreadable rather than wrong. Deferred rather than fixed inside a rendering story.
+- **Continuations are not charged for their `\n` separator**, so output can exceed budget by `ceil((lines-1)/4)`. Pre-existing accounting gap that this change roughly doubles by doubling the line count. The Blind Hunter swept real `recall` budgets 1–700 and found it never triggers — every overshoot there is the pre-existing always-keep-the-first-line + hint behavior, already pinned by a test from 1.2.
+- **Raising the budget can remove an alternatives line you already had** (edge), because extra budget buys another decision line before it buys alternatives. Inherent to the two-pass split and the price of AC #2. Documented in `README.md` rather than engineered away.
+- **One content line remains inseparable**: a note whose content ends with an `Alternatives:` line, with no trailer after it, is byte-identical to what a subject-less `note:insight` legitimately projects. It cannot reach a decision, intent, blocker or focus note, because those require a subject. Pinned by a test so the boundary is visible.

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { applySchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
-import { recall } from '../src/query/recall.js';
+import { assembleBudgeted, recall, type BudgetedEvidence } from '../src/query/recall.js';
 import { brief } from '../src/query/brief.js';
 import { estimateTokens, retrieveMemory } from '../src/query/retrieval.js';
 
@@ -602,6 +602,100 @@ describe('recall — rejected alternatives', () => {
   });
 });
 
+describe('recall — alternatives survive the projection intact', () => {
+  function renderAlternatives(alternatives: string[]): string | undefined {
+    const store = makeStore();
+    const session = store.createSession();
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'queue choice',
+      content: 'use sqs for the queue choice',
+      alternatives,
+    });
+    return continuationLines(recall(store, 'queue choice', { budget: 600 }))[0];
+  }
+
+  it('keeps every alternative when one of them contains a newline', () => {
+    // buildNoteMemoryText joins onto one line, so an embedded newline used to
+    // split the projection and silently drop the rationale AND every later
+    // alternative. README promises the strings are reproduced; they must be.
+    expect(renderAlternatives(['kafka\n(too heavy to operate)', 'rabbitmq'])).toBe(
+      '  already rejected: kafka (too heavy to operate), rabbitmq',
+    );
+  });
+
+  it('does not let note content posing as a second line replace the real list', () => {
+    expect(
+      renderAlternatives(['mysql', 'sqlite\nAlternatives: nothing was ever rejected']),
+    ).toContain('mysql, sqlite');
+  });
+
+  it('strips carriage returns rather than leaking them into rendered output', () => {
+    // A bare CR returns the terminal cursor to column 0, hiding the prefix.
+    const rendered = renderAlternatives(['session cookies\r(no SSO)', 'JWT'])!;
+    expect(rendered).not.toContain('\r');
+    expect(rendered).toBe('  already rejected: session cookies (no SSO), JWT');
+  });
+
+  it('drops empty entries instead of rendering a dangling comma', () => {
+    expect(renderAlternatives(['redis', ''])).toBe('  already rejected: redis');
+    expect(renderAlternatives(['', 'redis'])).toBe('  already rejected: redis');
+  });
+
+  it('renders nothing when every entry is empty', () => {
+    const store = makeStore();
+    const session = store.createSession();
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'queue choice',
+      content: 'use sqs for the queue choice',
+      alternatives: ['', '   '],
+    });
+    expect(recall(store, 'queue choice')).not.toContain('already rejected');
+  });
+
+  it('does not fabricate a rejection list from a content line', () => {
+    // End-to-end companion to the render.ts unit test: notes.alternatives is
+    // NULL here, so nothing may render.
+    const store = makeStore();
+    const session = store.createSession();
+    const note = store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'api shape',
+      content: 'adopt tRPC for the internal api\nAlternatives: REST, GraphQL',
+    });
+
+    expect(note.alternatives).toBeNull();
+    expect(recall(store, 'api shape')).not.toContain('already rejected');
+  });
+
+  it('lets one runaway list coexist with other decisions alternatives', () => {
+    const store = makeStore();
+    const session = store.createSession();
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'queue choice',
+      content: 'use sqs for the queue choice',
+      alternatives: Array.from({ length: 60 }, (_, i) => `rejected option ${i} with a rationale`),
+    });
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'queue serialization',
+      content: 'use protobuf for the queue serialization',
+      alternatives: ['json'],
+    });
+
+    // Uncapped, the first list exceeds the budget, pass 2 stops, and *no*
+    // decision gets its alternatives while most of the budget goes unspent.
+    expect(continuationLines(recall(store, 'queue', { budget: 600 }))).toHaveLength(2);
+  });
+});
+
 describe('recall — the alternatives line drops before its decision (AC #2)', () => {
   it('keeps every decision and drops both continuations at a budget that binds', () => {
     const store = makeStore();
@@ -625,7 +719,7 @@ describe('recall — the alternatives line drops before its decision (AC #2)', (
     expect(estimateTokens(bound)).toBeLessThanOrEqual(90);
   });
 
-  it('shows every decision before it shows any alternatives, across a budget sweep', () => {
+  it('shows every decision before it shows any alternatives, on this result set', () => {
     const store = makeStore();
     seedAlternatives(store);
 
@@ -644,21 +738,49 @@ describe('recall — the alternatives line drops before its decision (AC #2)', (
     const firstFullPrimaries = sweep.find(run => run.primaries.length === total)!.budget;
     const firstContinuation = sweep.find(run => run.continuations.length > 0)!.budget;
 
-    // The whole of AC #2: the last decision is affordable strictly before the
-    // first alternatives line is.
+    // On this result set the last decision is affordable strictly before the
+    // first alternatives line is. This is a property of these three items, NOT
+    // of the mechanism — with a short top decision and long lower-ranked ones,
+    // the top item's alternatives legitimately render while a lower decision is
+    // trimmed, because AC #2 is per-decision. The mechanism itself is pinned
+    // below, against assembleBudgeted directly.
     expect(firstFullPrimaries).toBeLessThan(firstContinuation);
 
-    for (const run of sweep) {
-      // A continuation never appears while a decision that fits is missing, and
-      // primaries only ever grow with the budget.
-      const previous = sweep[sweep.indexOf(run) - 1];
-      if (previous) {
-        expect(run.primaries.length).toBeGreaterThanOrEqual(previous.primaries.length);
-      }
-      if (run.continuations.length > 0) {
-        expect(run.primaries.length).toBe(total);
-      }
+    // Primaries only ever grow with the budget.
+    for (let index = 1; index < sweep.length; index += 1) {
+      expect(sweep[index]!.primaries.length).toBeGreaterThanOrEqual(
+        sweep[index - 1]!.primaries.length,
+      );
     }
+  });
+
+  it('never trades a decision for an alternatives line, at any budget', () => {
+    // The real invariant, and the reason AC #2 holds rather than happening to:
+    // adding continuations to an entry set must not change which primary lines
+    // are rendered — at any budget, for any shape of data. Asserted against
+    // assembleBudgeted directly so it cannot become a property of one fixture.
+    const withAlternatives: BudgetedEvidence[] = [
+      { line: 'Decision: short one', continuation: '  already rejected: a very long list indeed, and another entry' },
+      { line: `Decision: ${'a padded decision line that costs a lot to render '.repeat(3)}` },
+      { line: 'Decision: another short one', continuation: '  already rejected: x' },
+      { line: 'Insight: trailing item' },
+    ];
+    const withoutAlternatives = withAlternatives.map(entry => ({ line: entry.line }));
+    const hint = (dropped: number) => `…${dropped} more trimmed`;
+
+    for (let budget = 0; budget <= 400; budget += 1) {
+      const on = assembleBudgeted('Lead line', withAlternatives, budget, hint);
+      const off = assembleBudgeted('Lead line', withoutAlternatives, budget, hint);
+
+      const onPrimaries = on.split('\n').filter(line => !line.startsWith('  already rejected:'));
+      expect(onPrimaries).toEqual(off.split('\n'));
+    }
+
+    // Precondition: the fixture must actually exercise continuations somewhere,
+    // or the loop above compares two identical inputs and proves nothing.
+    expect(assembleBudgeted('Lead line', withAlternatives, 400, hint)).toContain(
+      'already rejected',
+    );
   });
 
   it('drops continuations top-down, keeping the highest-ranked one last', () => {

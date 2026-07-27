@@ -344,9 +344,11 @@ Decision [2026-07-25 15:56Z]: [auth strategy] use OIDC with server-side sessions
 
 This appears in `cortex_recall` and `cortex_brief` — the two surfaces where an agent asks a question before proposing an approach. It deliberately does **not** appear in `cortex_state`, the SessionStart brief, or the reflex whisper. Those channels budget whole sections or truncate to a fixed width, so an extra line there could not be dropped independently of the decision above it, which is the property the whole feature turns on.
 
-**The alternatives line always loses to the decision it belongs to.** Output is assembled in two passes: every decision line that fits is placed first, and only the budget left over buys alternatives. So a recall never sacrifices a decision to show why another one won, and at a tight budget the alternatives are simply the first thing to go. In a two-decision recall the lines cost 47 tokens with room to spare and nothing at all once the budget binds.
+**An alternatives line never costs you a decision.** Output is assembled in two passes: every decision line that fits is placed first, and only the budget left over buys alternatives. Adding alternatives to a result set therefore cannot change which decisions are rendered, at any budget — the line is charged only once every decision that fits is already on the page. In a two-decision recall the lines cost 47 tokens where there is room and nothing at all once the budget binds.
 
-Written as `cortex_note(kind='decision', alternatives=['…'])`; the strings are reproduced exactly, so any rationale you put in them travels with the rejection.
+Two things that follow, and are easy to misread from the output alone. Results are still trimmed from the bottom for their own length, so you can see a decision trimmed *while* a higher-ranked decision shows its alternatives — the trim was not paid for by that line, and dropping it would not have bought the missing decision back. And because extra budget buys another decision line before it buys alternatives, raising the budget can replace an alternatives line you already had with a further result.
+
+Written as `cortex_note(kind='decision', alternatives=['…'])`. Rationale you put in the strings travels with the rejection; internal whitespace is collapsed to keep each list on one line, and a list long enough to crowd out every other result is truncated.
 
 ## Reliability Evaluation
 

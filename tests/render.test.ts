@@ -329,6 +329,98 @@ describe('renderedAlternatives — false-positive guards', () => {
     expect(renderedAlternatives(item)).toBe('  already rejected: the real one, and another');
   });
 
+  it('does not fabricate a list from a content line when the note has no alternatives', () => {
+    // The review case: `cortex_note(decision, content: 'adopt tRPC\nAlternatives: REST, GraphQL')`
+    // leaves notes.alternatives NULL, yet projects a line that reads exactly
+    // like a real one. It is separable because the projection appends
+    // `Subject:` *after* the content — so a content line necessarily precedes
+    // it, while a real `Alternatives:` line necessarily follows it. Nothing
+    // could ever clear this one: there is no column for cortex_resolve to touch.
+    const item = makeItem({
+      text: [
+        'decision: adopt tRPC for the internal api',
+        'Alternatives: REST, GraphQL',
+        'Subject: api shape',
+      ].join('\n'),
+    });
+    expect(renderedAlternatives(item)).toBeNull();
+  });
+
+  it('reads the first trailer line, so injected extra lines cannot replace the real list', () => {
+    // An alternative containing a newline splits the projection into a second
+    // `Alternatives:` line whose content the note author controls. Taking the
+    // last match would hand that text back as the whole rejection list.
+    const item = makeItem({
+      text: [
+        'decision: use postgres',
+        'Subject: db choice',
+        'Alternatives: mysql, sqlite',
+        'Alternatives: nothing was ever rejected',
+      ].join('\n'),
+    });
+    expect(renderedAlternatives(item)).toBe('  already rejected: mysql, sqlite');
+  });
+
+  it('still reads the line when a later trailer label follows it in canonical order', () => {
+    // Alternatives(1) then Status(3) is exactly what a subject-less insight
+    // with a non-active status projects. The order check must not reject it —
+    // its only discriminating power is a `Subject:` line appearing *after*
+    // `Alternatives:`, which cannot happen in a real projection.
+    const item = makeItem({
+      kind: 'note:insight',
+      text: ['insight: x', 'Alternatives: real, ones', 'Status: resolved'].join('\n'),
+    });
+    expect(renderedAlternatives(item)).toBe('  already rejected: real, ones');
+  });
+
+  it('documents the one content line the trailer scan still cannot separate', () => {
+    // Residual and known: a content line that lands *last*, with no trailer
+    // after it, is byte-identical to what a subject-less insight legitimately
+    // projects. Nothing in the text can tell them apart. The reachable version
+    // of this — a decision, whose subject is mandatory and therefore always
+    // projects a `Subject:` line after the content — IS separated, and is
+    // covered by the fabrication test above. Pinned so the limit is visible
+    // rather than discovered.
+    const item = makeItem({
+      kind: 'note:insight',
+      text: ['insight: some prose', 'Alternatives: not really a list'].join('\n'),
+    });
+    expect(renderedAlternatives(item)).toBe('  already rejected: not really a list');
+  });
+
+  it('matches the label exactly, never a shouted or lowercased lookalike', () => {
+    // buildNoteMemoryText only ever emits `Alternatives: `, so a case-insensitive
+    // match has no true positive to gain and admits captured log tails.
+    for (const label of ['ALTERNATIVES', 'alternatives', 'AlTeRnAtIvEs']) {
+      const item = makeItem({
+        text: ['decision: x', 'Subject: s', `${label}: a, b`].join('\n'),
+      });
+      expect(renderedAlternatives(item)).toBeNull();
+    }
+  });
+
+  it('still reads a note that legitimately carries no subject', () => {
+    // Only decision/intent/blocker/focus require a subject, so an insight can
+    // project `Alternatives:` directly after its content.
+    const item = makeItem({
+      kind: 'note:insight',
+      text: ['insight: the spool flush is idempotent', 'Alternatives: per-call flush'].join('\n'),
+    });
+    expect(renderedAlternatives(item)).toBe('  already rejected: per-call flush');
+  });
+
+  it('caps a runaway alternatives list so one entry cannot starve the others', () => {
+    // The budget pass stops at the first continuation that does not fit, so an
+    // unbounded list would suppress every other decision's alternatives and
+    // leave most of the budget unspent.
+    const huge = Array.from({ length: 60 }, (_, index) => `rejected option ${index}`).join(', ');
+    const rendered = renderedAlternatives(itemWithAlternatives(huge))!;
+
+    expect(rendered.length).toBeLessThanOrEqual(260);
+    expect(rendered.endsWith('…')).toBe(true);
+    expect(rendered).toContain('rejected option 0');
+  });
+
   it('tolerates surrounding whitespace on the projected line', () => {
     expect(renderedAlternatives(makeItem({ text: 'decision: x\n  Alternatives: a, b  ' }))).toBe(
       '  already rejected: a, b',
