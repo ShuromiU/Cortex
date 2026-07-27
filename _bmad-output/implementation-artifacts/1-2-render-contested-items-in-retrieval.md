@@ -60,6 +60,8 @@ The PRD is narrower than the epic and resolves it: *"A contested item and its co
 
 **Therefore: adjacency is implemented in `recall` only** (Task 3). In `brief` and `state`, a same-kind contested pair already lands in the same bucket and stays adjacent by score; a cross-kind pair does not, and that is accepted. Do **not** break `KIND_PRIORITY` or the state sections chasing it. Record this in the Dev Agent Record rather than silently shipping a partial AC.
 
+> **Corrected after review — the sentence above is wrong.** "Lands in the same bucket and stays adjacent by score" does not follow: anything scoring between the two sides splits them, and this reproduces in `brief` (contested lines at indices 0 and 2 with an uncontested decision between). The *core* of the deviation survives — a cross-kind pair genuinely cannot be seated together under `KIND_PRIORITY` or kind-headed sections. But the same-kind case is neither impossible nor destructive: grouping **within** each kind run preserves the primary sort exactly, and same-kind is the common case since detection's prior is always a decision. `brief` and `state` now group within kind (`groupContestedWithinKind`); only cross-kind stays split. The deviation had been discarding the free part along with the costly part.
+
 #### Deviation C — the marker already exists. This is a rename, not a new feature.
 
 `state.ts:243` has rendered `' [conflict]'` since before this release. Story 1.1's Completion Notes flagged it explicitly: *"`state.ts` still renders the pre-existing `[conflict]` marker — 1.2's to rename."* Do not plan or build this as greenfield; you will end up with two markers for one condition.
@@ -245,4 +247,39 @@ The first run left **`recall stops applying the grouping` alive**, and the reaso
 
 ### Change Log
 
+- 2026-07-27 — Round-2 repair: 9 review findings addressed across 5 files; 670 tests (+16), 13/13 mutations killed.
 - 2026-07-27 — Story 1.2 implemented. `[contested]` marker across recall/brief/state/reflex (renaming the pre-R1 `[conflict]`), contested-pair adjacency in recall, new locked eval suite. 654 tests (+30), 6 gate suites, 8/8 mutations killed.
+
+## Senior Developer Review (AI)
+
+**Reviewed:** `eac73c2` vs `c259710` · three parallel layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) · 2026-07-27
+**Outcome:** Changes Requested → addressed in the round-2 repair commit.
+
+Independent confirmations worth recording: the Auditor ran its own 11-mutation campaign (11/11 killed, including three I had not tried — `renderMemoryLine` dropping the marker while `state` keeps it, the converse, and marker-after-`(resolved)`), and verified that `tests/state.test.ts` genuinely covers both `renderNoteBullet` consumers rather than merely claiming to. All three layers independently verified the eval fixture is adversarial and its needles deterministic. Deviation A and the reflex decision were confirmed legitimate by the Auditor.
+
+### The through-line
+
+Two of my three headline claims were wrong, and both were wrong in the same way: I asserted a property instead of testing it.
+
+1. **"A same-kind contested pair already lands in the same bucket and stays adjacent by score."** Same bucket does not imply adjacent. Reproduced in `brief` at indices 0 and 2. This sentence was the entire justification for skipping `brief`/`state`, and it shipped into the story, the commit body, `README.md` and `CLAUDE.md`.
+2. **"Five call sites, Serena-enumerated, complete."** I enumerated `renderMemoryLine` *callers*, not note-rendering *surfaces*. `session-brief.ts` and `renderResumeCandidate` have their own renderers; the former is the unprompted SessionStart channel my own reflex argument applies to most strongly.
+
+### Action items — all addressed
+
+- [x] **[High] SessionStart brief rendered contested decisions unmarked.** All three layers found it independently. `BRIEF_NOTE_KINDS` includes `note:decision` and `BRIEF_STATES` includes `warm` — exactly an active contested decision — and `MAX_BRIEF_ITEMS = 3` means the counterpart usually is not present. Marked in `session-brief.ts`.
+- [x] **[High] `isContested` false-fired on any note containing the phrase, unclearably.** `cortex_resolve` clears the `conflict` column, but the marker is read from text, so nothing could remove it. Now line-exact — `buildNoteMemoryText` always emits `Conflict: true` as its own line.
+- [x] **[Med] Deviation B's supporting claim was false; `brief`/`state` now group within kind.** `groupContestedWithinKind` preserves `KIND_PRIORITY` and the section structure exactly. Cross-kind remains split, which is the part of the deviation that was always sound.
+- [x] **[Med] `renderHeaderHighlights` always dropped the marker.** I had pre-declared this "correct AC #3 behavior"; it is not — the 110-char cap is unconditional, not the output budget, so it fired with an unlimited budget on any note past ~97 chars. The marker is now re-attached after truncation.
+- [x] **[Med] `renderResumeCandidate` rendered a contested intent unmarked** — in the file I had already imported `isContested` into. An intent can carry `conflict = 1`: detection scopes only the *prior* to `decision`.
+- [x] **[Med] Grouping applied a note-only predicate to every kind.** Episodes take `episode.target` as subject and carry stdout/stderr tails as text, so a captured log line could silently reorder results that `renderMemoryLine` never marks. `isContested` now returns false for non-note kinds.
+- [x] **[Med] The AC #3 test could not fail.** It computed `used` from `split('\n').slice(1, -1)` — everything except the trimmed-hint line, the only line that can breach the budget. Actual output is 51 tokens at budgets of 10, 20 and 40 alike. Replaced with three assertions: the marker gets no budget priority, it is charged inside its own line, and the pre-existing overshoot is pinned explicitly rather than hidden.
+- [x] **[Med] My doc comment claimed the opposite of the behavior.** "An item never moves ahead of where it ranked" — promoting the counterpart is the function's purpose; only rank 0 is fixed. Corrected, along with the two consequences it had obscured (budget can now drop a better result; gate safety depends entirely on the `recall.ts` placement).
+- [x] **[Med] `README.md` stated "a contested item never gets budget priority over an uncontested one."** False — the reorder does exactly that. Both docs now describe the real trade-off.
+
+### Accepted, not changed
+
+- **`buildLeadLine` stays unmarked.** Blind Hunter reads "Most relevant" against AD-17's "contested pairs are equals"; the Auditor rates it Low and notes the AC is met because the item carries the marker on its own evidence line, which `assembleBudgeted` always keeps. I agree with the Auditor — marking both places double-charges tokens for one signal — but the disagreement is real and recorded for whoever revisits it.
+- **The fixture's adversarial property is itself ungated** (Auditor #6). It holds on a 1.8-point ranking margin; if drift ever made the pair naturally adjacent, the needle would pass without the reorder running. The `tests/recall.test.ts` and `brief` tests both pre-assert the split explicitly, which is the durable guard; the fixture format has no equivalent hook.
+- **`state`'s kind sections could not be given an adversarial integration test.** Section order is hotness-based, and no configuration I could construct through the public API split a same-kind pair there. The grouping is applied and unit-tested; the integration test was removed rather than kept as one that passes regardless.
+- **CLI `cortex note-resolve` does not clear conflicts or refuse an ambiguous `--subject`.** Already logged in `deferred-work.md` by Story 1.1.
+- **`recall` can exceed its budget by the trimmed-hint line.** Pre-existing in `assembleBudgeted`, which deliberately refuses to drop the last evidence line so the budget can never silence the top result, then appends the hint regardless. Not contested-specific; now pinned by a test instead of going unnoticed.

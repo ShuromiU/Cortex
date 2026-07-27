@@ -4,7 +4,7 @@ import { applySchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import { recall } from '../src/query/recall.js';
 import { brief } from '../src/query/brief.js';
-import { retrieveMemory } from '../src/query/retrieval.js';
+import { estimateTokens, retrieveMemory } from '../src/query/retrieval.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -459,18 +459,51 @@ describe('recall — contested items', () => {
     expect(contestedAt[1]! - contestedAt[0]!).toBe(1);
   });
 
-  it('subjects the marker to the same budget as everything else', () => {
+  it('gives the marker no budget priority — a contested line is trimmed like any other', () => {
     const store = makeStore();
     seedContest(store);
 
-    const budget = 40;
-    const result = recall(store, 'spool flush', { budget });
-    // The marker rides inside its line and is trimmed with it — no special casing.
-    expect(result).toContain('trimmed');
-    const lead = result.split('\n')[0]!;
-    const evidence = result.split('\n').slice(1, -1);
-    const used = Math.ceil(lead.length / 4) + evidence.reduce((sum, l) => sum + Math.ceil(l.length / 4), 0);
-    expect(used).toBeLessThanOrEqual(budget);
+    // Tight enough that only one evidence line survives.
+    const tight = recall(store, 'spool flush', { budget: 40 });
+    expect(tight).toContain('trimmed');
+    expect(tight.split('\n').filter(line => line.includes('[contested]'))).toHaveLength(1);
+
+    // Loosen it and the trimmed side comes back — nothing about the marker
+    // exempted it from, or privileged it in, the budget.
+    const loose = recall(store, 'spool flush', { budget: 600 });
+    expect(loose).not.toContain('trimmed');
+    expect(loose.split('\n').filter(line => line.includes('[contested]'))).toHaveLength(2);
+  });
+
+  it('costs the contested marker inside its own line, not as a free rider', () => {
+    const store = makeStore();
+    seedContest(store);
+
+    const rendered = recall(store, 'spool flush', { budget: 600 });
+    const contestedLine = rendered
+      .split('\n')
+      .find(line => line.includes('[contested]'))!;
+    // The marker is part of the line assembleBudgeted prices, so removing it
+    // must reduce that line's cost — proving it was never charged separately.
+    const withMarker = estimateTokens(contestedLine);
+    const withoutMarker = estimateTokens(contestedLine.replace(' [contested]', ''));
+    expect(withMarker).toBeGreaterThanOrEqual(withoutMarker);
+    expect(withMarker - withoutMarker).toBeLessThanOrEqual(4);
+  });
+
+  // Pre-existing assembleBudgeted behavior, pinned here because story 1.2's
+  // first attempt at the AC #3 test measured `slice(1, -1)` — everything except
+  // the trimmed hint, which is the only line that can breach the budget — and
+  // so could not fail. The overshoot is not contested-specific: assembleBudgeted
+  // refuses to drop the last evidence line (so the budget can never silence the
+  // top result) and then appends the hint regardless.
+  it('can exceed the budget by the trimmed hint when only one evidence line survives', () => {
+    const store = makeStore();
+    seedContest(store);
+
+    const rendered = recall(store, 'spool flush', { budget: 10 });
+    expect(rendered.split('\n')).toHaveLength(3); // lead + 1 evidence + hint
+    expect(estimateTokens(rendered)).toBeGreaterThan(10);
   });
 });
 
@@ -482,5 +515,83 @@ describe('brief — contested items', () => {
     const result = brief(store, 'spool flush');
     expect(result).toContain('[contested]');
     expect(result).not.toContain('[conflict]');
+  });
+});
+
+describe('brief — contested grouping within kind', () => {
+  it('seats a same-kind contested pair together when an uncontested decision ranks between them', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const session = store.createSession();
+
+    const losing = store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'flush the spool at turn end',
+    });
+    const winning = store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'do not flush the spool at turn end',
+    });
+    expect(winning.conflicts?.length ?? 0).toBeGreaterThan(0);
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'flush the spool when the size threshold is crossed',
+    });
+
+    const aged = new Date(Date.now() - 120 * 24 * 3600 * 1000).toISOString();
+    db.prepare("UPDATE memory_items SET created_at = ?, state = 'cold' WHERE source_id = ?").run(
+      aged,
+      losing.id,
+    );
+
+    // Guard: ranking alone really does split the pair, so this fails loudly if
+    // the fixture stops being adversarial.
+    const ranked = retrieveMemory(store, 'spool flush', 8).results;
+    expect(ranked).toHaveLength(3);
+    expect(ranked.map(item => item.text.includes('Conflict: true'))).toEqual([true, false, true]);
+
+    const decisionLines = brief(store, 'spool flush', undefined, { budget: 4000 })
+      .split('\n')
+      .filter(line => line.startsWith('Decision'));
+    const contestedAt = decisionLines
+      .map((line, index) => (line.includes('[contested]') ? index : -1))
+      .filter(index => index >= 0);
+
+    expect(contestedAt).toHaveLength(2);
+    expect(contestedAt[1]! - contestedAt[0]!).toBe(1);
+  });
+
+  it('never pulls a contested item across a kind boundary', () => {
+    const store = makeStore();
+    const session = store.createSession();
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'flush the spool at turn end',
+    });
+    // An insight contesting a decision: detection scopes only the prior.
+    const insight = store.insertNote({
+      sessionId: session.id,
+      kind: 'insight',
+      subject: 'spool flush',
+      content: 'do not flush the spool at turn end',
+    });
+    expect(insight.conflicts?.length ?? 0).toBeGreaterThan(0);
+
+    const lines = brief(store, 'spool flush', undefined, { budget: 4000 })
+      .split('\n')
+      .filter(line => line.startsWith('Decision') || line.startsWith('Insight'));
+
+    // KIND_PRIORITY survives: the decision still precedes the insight. A
+    // cross-kind pair stays split on this surface by design.
+    expect(lines[0]!.startsWith('Decision')).toBe(true);
+    expect(lines.some(line => line.startsWith('Insight') && line.includes('[contested]'))).toBe(true);
   });
 });

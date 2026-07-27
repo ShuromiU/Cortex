@@ -603,3 +603,57 @@ describe('buildFullState - contested notes', () => {
     expect(buildFullState(store)).not.toContain('[contested]');
   });
 });
+
+// ── Contested on the header surfaces (review round 1) ─────────────────
+
+describe('buildHeader - contested notes', () => {
+  it('keeps the marker on a long note the 110-char cap would truncate', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const session = store.createSession({ focus: 'retry policy' });
+    const long =
+      'retry the flush with exponential backoff capped at thirty seconds because the size threshold alone drops batches';
+    // The prior must be a decision — detection scopes the prior to note:decision
+    // (store.ts:1466). The incoming blocker lands in state 'hot', which is what
+    // renderHeaderHighlights selects.
+    store.insertNote({ sessionId: session.id, kind: 'decision', subject: 'retry policy', content: long });
+    const second = store.insertNote({
+      sessionId: session.id,
+      kind: 'blocker',
+      subject: 'retry policy',
+      content: `do not ${long}`,
+    });
+    expect(second.conflicts?.length ?? 0).toBeGreaterThan(0);
+
+    const header = buildHeader(store);
+    // The cap is unconditional, not the output budget, so appending the marker
+    // before truncation loses it outright on any note past ~97 chars.
+    expect(header).toContain('Hot:');
+    expect(header).toContain('[contested]');
+  });
+
+  it('marks a contested intent in the Resume line', () => {
+    const store = makeStore();
+    const session = store.createSession({ focus: 'spool flush' });
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'flush the spool at turn end',
+    });
+    // Detection scopes only the prior to decision; the incoming note may be any
+    // kind, so an intent can legitimately carry conflict = 1.
+    const intent = store.insertNote({
+      sessionId: session.id,
+      kind: 'intent',
+      subject: 'spool flush',
+      content: 'do not flush the spool at turn end',
+    });
+    expect(intent.conflicts?.length ?? 0).toBeGreaterThan(0);
+
+    const header = buildHeader(store);
+    expect(header).toContain('Resume:');
+    const resumeLine = header.split('\n').find(line => line.startsWith('Resume:'))!;
+    expect(resumeLine).toContain('[contested]');
+  });
+});

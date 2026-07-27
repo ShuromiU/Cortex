@@ -6,7 +6,7 @@ import {
   resolveProjectScopeKey,
   resolveWorkingScopeKeys,
 } from './state.js';
-import { formatAgeLabel } from './render.js';
+import { CONTESTED_MARKER, formatAgeLabel, isContested } from './render.js';
 import { estimateTokens } from './retrieval.js';
 
 export interface SessionBriefOptions {
@@ -112,8 +112,13 @@ export function buildSessionBrief(
     const age = formatAgeLabel(item.created_at);
     const agePart = age ? `[${age}] ` : '';
     const subjectPart = item.subject ? `[${item.subject}] ` : '';
+    // This channel prints unprompted on every SessionStart and selects
+    // note:decision in state warm — exactly an active contested decision — so
+    // an unmarked side of an open contest is presented as settled memory
+    // before the agent has asked anything. Same reason reflex carries it.
+    const contested = isContested(item) ? CONTESTED_MARKER : '';
     bullets.push(
-      `- ${agePart}${kindLabel}: ${subjectPart}${truncateLine(noteContent(item))}${refSuffix}`,
+      `- ${agePart}${kindLabel}: ${subjectPart}${truncateLine(noteContent(item))}${contested}${refSuffix}`,
     );
   }
   validator.flush();

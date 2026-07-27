@@ -39,22 +39,45 @@ export const CONTESTED_MARKER = ' [contested]';
  * such column — the signal survives projection only as the `Conflict: true`
  * line `buildNoteMemoryText` writes into the item text. Reading it back out is
  * forced rather than chosen: a real column needs a migration, and this release
- * spends its single `SCHEMA_VERSION` bump elsewhere. The adjacent `resolved`
- * sniff below works the same way and shares the same flaw — a note whose own
- * content contains this phrase reads as contested. Both fix together, with the
- * column, in a release that can afford it.
+ * spends its single `SCHEMA_VERSION` bump elsewhere.
+ *
+ * Two guards keep the sniff honest, both load-bearing:
+ *
+ * Only notes have a conflict column, so an episode or branch snapshot whose
+ * captured stdout/stderr happens to carry the phrase is not in a contest — and
+ * would otherwise be silently reordered by `groupContestedAdjacent` while
+ * `renderMemoryLine` never marks it, leaving a reorder with no visible cause.
+ *
+ * The match is line-exact because `buildNoteMemoryText` always emits this as
+ * its own line. A substring match makes a note that merely *discusses* the flag
+ * ("insertNote sets conflict: true on both sides") render as contested — and
+ * nothing could ever clear it, since `cortex_resolve` clears the column while
+ * the marker is read from text.
  */
 export function isContested(item: ParsedMemoryItem): boolean {
-  return item.text.toLowerCase().includes('conflict: true');
+  if (!item.kind.startsWith('note:')) {
+    return false;
+  }
+
+  return item.text
+    .split('\n')
+    .some(line => line.trim().toLowerCase() === 'conflict: true');
 }
 
 /**
  * Reorders results so both sides of a contest read together, pulling later
- * counterparts up to sit directly behind the highest-ranked side. Stable: an
- * item never moves ahead of where it ranked, so rank 0 is fixed and ranking
- * metrics cannot move. Pairs on `(scope_key, subject)` because contradiction
- * detection is scope-keyed — the same subject on another branch is a different
- * conversation, not the other half of this one.
+ * counterparts up to sit directly behind the highest-ranked side.
+ *
+ * Promoting the counterpart is the whole point, so items *do* move ahead of
+ * where they ranked — only rank 0 is fixed. Two consequences follow and both
+ * are intended: a budget that trims from the bottom now follows display order,
+ * so a contested counterpart can be kept while a higher-ranked uncontested item
+ * is dropped; and ranking metrics stay safe only because this runs in `recall`,
+ * never inside `retrieveMemory`.
+ *
+ * Pairs on `(scope_key, subject)` because contradiction detection is
+ * scope-keyed — the same subject on another branch is a different conversation,
+ * not the other half of this one.
  */
 export function groupContestedAdjacent<T extends ParsedMemoryItem>(items: T[]): T[] {
   const placed = new Set<number>();
@@ -88,6 +111,32 @@ export function groupContestedAdjacent<T extends ParsedMemoryItem>(items: T[]): 
         ordered.push(other);
       }
     }
+  }
+
+  return ordered;
+}
+
+/**
+ * Contested grouping confined to each run of equal kind, for surfaces that sort
+ * by kind first. `brief` orders by `KIND_PRIORITY` and `state` renders
+ * kind-headed sections; grouping across a kind boundary there would drag a
+ * contested insight up into the decisions and destroy the primary ordering.
+ * Within a bucket it costs nothing, and same-kind contests are the common case
+ * — detection's prior is always a decision, so decisions contest decisions.
+ * A cross-kind pair stays split on those surfaces; only `recall`, which is a
+ * flat score-ordered list, can seat both sides together unconditionally.
+ */
+export function groupContestedWithinKind<T extends ParsedMemoryItem>(items: T[]): T[] {
+  const ordered: T[] = [];
+
+  let start = 0;
+  while (start < items.length) {
+    let end = start + 1;
+    while (end < items.length && items[end]!.kind === items[start]!.kind) {
+      end += 1;
+    }
+    ordered.push(...groupContestedAdjacent(items.slice(start, end)));
+    start = end;
   }
 
   return ordered;

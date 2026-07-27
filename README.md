@@ -320,16 +320,18 @@ Known limit: token matching is ASCII-only, so non-Latin note content never confl
 
 ### Contested items in retrieval
 
-A contested memory renders a `[contested]` marker wherever it surfaces — `cortex_recall`, `cortex_brief`, `cortex_state`, and the reflex that injects remembered context automatically:
+A contested memory renders a `[contested]` marker on every surface that shows it — `cortex_recall`, `cortex_brief`, `cortex_state` (including its `Hot:` and `Resume:` lines), the SessionStart brief, and the reflex that injects remembered context automatically:
 
 ```
 Decision [2026-07-25 15:56Z]: [spool flush policy] flush the spool at turn end. [contested]
 Decision [2026-06-12 15:56Z]: [spool flush policy] do not flush the spool at turn end. [contested]
 ```
 
-In `cortex_recall`, both sides are pulled together so they read as one disagreement rather than two unrelated claims separated by whatever happened to rank between them. Elsewhere they are marked but not reordered: `cortex_brief` groups by note kind and `cortex_state` renders kind-headed sections, so forcing a decision next to an insight would break the ordering those surfaces exist to provide.
+The unprompted channels matter most. A lone remembered decision injected at session start, or as a reflex, reads as settled fact; if it is one half of an open disagreement, that is precisely the failure the marker exists to prevent.
 
-The marker costs three tokens and is trimmed with its line like any other content — a contested item never gets budget priority over an uncontested one.
+Both sides are seated together so they read as one disagreement rather than two unrelated claims separated by whatever happened to rank between them. `cortex_recall` is a flat ranked list and can always do this. `cortex_brief` and `cortex_state` sort by note kind first, so they group within a kind — the common case, since a contest always starts from a decision. A contest that spans two kinds stays split there, because seating them together would mean dismantling the kind ordering those surfaces exist to provide.
+
+The marker costs three tokens and is trimmed with its line like any other content. Note that seating both sides together does reorder results: a contested counterpart is pulled up past whatever ranked between the two sides, so under a tight budget it can be kept while a higher-ranked uncontested item is dropped. That is the deliberate resolution of showing a whole disagreement versus showing strictly the best matches.
 
 ## Reliability Evaluation
 

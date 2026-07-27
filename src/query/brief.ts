@@ -1,5 +1,5 @@
 import type { CortexStore } from '../db/store.js';
-import { renderMemoryLine } from './render.js';
+import { groupContestedWithinKind, renderMemoryLine } from './render.js';
 import { logRetrieval, retrieveMemory } from './retrieval.js';
 import {
   assembleBudgeted,
@@ -58,7 +58,9 @@ export function brief(
   });
 
   const detail = options.detail ?? 'none';
-  const evidence = ordered.map(
+  // Within each kind bucket only — the kind sort above is the primary ordering.
+  const grouped = groupContestedWithinKind(ordered);
+  const evidence = grouped.map(
     item =>
       `${renderMemoryLine(item, 2)}${detail === 'scores' ? renderScoreDetail(item) : ''}`,
   );

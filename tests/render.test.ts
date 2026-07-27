@@ -3,6 +3,7 @@ import type { ParsedMemoryItem } from '../src/db/store.js';
 import {
   CONTESTED_MARKER,
   groupContestedAdjacent,
+  groupContestedWithinKind,
   isContested,
   renderMemoryLine,
 } from '../src/query/render.js';
@@ -199,5 +200,70 @@ describe('groupContestedAdjacent', () => {
     const before = idsOf(items);
     groupContestedAdjacent(items);
     expect(idsOf(items)).toEqual(before);
+  });
+});
+
+// ── isContested guards (review round 1) ────────────────────────────────
+
+describe('isContested — false-positive guards', () => {
+  it('does not fire on a note that merely discusses the flag', () => {
+    // Reachable in this repo: a note about contradiction detection itself.
+    // It would also be unclearable — cortex_resolve clears the column, but the
+    // marker is read from text.
+    const item = makeItem({
+      kind: 'note:insight',
+      text: 'insight: insertNote sets conflict: true on both sides of a contest',
+    });
+    expect(isContested(item)).toBe(false);
+    expect(renderMemoryLine(item)).not.toContain('[contested]');
+  });
+
+  it('fires only on the projected line, whatever surrounds it', () => {
+    expect(isContested(makeItem({ text: 'decision: x\nConflict: true' }))).toBe(true);
+    expect(isContested(makeItem({ text: 'decision: x\n  conflict: true  ' }))).toBe(true);
+    expect(isContested(makeItem({ text: 'decision: the conflict: true flag' }))).toBe(false);
+  });
+
+  it('is false for kinds that have no conflict column', () => {
+    // Episodes carry episode.target as subject and stdout/stderr tails as text,
+    // so without this guard a captured log line would silently reorder results
+    // that renderMemoryLine never marks.
+    for (const kind of ['episode:command_failure', 'branch_snapshot', 'command_run']) {
+      expect(isContested(makeItem({ kind, text: 'x\nConflict: true' }))).toBe(false);
+    }
+  });
+
+  it('does not group non-note kinds', () => {
+    const episodeText = 'fail\nConflict: true';
+    const a = makeItem({ id: 'e1', kind: 'episode:command_failure', subject: 'npm test', text: episodeText });
+    const mid = makeItem({ id: 'mid', kind: 'note:insight', subject: 'other' });
+    const b = makeItem({ id: 'e2', kind: 'episode:command_failure', subject: 'npm test', text: episodeText });
+    expect(idsOf(groupContestedAdjacent([a, mid, b]))).toEqual(['e1', 'mid', 'e2']);
+  });
+});
+
+describe('groupContestedWithinKind', () => {
+  it('seats a same-kind contested pair together', () => {
+    const a = contestedItem({ id: 'a', kind: 'note:decision', subject: 's' });
+    const mid = makeItem({ id: 'mid', kind: 'note:decision', subject: 'other' });
+    const b = contestedItem({ id: 'b', kind: 'note:decision', subject: 's' });
+    expect(idsOf(groupContestedWithinKind([a, mid, b]))).toEqual(['a', 'b', 'mid']);
+  });
+
+  it('never pulls a contested item across a kind boundary', () => {
+    // The primary sort (KIND_PRIORITY in brief, sections in state) must survive.
+    const dec = contestedItem({ id: 'dec', kind: 'note:decision', subject: 's' });
+    const otherDec = makeItem({ id: 'dec2', kind: 'note:decision', subject: 'other' });
+    const ins = contestedItem({ id: 'ins', kind: 'note:insight', subject: 's' });
+    expect(idsOf(groupContestedWithinKind([dec, otherDec, ins]))).toEqual(['dec', 'dec2', 'ins']);
+  });
+
+  it('preserves kind run order exactly', () => {
+    const items = [
+      makeItem({ id: 'd1', kind: 'note:decision' }),
+      makeItem({ id: 'i1', kind: 'note:insight' }),
+      makeItem({ id: 'i2', kind: 'note:insight' }),
+    ];
+    expect(idsOf(groupContestedWithinKind(items))).toEqual(['d1', 'i1', 'i2']);
   });
 });

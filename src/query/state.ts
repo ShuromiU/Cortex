@@ -7,6 +7,7 @@ import { validateMemoryReferences } from './reference-validation.js';
 import {
   CONTESTED_MARKER,
   formatMemoryTimestamp,
+  groupContestedAdjacent,
   humanizeMemoryKind,
   isContested,
   renderMemoryLine,
@@ -115,7 +116,16 @@ function renderHeaderHighlights(items: ParsedMemoryItem[]): string | null {
       item.kind === 'episode:test_cycle',
     )
     .slice(0, 2)
-    .map(item => renderMemorySnippet(renderMemoryLine(item, 1), 1, 110));
+    // Truncate first, then re-attach the marker. The 110-char cap is
+    // unconditional — not the output budget — so appending it beforehand loses
+    // it outright on any note longer than ~97 chars, presenting one side of an
+    // open contest as settled on every SessionStart.
+    .map(item => {
+      const snippet = renderMemorySnippet(renderMemoryLine(item, 1), 1, 110);
+      return isContested(item) && !snippet.includes(CONTESTED_MARKER.trim())
+        ? `${snippet}${CONTESTED_MARKER}`
+        : snippet;
+    });
 
   if (highlights.length === 0) {
     return null;
@@ -170,7 +180,12 @@ function renderResumeCandidate(items: ParsedMemoryItem[]): string | null {
   if (!content) {
     return null;
   }
-  return `Resume: ${subjectPart}${content}`;
+  // An intent can carry conflict = 1: detection scopes only the prior to
+  // decision, so the incoming note may be any kind. Without this the resume
+  // pointer hands back one retracted side of an open contest as the thing to
+  // pick up next.
+  const contested = isContested(candidate) ? CONTESTED_MARKER : '';
+  return `Resume: ${subjectPart}${content}${contested}`;
 }
 
 function renderSnapshotSection(snapshot: BranchSnapshotRow): string {
@@ -266,7 +281,10 @@ function renderWorkingNotes(items: ParsedMemoryItem[]): string[] {
       continue;
     }
 
-    sections.push(`${labels[kind]}:\n${notes.map(renderNoteBullet).join('\n')}`);
+    // Each section is a single kind, so grouping here seats both sides of a
+    // same-kind contest together without disturbing the section order.
+    const grouped = groupContestedAdjacent(notes);
+    sections.push(`${labels[kind]}:\n${grouped.map(renderNoteBullet).join('\n')}`);
   }
 
   return sections;
@@ -301,7 +319,10 @@ function renderCurrentSessionNotes(items: ParsedMemoryItem[]): string | null {
     return null;
   }
 
-  return `Current session:\n${items.map(renderNoteBullet).join('\n')}`;
+  // Mixed kinds, ordered by recency rather than by kind, so full grouping is
+  // safe here — there is no primary kind sort to preserve.
+  const grouped = groupContestedAdjacent(items);
+  return `Current session:\n${grouped.map(renderNoteBullet).join('\n')}`;
 }
 
 function normalizeEvidenceKey(text: string): string {

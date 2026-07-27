@@ -191,3 +191,68 @@ describe('buildSessionBrief', () => {
     expect(brief).toContain('More: cortex_recall(topic).');
   });
 });
+
+// ── Contested marker (FR-2, review round 1) ───────────────────────────
+
+describe('buildSessionBrief — contested notes', () => {
+  it('marks a contested decision', () => {
+    const store = createStore();
+    const session = store.createSession({ focus: 'spool flush' });
+
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'flush the spool at turn end',
+    });
+    const second = store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'do not flush the spool at turn end',
+    });
+    expect(second.conflicts?.length ?? 0).toBeGreaterThan(0);
+
+    // This channel prints unprompted on every SessionStart and selects
+    // note:decision in state 'warm' — exactly an active contested decision.
+    // Unmarked, it presents one side of an open contest as settled memory.
+    const brief = buildSessionBrief(store);
+    expect(brief).toContain('decision:');
+    expect(brief).toContain('[contested]');
+  });
+
+  it('leaves an uncontested decision unmarked', () => {
+    const store = createStore();
+    const session = store.createSession({ focus: 'spool flush' });
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'flush the spool at turn end',
+    });
+
+    expect(buildSessionBrief(store)).not.toContain('[contested]');
+  });
+
+  it('stays inside its token budget with the marker present', () => {
+    const store = createStore();
+    const session = store.createSession({ focus: 'spool flush' });
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'flush the spool at turn end',
+    });
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'do not flush the spool at turn end',
+    });
+
+    const brief = buildSessionBrief(store);
+    expect(brief).toContain('[contested]');
+    // The SessionStart brief is capped at 150 tokens and must stay small.
+    expect(Math.ceil(brief.length / 4)).toBeLessThanOrEqual(150);
+  });
+});
