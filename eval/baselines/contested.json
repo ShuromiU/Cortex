@@ -1,0 +1,131 @@
+{
+  "quality": {
+    "fixtures": [
+      {
+        "topic": "spool flush policy",
+        "expected_top": "contested-current",
+        "top_result_id": "contested-current",
+        "top1_hit": true,
+        "recall_at_3": 1,
+        "noise_count": 0,
+        "stale_count": 0,
+        "output": {
+          "chars": 468,
+          "est_tokens": 117,
+          "preview": "Most relevant — Decision [spool flush policy] (2d ago, refs OK)\nDecision [2026-07-25 15:57Z]: [spool flush policy] flush the spool at turn end in src/capture/spool.ts. [contested]\nDecision [2026-06-12 15:57Z]: [spool flush policy] do not flush the spool at turn end in src/capture/spool.ts. [contested]\nInsight [2026-07-"
+        },
+        "token_budget": {
+          "max_tokens": null,
+          "actual_tokens": 117,
+          "passed": true
+        },
+        "output_assertions": {
+          "contains_missed": [],
+          "excludes_violated": [],
+          "passed": true
+        },
+        "score_breakdown": [
+          {
+            "id": "contested-current",
+            "subject": "spool flush policy",
+            "text_preview": "Decision: flush the spool at turn end in src/capture/spool.ts.\nSubject: spool flush policy\nConflict: true",
+            "scores": {
+              "retrieval_score": 52.999994803327944,
+              "lexical_score": 26.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 3,
+              "exact_phrase": true,
+              "fts_rank": -0.000005982907699825188
+            }
+          },
+          {
+            "id": "flush-timing-insight",
+            "subject": "spool flush policy",
+            "text_preview": "Insight: the spool flush policy is idempotent per batch, so a turn-end flush and a size-triggered flush cannot double-count.",
+            "scores": {
+              "retrieval_score": 47.09999489785875,
+              "lexical_score": 26.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0.6,
+              "token_hits": 3,
+              "exact_phrase": true,
+              "fts_rank": -0.000005874074443692432
+            }
+          },
+          {
+            "id": "contested-prior",
+            "subject": "spool flush policy",
+            "text_preview": "Decision: do not flush the spool at turn end in src/capture/spool.ts.\nSubject: spool flush policy\nConflict: true",
+            "scores": {
+              "retrieval_score": 45.299994836968935,
+              "lexical_score": 26.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 0.2,
+              "hotness_bonus": 0.2,
+              "access_bonus": 0,
+              "token_hits": 3,
+              "exact_phrase": true,
+              "fts_rank": -0.000005944176855487426
+            }
+          }
+        ],
+        "passed": true
+      }
+    ],
+    "top1_hit": 1,
+    "recall_at_3": 1,
+    "noise_count": 0,
+    "stale_count": 0,
+    "output_tokens": 117
+  },
+  "generated_at": "2026-07-27T15:57:35.943Z",
+  "schema_version": 4,
+  "tables": {
+    "sessions": 1,
+    "events": 0,
+    "notes": 0,
+    "state": 0,
+    "token_ledger": 0,
+    "command_runs": 0,
+    "episodes": 0,
+    "branch_snapshots": 0,
+    "project_snapshots": 0,
+    "memory_items": 3,
+    "memory_item_semantics": 0,
+    "current_app_graphs": 1,
+    "memory_references": 2,
+    "retrieval_log": 1,
+    "file_renames": 0
+  },
+  "header": {
+    "chars": 842,
+    "est_tokens": 211,
+    "preview": "Cortex: spool flush | 1 session on project\nHot: Decision [2026-07-25 15:57Z]: [spool flush policy] flush the spool at turn end in src/capture/spool.ts. [cont… | Insight [2026-07-24 15:57Z]: [spool flush policy] the spool flush policy is idempotent per batch, so a turn-e…\nCortex is ambient: prior context may surface aut"
+  },
+  "full_state": {
+    "chars": 307,
+    "est_tokens": 77,
+    "preview": "Decisions:\n- Decision [2026-07-25 15:57Z]: [spool flush policy] flush the spool at turn end in src/capture/spool.ts. [contested]\n\nInsights:\n- Insight [2026-07-24 15:57Z]: [spool flush policy] the spool flush policy is idempotent per batch, so a turn-end flush and a size-triggered flush cannot double-count."
+  },
+  "topics": [
+    {
+      "topic": "spool flush",
+      "output": {
+        "chars": 468,
+        "est_tokens": 117,
+        "preview": "Most relevant — Decision [spool flush policy] (2d ago, refs OK)\nDecision [2026-07-25 15:57Z]: [spool flush policy] flush the spool at turn end in src/capture/spool.ts. [contested]\nDecision [2026-06-12 15:57Z]: [spool flush policy] do not flush the spool at turn end in src/capture/spool.ts. [contested]\nInsight [2026-07-"
+      }
+    }
+  ]
+}

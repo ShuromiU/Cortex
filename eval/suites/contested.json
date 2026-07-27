@@ -1,0 +1,50 @@
+{
+  "_comment": "FR-2 contested rendering. Two decisions on one subject are in an open contest; a non-contested insight on the same topic outranks the losing side, so the pair is split by ranking alone. Locks two things: both sides carry the [contested] marker, and groupContestedAdjacent pulls the pair back together (the needle '[contested]\\nDecision [' only holds if a Decision — not the Insight — follows the contested line). Timestamps are excluded from every needle because the scenario clock is generation-time.",
+  "seed": {
+    "scope": { "type": "branch", "key": "eval/contested" },
+    "focus": "spool flush",
+    "app_graph": {
+      "head_oid": "eval0000000000000000000000000000000000cc",
+      "files": ["src/capture/spool.ts", "src/transports/hook-entry.ts"]
+    },
+    "items": [
+      {
+        "id": "contested-current",
+        "kind": "note:decision",
+        "subject": "spool flush policy",
+        "text": "Decision: flush the spool at turn end in src/capture/spool.ts.\nSubject: spool flush policy\nConflict: true",
+        "state": "hot",
+        "importance": 2.5,
+        "age_days": 2
+      },
+      {
+        "id": "flush-timing-insight",
+        "kind": "note:insight",
+        "subject": "spool flush policy",
+        "text": "Insight: the spool flush policy is idempotent per batch, so a turn-end flush and a size-triggered flush cannot double-count.",
+        "state": "hot",
+        "importance": 1.8,
+        "access_count": 4,
+        "age_days": 3
+      },
+      {
+        "id": "contested-prior",
+        "kind": "note:decision",
+        "subject": "spool flush policy",
+        "text": "Decision: do not flush the spool at turn end in src/capture/spool.ts.\nSubject: spool flush policy\nConflict: true",
+        "state": "cold",
+        "importance": 1.0,
+        "age_days": 45
+      }
+    ]
+  },
+  "fixtures": [
+    {
+      "topic": "spool flush policy",
+      "expected_top": "contested-current",
+      "allowed": ["contested-prior"],
+      "expect_output_contains": ["[contested]", "[contested]\nDecision ["],
+      "expect_output_excludes": ["[conflict]"]
+    }
+  ]
+}

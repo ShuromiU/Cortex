@@ -2,6 +2,7 @@ import type { CortexStore } from '../db/store.js';
 import {
   describeValidity,
   formatAgeLabel,
+  groupContestedAdjacent,
   humanizeMemoryKind,
   renderMemoryLine,
 } from './render.js';
@@ -95,7 +96,11 @@ export function recall(
 
   const detail = options.detail ?? 'none';
   const budget = options.budget ?? DEFAULT_RECALL_BUDGET;
-  const evidence = retrieval.results.map(
+  // Display order only. `retrieval.results` stays in rank order for the log and
+  // for the eval harness, which reads ranking metrics straight off retrieval —
+  // so reordering here cannot move top1_hit or recall_at_3.
+  const ordered = groupContestedAdjacent(retrieval.results);
+  const evidence = ordered.map(
     item =>
       `${renderMemoryLine(item, 3)}${detail === 'scores' ? renderScoreDetail(item) : ''}`,
   );

@@ -29,6 +29,70 @@ export function humanizeMemoryKind(kind: string): string {
   return titleCase(kind.replace(/_/g, ' '));
 }
 
+// ── Contested items (FR-2) ──────────────────────────────────────────────
+
+/** Marker for an item in an unresolved contest. 12 chars → 3 tokens; AC caps it at 4. */
+export const CONTESTED_MARKER = ' [contested]';
+
+/**
+ * A contest is recorded on `notes.conflict`, but `ParsedMemoryItem` carries no
+ * such column — the signal survives projection only as the `Conflict: true`
+ * line `buildNoteMemoryText` writes into the item text. Reading it back out is
+ * forced rather than chosen: a real column needs a migration, and this release
+ * spends its single `SCHEMA_VERSION` bump elsewhere. The adjacent `resolved`
+ * sniff below works the same way and shares the same flaw — a note whose own
+ * content contains this phrase reads as contested. Both fix together, with the
+ * column, in a release that can afford it.
+ */
+export function isContested(item: ParsedMemoryItem): boolean {
+  return item.text.toLowerCase().includes('conflict: true');
+}
+
+/**
+ * Reorders results so both sides of a contest read together, pulling later
+ * counterparts up to sit directly behind the highest-ranked side. Stable: an
+ * item never moves ahead of where it ranked, so rank 0 is fixed and ranking
+ * metrics cannot move. Pairs on `(scope_key, subject)` because contradiction
+ * detection is scope-keyed — the same subject on another branch is a different
+ * conversation, not the other half of this one.
+ */
+export function groupContestedAdjacent<T extends ParsedMemoryItem>(items: T[]): T[] {
+  const placed = new Set<number>();
+  const ordered: T[] = [];
+
+  for (let index = 0; index < items.length; index += 1) {
+    if (placed.has(index)) {
+      continue;
+    }
+
+    const item = items[index]!;
+    placed.add(index);
+    ordered.push(item);
+
+    if (!item.subject || !isContested(item)) {
+      continue;
+    }
+
+    for (let candidate = index + 1; candidate < items.length; candidate += 1) {
+      if (placed.has(candidate)) {
+        continue;
+      }
+
+      const other = items[candidate]!;
+      if (
+        other.subject === item.subject &&
+        other.scope_key === item.scope_key &&
+        isContested(other)
+      ) {
+        placed.add(candidate);
+        ordered.push(other);
+      }
+    }
+  }
+
+  return ordered;
+}
+
 export function renderMemorySnippet(
   text: string,
   maxLines = 3,
@@ -114,10 +178,11 @@ export function renderMemoryLine(item: ParsedMemoryItem, maxLines = 3): string {
       ? firstLine.slice(firstLine.indexOf(': ') + 2)
       : firstLine;
     const subject = item.subject ? `[${item.subject}] ` : '';
+    const contested = isContested(item) ? CONTESTED_MARKER : '';
     const resolved = item.text.toLowerCase().includes('status: resolved') ? ' (resolved)' : '';
     const timestamp = formatMemoryTimestamp(item.created_at);
     const timestampPart = timestamp ? ` [${timestamp}]` : '';
-    return `${label}${timestampPart}: ${subject}${content}${resolved}${renderReferenceLabel(item)}`;
+    return `${label}${timestampPart}: ${subject}${content}${contested}${resolved}${renderReferenceLabel(item)}`;
   }
 
   if (item.kind === 'session_state' || item.kind === 'episode:session_summary') {

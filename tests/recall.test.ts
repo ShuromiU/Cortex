@@ -4,6 +4,7 @@ import { applySchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import { recall } from '../src/query/recall.js';
 import { brief } from '../src/query/brief.js';
+import { retrieveMemory } from '../src/query/retrieval.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -342,5 +343,144 @@ describe('recall — answer shape and budgets', () => {
     const budgeted = brief(store, 'worker pool drain', undefined, { budget: 60 });
     expect(budgeted).toContain('trimmed');
     expect(budgeted.split('\n').some(line => line.startsWith('Insight ['))).toBe(true);
+  });
+});
+
+// ── Contested rendering (FR-2, Story 1.2) ─────────────────────────────
+
+/**
+ * Seeds a real contest through the write path so these tests exercise Story
+ * 1.1's detector rather than a hand-built `Conflict: true` string.
+ */
+function seedContest(store: CortexStore): { sessionId: string } {
+  const session = store.createSession();
+  store.insertNote({
+    sessionId: session.id,
+    kind: 'decision',
+    subject: 'spool flush',
+    content: 'flush the spool at turn end',
+  });
+  const second = store.insertNote({
+    sessionId: session.id,
+    kind: 'decision',
+    subject: 'spool flush',
+    content: 'do not flush the spool at turn end',
+  });
+  expect(second.conflicts?.length ?? 0).toBeGreaterThan(0);
+  return { sessionId: session.id };
+}
+
+describe('recall — contested items', () => {
+  it('marks both sides of a contest', () => {
+    const store = makeStore();
+    seedContest(store);
+
+    const result = recall(store, 'spool flush');
+    const marked = result.split('\n').filter(line => line.includes('[contested]'));
+    expect(marked).toHaveLength(2);
+  });
+
+  it('never renders the pre-1.2 [conflict] marker', () => {
+    const store = makeStore();
+    seedContest(store);
+
+    expect(recall(store, 'spool flush')).not.toContain('[conflict]');
+  });
+
+  it('leaves uncontested notes unmarked', () => {
+    const store = makeStore();
+    const session = store.createSession();
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'flush the spool at turn end',
+    });
+
+    expect(recall(store, 'spool flush')).not.toContain('[contested]');
+  });
+
+  it('renders both sides adjacently when an uncontested note outranks one of them', () => {
+    const db = createTestDb();
+    const store = new CortexStore(db);
+    const session = store.createSession();
+
+    const losing = store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'flush the spool at turn end',
+    });
+    const winning = store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'do not flush the spool at turn end',
+    });
+    expect(winning.conflicts?.length ?? 0).toBeGreaterThan(0);
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'insight',
+      subject: 'spool flush',
+      content: 'the spool flush is idempotent per batch so a double flush cannot double count',
+    });
+
+    // Age the losing side and warm the insight so ranking alone puts the
+    // uncontested note *between* the two contested ones. Applied after the
+    // contest is recorded, because markConflict re-syncs the memory item.
+    const aged = new Date(Date.now() - 90 * 24 * 3600 * 1000).toISOString();
+    db.prepare("UPDATE memory_items SET created_at = ?, state = 'cold' WHERE source_id = ?").run(
+      aged,
+      losing.id,
+    );
+    const insightItem = db
+      .prepare("SELECT id FROM memory_items WHERE kind = 'note:insight'")
+      .get() as { id: string };
+    for (let index = 0; index < 3; index += 1) {
+      store.touchMemoryItems([insightItem.id]);
+    }
+
+    // Guard: without grouping the pair really would be split by ranking.
+    const ranked = retrieveMemory(store, 'spool flush', 8).results;
+    expect(ranked.map(item => item.kind)).toEqual([
+      'note:decision',
+      'note:insight',
+      'note:decision',
+    ]);
+
+    const lines = recall(store, 'spool flush')
+      .split('\n')
+      .filter(line => line.startsWith('Decision') || line.startsWith('Insight'));
+    const contestedAt = lines
+      .map((line, index) => (line.includes('[contested]') ? index : -1))
+      .filter(index => index >= 0);
+
+    expect(contestedAt).toHaveLength(2);
+    expect(contestedAt[1]! - contestedAt[0]!).toBe(1);
+  });
+
+  it('subjects the marker to the same budget as everything else', () => {
+    const store = makeStore();
+    seedContest(store);
+
+    const budget = 40;
+    const result = recall(store, 'spool flush', { budget });
+    // The marker rides inside its line and is trimmed with it — no special casing.
+    expect(result).toContain('trimmed');
+    const lead = result.split('\n')[0]!;
+    const evidence = result.split('\n').slice(1, -1);
+    const used = Math.ceil(lead.length / 4) + evidence.reduce((sum, l) => sum + Math.ceil(l.length / 4), 0);
+    expect(used).toBeLessThanOrEqual(budget);
+  });
+});
+
+describe('brief — contested items', () => {
+  it('marks a contested note', () => {
+    const store = makeStore();
+    seedContest(store);
+
+    const result = brief(store, 'spool flush');
+    expect(result).toContain('[contested]');
+    expect(result).not.toContain('[conflict]');
   });
 });

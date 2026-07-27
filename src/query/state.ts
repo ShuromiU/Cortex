@@ -5,8 +5,10 @@ import { deriveProjectScopeKey } from '../scope/keys.js';
 import { getPreferredScope } from './scope.js';
 import { validateMemoryReferences } from './reference-validation.js';
 import {
+  CONTESTED_MARKER,
   formatMemoryTimestamp,
   humanizeMemoryKind,
+  isContested,
   renderMemoryLine,
   renderMemorySnippet,
 } from './render.js';
@@ -240,11 +242,11 @@ function extractNoteContent(item: ParsedMemoryItem): string {
 
 function renderNoteBullet(item: ParsedMemoryItem): string {
   const subject = item.subject ? `[${item.subject}] ` : '';
-  const conflict = item.text.toLowerCase().includes('conflict: true') ? ' [conflict]' : '';
+  const contested = isContested(item) ? CONTESTED_MARKER : '';
   const resolved = item.text.toLowerCase().includes('status: resolved') ? ' (resolved)' : '';
   const timestamp = formatMemoryTimestamp(item.created_at);
   const timestampPart = timestamp ? ` [${timestamp}]` : '';
-  return `- ${humanizeMemoryKind(item.kind)}${timestampPart}: ${subject}${extractNoteContent(item)}${conflict}${resolved}`;
+  return `- ${humanizeMemoryKind(item.kind)}${timestampPart}: ${subject}${extractNoteContent(item)}${contested}${resolved}`;
 }
 
 function renderWorkingNotes(items: ParsedMemoryItem[]): string[] {

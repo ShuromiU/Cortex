@@ -255,14 +255,14 @@ describe('buildFullState - notes and events', () => {
     }
   });
 
-  it('shows conflict flag for conflicted notes', () => {
+  it('shows the contested marker for conflicted notes', () => {
     const store = makeStore();
     const session = store.createSession();
     const note = store.insertNote({ sessionId: session.id, kind: 'insight', content: 'conflicting' });
     store.markConflict(note.id);
 
     const state = buildFullState(store);
-    expect(state).toContain('[conflict]');
+    expect(state).toContain('[contested]');
   });
 
   it('does not render superseded notes', () => {
@@ -535,5 +535,71 @@ describe('buildFullState - groups by topic', () => {
 
     const state = buildFullState(store);
     expect(state).toContain('Overall direction: microservices.');
+  });
+});
+
+// ── Contested rendering (FR-2, Story 1.2) ─────────────────────────────
+
+/** Seeds a real contest through the write path (Story 1.1's detector). */
+function seedStateContest(store: CortexStore, sessionId: string): void {
+  store.insertNote({
+    sessionId,
+    kind: 'decision',
+    subject: 'spool flush',
+    content: 'flush the spool at turn end',
+  });
+  const second = store.insertNote({
+    sessionId,
+    kind: 'decision',
+    subject: 'spool flush',
+    content: 'do not flush the spool at turn end',
+  });
+  expect(second.conflicts?.length ?? 0).toBeGreaterThan(0);
+}
+
+describe('buildFullState - contested notes', () => {
+  it('marks contested notes in the Current session block', () => {
+    const store = makeStore();
+    const session = store.createSession({ focus: 'spool work' });
+    seedStateContest(store, session.id);
+
+    const state = buildFullState(store);
+    expect(state).toContain('Current session:');
+    const marked = state.split('\n').filter(line => line.includes('[contested]'));
+    expect(marked.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('marks contested notes in the kind-grouped working set', () => {
+    const store = makeStore();
+    const session = store.createSession({ focus: 'prior work' });
+    seedStateContest(store, session.id);
+    store.endSession(session.id);
+    store.createSession({ focus: 'current work' });
+
+    const state = buildFullState(store);
+    expect(state).toContain('Decisions:');
+    const marked = state.split('\n').filter(line => line.includes('[contested]'));
+    expect(marked.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('never renders the pre-1.2 [conflict] marker', () => {
+    const store = makeStore();
+    const session = store.createSession({ focus: 'spool work' });
+    seedStateContest(store, session.id);
+
+    expect(buildFullState(store)).not.toContain('[conflict]');
+  });
+
+  it('leaves uncontested notes unmarked', () => {
+    const store = makeStore();
+    const session = store.createSession({ focus: 'spool work' });
+    store.insertNote({
+      sessionId: session.id,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'flush the spool at turn end',
+    });
+
+    expect(buildFullState(store)).not.toContain('[contested]');
   });
 });

@@ -318,6 +318,19 @@ Resolving either side with `cortex_resolve` closes the contest and clears the ma
 
 Known limit: token matching is ASCII-only, so non-Latin note content never conflicts. A silent miss rather than a wrong answer.
 
+### Contested items in retrieval
+
+A contested memory renders a `[contested]` marker wherever it surfaces — `cortex_recall`, `cortex_brief`, `cortex_state`, and the reflex that injects remembered context automatically:
+
+```
+Decision [2026-07-25 15:56Z]: [spool flush policy] flush the spool at turn end. [contested]
+Decision [2026-06-12 15:56Z]: [spool flush policy] do not flush the spool at turn end. [contested]
+```
+
+In `cortex_recall`, both sides are pulled together so they read as one disagreement rather than two unrelated claims separated by whatever happened to rank between them. Elsewhere they are marked but not reordered: `cortex_brief` groups by note kind and `cortex_state` renders kind-headed sections, so forcing a decision next to an insight would break the ordering those surfaces exist to provide.
+
+The marker costs three tokens and is trimmed with its line like any other content — a contested item never gets budget priority over an uncontested one.
+
 ## Reliability Evaluation
 
 `cortex evaluate` still reports table counts and output sizes. With `--suite`, it also runs retrieval-quality fixtures:
