@@ -160,6 +160,17 @@ function notePreview(content: string): string {
     : content;
 }
 
+function note0Plural(count: number): string {
+  return count === 1 ? 'note' : 'notes';
+}
+
+/**
+ * Contested priors are exempt from auto-supersede, so several can be active on
+ * one subject at once. Cap what a single write reports — every output surface
+ * is budgeted, and this one is on the write path.
+ */
+const MAX_REPORTED_CONFLICTS = 3;
+
 export const TOOL_DEFINITIONS = [
   {
     name: 'cortex_route',
@@ -404,15 +415,19 @@ export function handleToolCall(
         if (!note.conflicts || note.conflicts.length === 0) {
           return confirmation;
         }
+        const total = note.conflicts.length;
         const lines = [
           confirmation,
-          `Contested — opposes ${note.conflicts.length} active decision${note.conflicts.length === 1 ? '' : 's'} on this subject. Both sides are now marked contested:`,
+          `Contested — opposes ${total} active decision${total === 1 ? '' : 's'} on this subject. Both sides are now marked contested:`,
         ];
-        for (const conflict of note.conflicts) {
+        for (const conflict of note.conflicts.slice(0, MAX_REPORTED_CONFLICTS)) {
           const priorStamp = formatMemoryTimestamp(conflict.timestamp);
           lines.push(
             `  - ${conflict.id}${priorStamp ? ` [${priorStamp}]` : ''}: ${notePreview(conflict.content)}`,
           );
+        }
+        if (total > MAX_REPORTED_CONFLICTS) {
+          lines.push(`  … and ${total - MAX_REPORTED_CONFLICTS} more (cortex_recall for the rest)`);
         }
         lines.push('Close it with cortex_resolve(note_id) once you know which one holds.');
         return lines.join('\n');
@@ -428,6 +443,31 @@ export function handleToolCall(
       const status = (args['status'] as 'resolved' | 'superseded' | undefined) ?? 'resolved';
       const replacement = args['replacement'] as string | undefined;
 
+      const scopeKey = ensureScopedSession(store, cwd).scope_key;
+
+      // Resolving by subject used to lean on an invariant that no longer holds:
+      // before contested priors were exempted from auto-supersede, a
+      // (kind, subject) pair had at most one active note, so
+      // `findActiveNoteBySubject`'s LIMIT 1 was unambiguous. With a live contest
+      // there are two, and taking the newest resolved the agent's *current*
+      // position while leaving the retracted one as the sole active decision —
+      // telling the next session the opposite of what was last decided. When the
+      // subject is contested, make the caller name the side.
+      if (!noteId && subject) {
+        const active = store.getActiveNotesBySubjectAndScope(subject, scopeKey);
+        if (active.length > 1) {
+          const lines = active.map(candidate => {
+            const stamp = formatMemoryTimestamp(candidate.timestamp);
+            return `  - ${candidate.id}${stamp ? ` [${stamp}]` : ''}: ${notePreview(candidate.content)}`;
+          });
+          return [
+            `Error: subject "${subject}" has ${active.length} active ${note0Plural(active.length)} — resolving by subject would pick one arbitrarily.`,
+            'Re-run with the note_id of the side you want to close:',
+            ...lines,
+          ].join('\n');
+        }
+      }
+
       const note = noteId
         ? store.getNote(noteId)
         : subject
@@ -439,24 +479,34 @@ export function handleToolCall(
 
       try {
         if (replacement) {
-          // insertNote auto-supersedes the active note with the same kind+subject.
           const replacementNote = store.insertNote({
             sessionId: ensureSession(store, cwd),
             kind: note.kind as InsertNoteOpts['kind'],
             content: replacement,
             ...(note.subject ? { subject: note.subject } : {}),
+            // The outgoing note is still active at this point, so detection
+            // would fire against it — and a replacement that reverses its
+            // predecessor is the common shape here. That produced a brand-new
+            // note permanently flagged as contested with a note the same call
+            // just retired. This is explicit user resolution; there is nothing
+            // to contest.
+            skipConflictDetection: true,
           });
           // Set the outgoing note's status explicitly rather than leaning on
-          // insertNote's auto-supersede: that is vetoed when the replacement
-          // contradicts the note it replaces (AD-17), and a replacement that
-          // reverses its predecessor is the common case here. cortex_resolve is
-          // the explicit close-out path — the user has already broken the tie.
+          // insertNote's auto-supersede, which the AD-17 veto can suppress.
           store.updateNoteStatus(note.id, status === 'resolved' ? 'resolved' : 'superseded');
+          if (note.subject) {
+            store.clearConflictsForSubject(note.subject, scopeKey);
+          }
           return `Superseded (${note.kind}${note.subject ? `[${note.subject}]` : ''}) with note ${replacementNote.id}.`;
         }
 
         store.updateNoteStatus(note.id, status);
-        return `Marked ${note.kind}${note.subject ? `[${note.subject}]` : ''} as ${status}.`;
+        // Closing a side closes the contest — otherwise the survivor renders
+        // `[contested]` forever against a note nobody is arguing with.
+        const cleared = note.subject ? store.clearConflictsForSubject(note.subject, scopeKey) : [];
+        const clearedNote = cleared.length > 0 ? ' Contest closed.' : '';
+        return `Marked ${note.kind}${note.subject ? `[${note.subject}]` : ''} as ${status}.${clearedNote}`;
       } catch (err) {
         return `Error: ${err instanceof Error ? err.message : String(err)}`;
       }

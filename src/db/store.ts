@@ -15,14 +15,17 @@ import {
   type MemoryItemState,
 } from '../memory/items.js';
 import { extractMemoryReferences, type ExtractedMemoryReference } from '../memory/references.js';
-import { detectContradiction } from '../memory/conflict.js';
+import { analyzeNote, compareAnalyzed } from '../memory/conflict.js';
 
 /** Row shape the contradiction lookup selects; also feeds the supersede veto. */
 interface NoteConflictCandidate {
   id: string;
+  kind: string;
   subject: string;
   timestamp: string;
   content: string;
+  conflict: number;
+  scope_key: string | null;
 }
 
 // ── Row types (raw DB rows) ───────────────────────────────────────────
@@ -339,6 +342,12 @@ export interface InsertNoteOpts {
   content: string;
   subject?: string;
   alternatives?: string[];
+  /**
+   * Skip FR-1 contradiction detection for this write. Only for explicit user
+   * resolution (`cortex_resolve` with a replacement), where the note being
+   * replaced is still active and would otherwise contest its own replacement.
+   */
+  skipConflictDetection?: boolean;
 }
 
 export interface ParsedNote {
@@ -1406,112 +1415,147 @@ export class CortexStore {
 
   insertNote(opts: InsertNoteOpts): InsertedNote {
     const kindsRequiringSubject = ['decision', 'intent', 'blocker', 'focus'];
-    if (kindsRequiringSubject.includes(opts.kind) && !opts.subject) {
+    // `!opts.subject` passes for "   ", which then normalizes to "" — not null.
+    // That bypassed the guard and dropped every whitespace-subject note into one
+    // shared "" bucket where unrelated notes contested each other.
+    const trimmedSubject = opts.subject?.trim() ? opts.subject.trim() : undefined;
+    if (kindsRequiringSubject.includes(opts.kind) && !trimmedSubject) {
       throw new Error(`Subject is required for ${opts.kind} notes`);
     }
 
-    const subject = opts.subject ? opts.subject.trim().toLowerCase() : null;
+    const subject = trimmedSubject ? trimmedSubject.toLowerCase() : null;
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
     const alternativesJson =
       opts.alternatives !== undefined ? JSON.stringify(opts.alternatives) : null;
 
-    const supersededIds: string[] = [];
-    const conflicts: NoteConflict[] = [];
+    // The whole write is one transaction. Detect -> supersede -> insert -> mark
+    // are four statements; without this a concurrent writer landing between the
+    // detection SELECT and the supersede UPDATE supersedes the very row this
+    // write just decided to protect, losing the AD-17 veto. Two Claude sessions
+    // on one project share a database file, so this is reachable.
+    const run = this.db.transaction((): { supersededIds: string[]; conflicts: NoteConflict[] } => {
+      const supersededIds: string[] = [];
+      const conflicts: NoteConflict[] = [];
 
-    // FR-1 contradiction detection. AC #2: a subjectless note issues no query
-    // at all, so everything below is gated on having a subject. AC #1 scopes the
-    // *prior* to an active note:decision; the incoming note may be any kind.
-    let priorDecisions: NoteConflictCandidate[] = [];
-    if (subject !== null) {
-      priorDecisions = this.db
-        .prepare(
-          `SELECT id, subject, timestamp, content FROM notes
-           WHERE kind = 'decision' AND subject = ? AND status = 'active'`,
-        )
-        .all(subject) as NoteConflictCandidate[];
+      // FR-1 contradiction detection. AC #2: a subjectless note issues no query
+      // at all, so everything below is gated on having a subject. AC #1 scopes
+      // the *prior* to an active note:decision; the incoming may be any kind.
+      let priors: NoteConflictCandidate[] = [];
+      if (subject !== null) {
+        // One lookup covers detection (kind='decision') and the supersede
+        // candidates (kind=opts.kind); they are partitioned below rather than
+        // asking twice. Deliberately NOT scope-filtered: auto-supersede has
+        // always been scope-blind and changing that is not this story's to make.
+        // The scope filter applies only to the contest decision below.
+        priors = this.db
+          .prepare(
+            `SELECT n.id, n.kind, n.subject, n.timestamp, n.content, n.conflict, s.scope_key
+               FROM notes n
+               INNER JOIN sessions s ON s.id = n.session_id
+              WHERE n.subject = ?
+                AND n.status = 'active'
+                AND (n.kind = 'decision' OR n.kind = ?)`,
+          )
+          .all(subject, opts.kind) as NoteConflictCandidate[];
 
-      for (const prior of priorDecisions) {
-        const evidence = detectContradiction(prior.content, opts.content);
-        if (evidence) {
-          conflicts.push({
-            id: prior.id,
-            subject: prior.subject,
-            timestamp: prior.timestamp,
-            content: prior.content,
-            signal: evidence.signal,
-          });
+        const writerScope = this.scopeKeyForSession(opts.sessionId);
+        const incoming = analyzeNote(opts.content);
+        for (const prior of priors) {
+          if (opts.skipConflictDetection) break;
+          if (prior.kind !== 'decision') continue;
+          // A decision on another branch is not a contradiction of this one —
+          // two branches holding opposite decisions is the ordinary reason
+          // branches exist, and the contest marker would surface in the other
+          // branch's working set.
+          if (prior.scope_key !== writerScope) continue;
+          const evidence = compareAnalyzed(analyzeNote(prior.content), incoming);
+          if (evidence) {
+            conflicts.push({
+              id: prior.id,
+              subject: prior.subject,
+              timestamp: prior.timestamp,
+              content: prior.content,
+              signal: evidence.signal,
+            });
+          }
         }
       }
-    }
-    const contestedIds = new Set(conflicts.map(conflict => conflict.id));
 
-    // Auto-supersede: for decision and intent kinds, supersede existing active
-    // notes with same kind+subject — EXCEPT any the incoming note contradicts.
-    // AD-17: conflict detection runs first and vetoes automatic resolution.
-    // Without the veto, `memoryStateForNote` maps the superseded prior to
-    // 'archived', so the write would flag a contest and bury one side of it in
-    // the same transaction.
-    if ((opts.kind === 'decision' || opts.kind === 'intent') && subject !== null) {
-      // For a decision the detection lookup already selected exactly the rows
-      // this needs; only an intent has to ask separately.
-      const existing =
-        opts.kind === 'decision'
-          ? priorDecisions.map(row => ({ id: row.id }))
-          : (this.db
-              .prepare(
-                `SELECT id FROM notes
-                 WHERE kind = ? AND subject = ? AND status = 'active'`,
-              )
-              .all(opts.kind, subject) as Array<{ id: string }>);
+      // AD-17 veto set: what this write contradicts, PLUS anything already
+      // contested. An unresolved contest is not closed by a later unrelated
+      // write — without the second clause, a third non-contradicting decision
+      // superseded and archived *both* sides of an open contest, which is the
+      // exact outcome the veto exists to prevent.
+      const contestedIds = new Set([
+        ...conflicts.map(conflict => conflict.id),
+        ...priors.filter(prior => prior.conflict === 1).map(prior => prior.id),
+      ]);
 
-      supersededIds.push(...existing.map(row => row.id).filter(rowId => !contestedIds.has(rowId)));
-      if (supersededIds.length > 0) {
-        const placeholders = supersededIds.map(() => '?').join(', ');
-        this.db
-          .prepare(`UPDATE notes SET status = 'superseded' WHERE id IN (${placeholders})`)
-          .run(...supersededIds);
+      if ((opts.kind === 'decision' || opts.kind === 'intent') && subject !== null) {
+        supersededIds.push(
+          ...priors
+            .filter(prior => prior.kind === opts.kind && !contestedIds.has(prior.id))
+            .map(prior => prior.id),
+        );
+        if (supersededIds.length > 0) {
+          const placeholders = supersededIds.map(() => '?').join(', ');
+          this.db
+            .prepare(`UPDATE notes SET status = 'superseded' WHERE id IN (${placeholders})`)
+            .run(...supersededIds);
+        }
       }
-    }
 
-    this.db
-      .prepare(
-        `INSERT INTO notes (id, session_id, timestamp, kind, subject, content, alternatives, status, conflict)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
-      )
-      .run(
-        id,
-        opts.sessionId,
-        now,
-        opts.kind,
-        subject,
-        opts.content,
-        alternativesJson,
-        conflicts.length > 0 ? 1 : 0,
-      );
+      this.db
+        .prepare(
+          `INSERT INTO notes (id, session_id, timestamp, kind, subject, content, alternatives, status, conflict)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
+        )
+        .run(
+          id,
+          opts.sessionId,
+          now,
+          opts.kind,
+          subject,
+          opts.content,
+          alternativesJson,
+          conflicts.length > 0 ? 1 : 0,
+        );
 
-    // Mark the prior side of each contested pair. `markConflict` re-syncs its
-    // own memory item; the new note's projection is written below.
-    for (const conflict of conflicts) {
-      this.markConflict(conflict.id);
-    }
+      // Mark the prior side of each contested pair. `markConflict` re-syncs its
+      // own memory item; the new note's projection is written below.
+      for (const conflict of conflicts) {
+        this.markConflict(conflict.id);
+      }
 
-    // Side effects for focus updates
-    if (opts.kind === 'focus' && subject !== null) {
-      this.updateSessionFocus(opts.sessionId, subject);
-    } else if (opts.kind === 'intent' && subject !== null) {
-      const session = this.getSession(opts.sessionId);
-      if (session && session.focus === null) {
+      // Side effects for focus updates
+      if (opts.kind === 'focus' && subject !== null) {
         this.updateSessionFocus(opts.sessionId, subject);
+      } else if (opts.kind === 'intent' && subject !== null) {
+        const session = this.getSession(opts.sessionId);
+        if (session && session.focus === null) {
+          this.updateSessionFocus(opts.sessionId, subject);
+        }
       }
-    }
 
+      for (const supersededId of supersededIds) {
+        this.syncMemoryItemForNote(supersededId);
+      }
+      this.syncMemoryItemForNote(id);
+      return { supersededIds, conflicts };
+    });
+
+    const { conflicts } = run();
     const note = this.getNote(id)!;
-    for (const supersededId of supersededIds) {
-      this.syncMemoryItemForNote(supersededId);
-    }
-    this.syncMemoryItemForNote(id);
     return conflicts.length > 0 ? { ...note, conflicts } : note;
+  }
+
+  /** Scope key of a session, or null for an unscoped one. */
+  private scopeKeyForSession(sessionId: string): string | null {
+    const row = this.db
+      .prepare('SELECT scope_key FROM sessions WHERE id = ?')
+      .get(sessionId) as { scope_key: string | null } | undefined;
+    return row?.scope_key ?? null;
   }
 
   getNote(id: string): ParsedNote | undefined {
@@ -1606,6 +1650,52 @@ export class CortexStore {
       .prepare('UPDATE notes SET conflict = 1 WHERE id = ?')
       .run(id);
     this.syncMemoryItemForNote(id);
+  }
+
+  clearConflict(id: string): void {
+    this.db
+      .prepare('UPDATE notes SET conflict = 0 WHERE id = ?')
+      .run(id);
+    this.syncMemoryItemForNote(id);
+  }
+
+  /**
+   * Close the contest on a subject once a side has been resolved.
+   *
+   * A contest is subject-scoped, so resolving one side settles it: every
+   * remaining note on that subject drops its marker. Without this the flag was
+   * write-only — `markConflict` was the column's only writer — so a resolved
+   * pair kept rendering `[contested]` forever, `cortex_note`'s own advice to
+   * "close it with cortex_resolve" was false, and SM-5's resolution rate was
+   * unmeasurable because resolution left no trace. A later contradicting write
+   * simply re-flags.
+   */
+  clearConflictsForSubject(subject: string, scopeKey: string | null): string[] {
+    const normalized = subject.trim().toLowerCase();
+    const rows = this.db
+      .prepare(
+        `SELECT n.id FROM notes n
+           INNER JOIN sessions s ON s.id = n.session_id
+          WHERE n.subject = ? AND n.conflict = 1 AND s.scope_key IS ?`,
+      )
+      .all(normalized, scopeKey) as Array<{ id: string }>;
+    for (const row of rows) {
+      this.clearConflict(row.id);
+    }
+    return rows.map(row => row.id);
+  }
+
+  /** Active notes on a subject within a scope — the contest set, if any. */
+  getActiveNotesBySubjectAndScope(subject: string, scopeKey: string | null): ParsedNote[] {
+    const rows = this.db
+      .prepare(
+        `SELECT n.* FROM notes n
+           INNER JOIN sessions s ON s.id = n.session_id
+          WHERE n.subject = ? AND n.status = 'active' AND s.scope_key IS ?
+          ORDER BY n.timestamp DESC`,
+      )
+      .all(subject.trim().toLowerCase(), scopeKey) as NoteRow[];
+    return rows.map(parseNoteRow);
   }
 
   // ── State ─────────────────────────────────────────────────────────

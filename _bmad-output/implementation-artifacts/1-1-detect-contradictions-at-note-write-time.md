@@ -218,4 +218,53 @@ AC #4 measured against 10,401 `memory_items` rows, 200 iterations per arm: detec
 
 ### Change Log
 
+- 2026-07-27 — Review round 2: 24 findings across three layers, 17 fixed, 4 deferred. Predicate negation handling restructured; write path made transactional and scope-aware; conflicts made clearable. 612 tests pass; gate zero-delta on 5 suites.
 - 2026-07-27 — Story 1.1 implemented. FR-1 contradiction detection at note write time, with the AD-17 supersede veto. 563 tests pass (up from 531); `npm run build`, `npm run lint` and `npm run gate` all clean, gate at zero delta on 5 suites.
+
+## Senior Developer Review (AI)
+
+**Date:** 2026-07-27 · **Outcome:** Changes Requested → all addressed · **Layers:** Blind Hunter, Edge Case Hunter, Acceptance Auditor (parallel, no shared context)
+
+24 findings across three layers. Every one was reproduced against the built `dist/` before being accepted — none were taken on the reviewer's word. **17 fixed here, 4 deferred** (see `deferred-work.md`), 3 were duplicates across layers.
+
+The first implementation passed 563 tests, a 20-mutation sweep, and the eval gate. It was still wrong in seven ways that mattered. Worth recording why: every test I wrote used negators in their surface form and contradictions in their simplest shape, so the mutation sweep proved the code did what I designed — not that the design was right.
+
+### High — fixed
+
+1. **A later unrelated write archived both sides of an open contest.** The veto set was built only from conflicts detected against the *incoming* write, so a prior already carrying `conflict = 1` was unprotected. Writing a third, non-contradicting decision superseded both sides — `memoryStateForNote` maps `superseded` → `archived` — producing exactly the outcome the veto exists to prevent. The veto now covers already-contested priors.
+
+2. **`stemLite` mapped `noted` and `noting` onto the negator `not`.** Negators were looked up by *stem* while `NEGATORS` held surface forms, so "as noted we cache X" contradicted "we cache X" — in a tool whose own write confirmation is the word *Noted*. Same collision for `avoided`/`avoiding` → `avoid`, `canting` → `cant`. Lookup now matches the raw token; a test pins the hazard so nobody re-simplifies it.
+
+3. **Any negator anywhere negated the whole claim.** Five reproduced false positives, all refinements: "use postgres, **not** mysql", "…against its baseline **without** regenerating", "the spool flush is **not** re-entrant". A negation now counts only when it governs a predicate the other note also asserts.
+
+4. **Compound fragments became negators.** `[._/-]` splitting turned `--no-verify` and `src/capture/no-op.ts` into a bare `no`. This cut both ways — it produced false positives *and* suppressed a real contradiction, because when both sides carried `no` from `no-op` they read as agreeing.
+
+5. **Nothing ever cleared `notes.conflict`.** `markConflict` was the column's only writer. After `cortex_resolve`, the winner still projected `Conflict: true` and rendered `[contested]` forever; `cortex_note`'s own advice to "close it with cortex_resolve" was false; and SM-5's resolution rate was unmeasurable because resolution left no trace. Added `clearConflict` / `clearConflictsForSubject`, called from both resolve branches.
+
+6. **`cortex_resolve(subject)` closed the wrong side.** The veto dropped the "at most one active note per (kind, subject)" invariant that `findActiveNoteBySubject`'s `LIMIT 1 ORDER BY timestamp DESC` silently relied on. With a contest open it resolved the *newest* — the agent's current position — leaving the retracted decision as the only active one, so the next session read the opposite of what was last decided. Now refuses and names both ids.
+
+7. **The write was not atomic.** Detect → supersede → insert → mark are four statements with no transaction. A concurrent writer landing between the SELECT and the UPDATE supersedes the row the write just decided to protect. Two Claude sessions on one project share a database file, so this is reachable. Wrapped in `db.transaction`.
+
+### Medium — fixed
+
+8. **`min()` overlap denominator** let any short note be "contained" in a longer one. Since detection only runs against priors that already share a subject, the gate was close to a formality. Now divides by the larger core.
+9. **Antonym flips fired across different objects** — "required for rank mode" vs "optional for shadow mode", "add the agent id to spool lines" vs "remove the agent id from ended sessions". Antonyms now need near-identical remaining content.
+10. **`cortex_resolve(replacement)` manufactured the contest it exists to close.** Detection ran while the outgoing note was still active, and a reversing replacement is the common shape for that call. Added `skipConflictDetection`.
+11. **Detection was scope-blind**, so a note on one branch contested another branch's decision and wrote a marker into that branch's working set. Detection is now scope-keyed; auto-supersede deliberately stays scope-blind, as it always was.
+12. **The `cortex_note` conflict block was unbudgeted** over a set the veto lets grow. Capped at 3 with a remainder line.
+13. **Whitespace-only subjects bypassed the required-subject guard** and normalized to `""`, collapsing unrelated notes into one contesting bucket.
+
+### Low — fixed
+
+14. `intent` writes issued two subject lookups; one query now covers both kinds.
+15. The AC #2 assertion matched a SQL string literal — the same defect fixed in its sibling test one round earlier and not applied here.
+16. The set-overlap check was a module-load `throw`, which armed on the capture path via `db/store.ts`. project-context requires a memory failure never break the turn; it is a unit test now. **My completion note claiming it "fails the build" was wrong** — `tsc` never evaluates it.
+17. A test named "fires regardless of which side carries the negator" asserted one direction.
+
+### Verification
+
+- **612 tests** (from 563), 26 files. `npm run build`, `npm run lint` clean.
+- **Eval gate: 5 suites, zero delta.**
+- **17/17 round-2 mutations killed.** Three survived the first sweep and each was informative: the `min`→`max` change was masked by two other guards until a case isolating the denominator was written; the whitespace *mutation* was behaviorally equivalent to the fix, not a real revert; and `skipConflictDetection` was masked at the call site because `clearConflictsForSubject` corrects the end state either way — pinned with a `markConflict` spy.
+- **AC #4: 0.434 ms** against a 5 ms budget over 10,401 `memory_items`. The reviewer's pathological 20,000-token note dropped from 11.80 ms to 2.71 ms via a 4,000-token analysis cap plus hoisting the incoming analysis out of the per-prior loop.
+- The e2e suite caught a regression mid-round: scope-keying the shared lookup also scoped *auto-supersede*, breaking cross-session supersede. The scope filter now applies only to the contest decision.

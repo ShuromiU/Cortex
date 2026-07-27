@@ -301,9 +301,22 @@ Retrieval is hybrid:
 
 Writing a note whose content opposes an active `decision` on the same subject marks both sides contested and returns a payload naming the prior note. The write always succeeds — the conflict is advisory metadata, never a rejection, and choosing a winner stays yours via `cortex_resolve`.
 
-Detection is deterministic and offline. It fires on an explicit polarity flip — a negation carried by exactly one side, or a curated antonym pair such as `enable`/`disable` — and only when the two notes demonstrably talk about the same thing. It is deliberately conservative: a divergent choice (`use postgres` vs `use mysql`) and a refinement (`use postgres` vs `use postgres with pooling`) are **not** contradictions. A detector that cries wolf gets ignored, so misses are the cheaper failure.
+Detection is deterministic and offline. It fires on an explicit polarity flip — a negation carried by exactly one side, or a curated antonym pair such as `enable`/`disable` — and only when the two notes demonstrably talk about the same thing. A detector that cries wolf gets ignored, so misses are the cheaper failure, and the rules are correspondingly strict:
 
-A contested prior is **not** auto-superseded. Normally a new decision supersedes the old one on that subject, which retires it to the archived tier; suppressing that for contested pairs is what keeps both sides visible until you resolve one.
+- A negation must **govern something the other note also asserts**. "use postgres, not mysql" refines "use postgres" — the negation lands on `mysql`, which the other note never mentions.
+- Negators are matched on their surface form, never on a stem. Stemming maps `noted` and `noting` onto `not`, which would make "as noted, we cache X" contradict "we cache X".
+- A fragment of a compound is not a negation. `--no-verify` and `src/capture/no-op.ts` both contain `no`.
+- An antonym flip needs near-identical remaining content. "required for rank mode" and "optional for shadow mode" are both true.
+- Overlap is measured against the larger note, so a short one cannot be contained into a match.
+- Detection is scope-keyed. Two branches holding opposite decisions is the ordinary reason branches exist.
+
+Divergent choices (`use postgres` vs `use mysql`) and refinements (`use postgres` vs `use postgres with pooling`) are **not** contradictions.
+
+A contested prior is **not** auto-superseded. Normally a new decision supersedes the old one on that subject, which retires it to the archived tier; suppressing that for contested pairs keeps both sides visible until you resolve one. That exemption also covers notes already contested, so a later unrelated decision cannot quietly close an open contest by archiving both sides.
+
+Resolving either side with `cortex_resolve` closes the contest and clears the marker on both. While a contest is open, resolving *by subject* is refused — with more than one active note on the subject, picking one would be a guess, and guessing wrong leaves the retracted decision as the live one.
+
+Known limit: token matching is ASCII-only, so non-Latin note content never conflicts. A silent miss rather than a wrong answer.
 
 ## Reliability Evaluation
 

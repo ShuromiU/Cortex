@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { detectContradiction } from '../src/memory/conflict.js';
+import {
+  detectContradiction,
+  polarityStopwordOverlap,
+  NEGATOR_SURFACE_FORMS,
+} from '../src/memory/conflict.js';
+import { stemLite } from '../src/memory/text.js';
 
 describe('detectContradiction — negation asymmetry', () => {
   it('fires when exactly one side negates a shared claim', () => {
@@ -16,7 +21,12 @@ describe('detectContradiction — negation asymmetry', () => {
       'never retry the flaky upload step',
       'retry the flaky upload step',
     );
+    const reverse = detectContradiction(
+      'retry the flaky upload step',
+      'never retry the flaky upload step',
+    );
     expect(forward?.signal).toBe('negation');
+    expect(reverse?.signal).toBe('negation');
   });
 
   it('does NOT fire when both sides are negated', () => {
@@ -161,5 +171,241 @@ describe('detectContradiction — determinism', () => {
     const a = 'enable the semantic reranker for branch scoped recall';
     const b = 'disable the semantic reranker for branch scoped recall';
     expect(detectContradiction(a, b)?.signal).toBe(detectContradiction(b, a)?.signal);
+  });
+});
+
+// ── Review regressions (story 1.1, round 2) ──────────────────────────
+//
+// Every case below was a reported false positive or a suppressed true
+// positive found by the three review layers, grouped by root cause.
+
+describe('detectContradiction — negation must scope the shared claim', () => {
+  const REFINEMENTS: Array<[string, string, string]> = [
+    ['negates content the other side never mentions',
+      'use postgres for the primary store',
+      'use postgres for the primary store, not mysql'],
+    ['adds a caveat with "without"',
+      'the gate runs every locked suite against its baseline',
+      'the gate runs every locked suite against its baseline without regenerating'],
+    ['asserts an orthogonal property',
+      'the spool flush is idempotent',
+      'the spool flush is not re-entrant'],
+    ['adds an imperative with "avoid"',
+      'validate every spooled entry before replay',
+      'validate every spooled entry before replay, avoid partial batches'],
+    ['adds a trailing "no other" clause',
+      'the reflex emits additional context for focus shifts',
+      'the reflex emits additional context for focus shifts and no other trigger'],
+    ['adds a trailing "no exceptions" clause',
+      'we flush the spool at turn end',
+      'we flush the spool at turn end, no exceptions'],
+    ['uses "without" as a scoping preposition',
+      'a session is identified by scope key and agent id',
+      'a payload without an agent id resolves to the primary session'],
+    ['negates a different predicate on the same subject',
+      'semantic mode defaults to off for every project',
+      'semantic mode shadow does not change returned results'],
+  ];
+
+  for (const [name, prior, incoming] of REFINEMENTS) {
+    it(`does NOT fire when the incoming note ${name}`, () => {
+      expect(detectContradiction(prior, incoming)).toBeNull();
+    });
+  }
+
+  it('still fires when the negation lands on a predicate both sides assert', () => {
+    expect(
+      detectContradiction(
+        'we cache the rendered session brief between runs',
+        'we do not cache the rendered session brief between runs',
+      )?.signal,
+    ).toBe('negation');
+  });
+});
+
+describe('detectContradiction — negators match surface forms, never stems', () => {
+  // stemLite strips -ed/-ing, so "noted" and "noting" both stem to "not",
+  // "avoided" to "avoid", "canting" to "cant". Matching negators on the stem
+  // made "as noted we cache X" contradict "we cache X" — in a tool whose own
+  // write confirmation is the word Noted.
+  it('does NOT treat "noted" as a negation', () => {
+    expect(
+      detectContradiction(
+        'we cache the session brief between runs',
+        'as noted we cache the session brief between runs',
+      ),
+    ).toBeNull();
+  });
+
+  it('does NOT treat "noting" as a negation', () => {
+    expect(
+      detectContradiction(
+        'the flush validates every spooled entry',
+        'noting that the flush validates every spooled entry',
+      ),
+    ).toBeNull();
+  });
+
+  it('pins why the lookup uses the raw token: stems still collide', () => {
+    // stemLite is unchanged and still maps these onto negators. That is the
+    // hazard, not the bug — the bug was looking negators up BY stem. If anyone
+    // "simplifies" isNegator back to stem matching, these words become
+    // negations again.
+    expect(stemLite('noted')).toBe('not');
+    expect(stemLite('noting')).toBe('not');
+    expect(NEGATOR_SURFACE_FORMS).toContain('not');
+  });
+
+  it('does NOT treat any ordinary -ed/-ing word that stems to a negator as one', () => {
+    // Class-level behavioral guard: for every negator whose -ed/-ing form
+    // stems back onto it, that inflected word must not flip polarity.
+    const hazards = NEGATOR_SURFACE_FORMS.flatMap(negator =>
+      [`${negator}ed`, `${negator}ing`].filter(
+        inflected => NEGATOR_SURFACE_FORMS.includes(stemLite(inflected)),
+      ),
+    );
+    expect(hazards.length).toBeGreaterThan(0); // the hazard class is non-empty
+
+    const misfires = hazards.filter(
+      word =>
+        detectContradiction(
+          'we cache the session brief between runs',
+          `${word} we cache the session brief between runs`,
+        ) !== null,
+    );
+    expect(misfires).toEqual([]);
+  });
+});
+
+describe('detectContradiction — compound fragments are not negators', () => {
+  // TOKEN_SPLIT_PATTERN splits on [._/-], so "no-op", "--no-verify" and
+  // "src/capture/no-op.ts" all yield a bare "no".
+  it('does NOT fire on a --no-verify flag name', () => {
+    expect(
+      detectContradiction(
+        'push with --no-verify only when the hook itself is broken',
+        'push with --strict only when the hook itself is broken',
+      ),
+    ).toBeNull();
+  });
+
+  it('does NOT fire on a no-op path segment', () => {
+    expect(
+      detectContradiction(
+        'the spool writer lives in src/capture/no-op.ts today',
+        'the spool writer lives in src/capture/batch.ts today',
+      ),
+    ).toBeNull();
+  });
+
+  it('does NOT fire on "no-op" used as a term', () => {
+    expect(
+      detectContradiction(
+        'a second flush of a claimed batch is a no-op',
+        'a second flush of a claimed batch is skipped by the processed marker',
+      ),
+    ).toBeNull();
+  });
+
+  it('STILL detects a real contradiction about a no-op', () => {
+    // The inverse failure: when "no" from "no-op" counted as a negator, both
+    // sides carried one, read as agreeing, and the real contradiction vanished.
+    expect(
+      detectContradiction(
+        'a second flush of a claimed batch is a no-op',
+        'a second flush of a claimed batch is never a no-op',
+      )?.signal,
+    ).toBe('negation');
+  });
+});
+
+describe('detectContradiction — overlap is measured against the larger claim', () => {
+  it('does NOT let a short note be contained in a longer one', () => {
+    // Dividing by the smaller core let any brief note on the subject clear the
+    // gate. Detection only ever runs against priors that already share a
+    // subject, which made the gate a formality.
+    expect(
+      detectContradiction(
+        'we do not cache the session brief between runs',
+        'session brief formatting matters',
+      ),
+    ).toBeNull();
+  });
+
+  it('does NOT let a short negation contradict a long elaboration', () => {
+    // Isolates the denominator: the negated head ("cach") IS shared, so
+    // negation-scoping passes it, and there is no antonym involved. Only
+    // dividing by the LARGER core blocks this — with min() the short note is
+    // wholly contained in the long one and scores 1.0.
+    expect(
+      detectContradiction(
+        'we do not cache the brief',
+        'the cache layer for the rendered brief writes through redis with a ttl and a digest guard',
+      ),
+    ).toBeNull();
+  });
+
+  it('does NOT fire on an antonym pair applied to different objects', () => {
+    expect(
+      detectContradiction(
+        'add the agent id to every spool line',
+        'remove the agent id from ended child sessions',
+      ),
+    ).toBeNull();
+  });
+
+  it('does NOT fire on an antonym pair applied to different conditions', () => {
+    expect(
+      detectContradiction(
+        'start the language server lazily per repository',
+        'stop the language server on idle repository',
+      ),
+    ).toBeNull();
+  });
+});
+
+describe('detectContradiction — antonyms need near-identical remaining content', () => {
+  const COMPATIBLE: Array<[string, string, string]> = [
+    ['required/optional across different modes',
+      'the semantic provider is required for rank mode',
+      'the semantic provider is optional for shadow mode'],
+    ['show/hide across different surfaces',
+      'we show the branch snapshot in cortex state',
+      'we hide the branch snapshot in cortex recall'],
+  ];
+
+  for (const [name, prior, incoming] of COMPATIBLE) {
+    it(`does NOT fire on ${name}`, () => {
+      expect(detectContradiction(prior, incoming)).toBeNull();
+    });
+  }
+
+  it('still fires when only the antonym differs', () => {
+    expect(
+      detectContradiction(
+        'enable the semantic reranker for branch scoped recall',
+        'disable the semantic reranker for branch scoped recall',
+      )?.signal,
+    ).toBe('antonym');
+  });
+});
+
+describe('detectContradiction — double negation', () => {
+  it('does NOT report two agreeing statements as opposed', () => {
+    expect(
+      detectContradiction(
+        'we do not skip caching the session brief',
+        'we cache the session brief',
+      ),
+    ).toBeNull();
+  });
+});
+
+describe('conflict module invariants', () => {
+  it('no token is both a polarity carrier and a structural stopword', () => {
+    // Previously a module-load throw, which armed on the capture path through
+    // db/store.ts. project-context requires that a memory failure never break
+    // the user's turn, so the check lives here instead.
+    expect(polarityStopwordOverlap()).toEqual([]);
   });
 });

@@ -12,6 +12,18 @@ Items surfaced during review that are real but not actionable in the story that 
 
 - ~~**README carries no session-identity model.**~~ **CLOSED in story 0.2** — README gained a "Subagent attribution" section covering `(scope_key, agent_id)`, per-line spool identity, primary-only scoped reads, and the stale-hook symptom with its fix.
 
+## Deferred from: code review of story-1.1 (2026-07-27)
+
+Three review layers produced 24 findings; 17 were fixed in the story. These are the rest — each real, none able to produce a wrong contradiction verdict.
+
+- **Contradiction detection is ASCII-only.** `TOKEN_PATTERN` (`src/memory/text.ts`) is `[a-z0-9][a-z0-9._/-]*`, so Cyrillic, CJK, fullwidth and accented content analyzes to an empty core and never conflicts. Fails safe — a silent miss, not a wrong answer — and is now stated as a known limit in `conflict.ts` and the README. A `\p{L}\p{N}` pattern with the `u` flag would close it, but `TOKEN_PATTERN` is shared with `query/retrieval.ts` and the rerank layer, so changing it moves `output_tokens` on the locked suites and needs its own story with a gate run.
+
+- **`promoteSubagentNotes` re-activates an arbitrary prior.** `src/capture/consolidate.ts:288-310` picks the *first* same-kind+subject parent note via `Array.prototype.find` — including one superseded long before the child ran — and re-activates it unconditionally. That was deterministic when only one note per (kind, subject) could be active; the AD-17 veto ends that guarantee, so a promotion can now leave three active decisions on one subject. Story 1.1 narrowed the blast radius (the already-contested veto stops the extras being silently archived) but did not fix the re-activation itself. Not reachable from the live hook path — `promoteSubagentNotes` has no in-repo runtime caller, only `src/index.ts`'s export and `tests/consolidate.test.ts` — so it is reachable through the library surface only. Epic 5 owns subagent note promotion and should fix it there.
+
+- **`cortex_resolve --subject` in the CLI has the same ambiguity the MCP tool now refuses.** `src/transports/cli.ts:497` still calls `findActiveNoteBySubject` directly. The MCP path refuses to guess while a contest is open; the CLI path does not. Same fix applies, but the CLI resolve command has no test coverage for contested subjects and adding it is a small story of its own.
+
+- **`notes.conflict` carries no counterpart id.** Conflicts are cleared per *subject*, so resolving one side clears every contested note on that subject. With three-way contests this over-clears — a pair unrelated to the resolved one loses its marker. Correct for the two-note case, which is what detection produces today. A `note_conflicts(note_id, counterpart_id)` join table would make it exact and would also give SM-5 a per-pair resolution rate, but it is a new table and R1 has already spent its one `SCHEMA_VERSION` bump on Story 3.1.
+
 ## Deferred from: code review of story-1.5 (2026-07-25)
 
 Low-severity items from two review rounds on the eval gate. None can make the gate report green while quality regresses; they are ergonomics, coverage and doc-accuracy gaps.

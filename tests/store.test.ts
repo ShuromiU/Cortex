@@ -1390,8 +1390,12 @@ describe('CortexStore — contradiction detection on insertNote', () => {
       db.prepare = originalPrepare;
     }
 
-    const conflictQueries = prepared.filter(sql => sql.includes("kind = 'decision'"));
-    expect(conflictQueries).toEqual([]);
+    // Match on shape, not on the literal `kind = 'decision'`: parameterizing
+    // the detection lookup would make a literal filter silently vacuous.
+    const subjectLookups = prepared.filter(
+      sql => /FROM notes/.test(sql) && sql.includes('subject = ?'),
+    );
+    expect(subjectLookups).toEqual([]);
   });
 
   it('issues exactly one conflict query for a subject-bearing decision', () => {
@@ -1490,5 +1494,395 @@ describe('CortexStore — contradiction detection cost (AC #4)', () => {
 
     const overhead = median(withDetection) - median(withoutDetection);
     expect(overhead).toBeLessThan(5);
+  });
+});
+
+// ── Review regressions: write path (story 1.1, round 2) ──────────────
+
+describe('CortexStore — the AD-17 veto holds over time', () => {
+  let db: Database.Database;
+  let store: CortexStore;
+  let sessionId: string;
+
+  beforeEach(() => {
+    db = createTestDb();
+    store = new CortexStore(db);
+    sessionId = store.createSession({ scopeKey: 'branch:/repo:main' }).id;
+  });
+
+  function memoryStateFor(noteId: string): string | undefined {
+    const row = db
+      .prepare('SELECT state FROM memory_items WHERE source_id = ? AND source_table = ?')
+      .get(noteId, 'notes') as { state: string } | undefined;
+    return row?.state;
+  }
+
+  function openContest(): { a: string; b: string } {
+    const a = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+    const b = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we do not cache the rendered session brief between runs',
+    });
+    expect(b.conflicts).toHaveLength(1);
+    return { a: a.id, b: b.id };
+  }
+
+  it('a later unrelated decision does not close an open contest', () => {
+    // The veto set was built only from conflicts detected against the incoming
+    // write, so an already-contested prior was unprotected: a third,
+    // non-contradicting decision superseded and archived BOTH sides of the
+    // open contest — the exact outcome the veto exists to prevent.
+    const { a, b } = openContest();
+
+    const third = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'use redis for storing rendered artifacts instead',
+    });
+    expect(third.conflicts).toBeUndefined();
+
+    expect(store.getNote(a)!.status).toBe('active');
+    expect(store.getNote(b)!.status).toBe('active');
+    expect(memoryStateFor(a)).not.toBe('archived');
+    expect(memoryStateFor(b)).not.toBe('archived');
+  });
+
+  it('survives a run of unrelated decisions, not just one', () => {
+    const { a, b } = openContest();
+    for (const content of [
+      'use redis for storing rendered artifacts instead',
+      'the artifact directory lives under the user home',
+      'compression happens before the digest is taken',
+    ]) {
+      store.insertNote({ sessionId, kind: 'decision', subject: 'brief caching', content });
+    }
+    expect(store.getNote(a)!.status).toBe('active');
+    expect(store.getNote(b)!.status).toBe('active');
+  });
+
+  it('still supersedes a non-contested prior', () => {
+    const first = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'primary store',
+      content: 'use postgres for the primary store',
+    });
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'primary store',
+      content: 'use mysql for the primary store',
+    });
+    expect(store.getNote(first.id)!.status).toBe('superseded');
+    expect(memoryStateFor(first.id)).toBe('archived');
+  });
+
+  it('performs the note INSERT inside a transaction', () => {
+    // Detect -> supersede -> insert -> mark are four statements. Without a
+    // transaction a concurrent writer landing between the detection SELECT and
+    // the supersede UPDATE supersedes the row this write just protected.
+    // Asserting on `inTransaction` at the moment of the write tests the
+    // property; counting `db.transaction` calls would only count nesting.
+    const inTransactionAtInsert: boolean[] = [];
+    const originalPrepare = db.prepare.bind(db);
+    // @ts-expect-error — narrowing better-sqlite3's overloads is not worth it here
+    db.prepare = (sql: string) => {
+      const statement = originalPrepare(sql);
+      if (!/^\s*INSERT INTO notes/.test(sql)) return statement;
+      const originalRun = statement.run.bind(statement);
+      // @ts-expect-error — same
+      statement.run = (...args: unknown[]) => {
+        inTransactionAtInsert.push(db.inTransaction);
+        return originalRun(...(args as []));
+      };
+      return statement;
+    };
+    try {
+      store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'brief caching',
+        content: 'we cache the rendered session brief between runs',
+      });
+    } finally {
+      db.prepare = originalPrepare;
+    }
+    expect(inTransactionAtInsert).toEqual([true]);
+  });
+});
+
+describe('CortexStore — skipConflictDetection', () => {
+  let store: CortexStore;
+  let sessionId: string;
+
+  beforeEach(() => {
+    store = new CortexStore(createTestDb());
+    sessionId = store.createSession({ scopeKey: 'branch:/repo:main' }).id;
+  });
+
+  it('suppresses detection entirely for an explicit resolution write', () => {
+    // cortex_resolve(replacement) writes while the note being replaced is
+    // still active, and a replacement that reverses its predecessor is the
+    // common shape — so without this the resolution manufactures the very
+    // contest it exists to close.
+    const prior = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+
+    const replacement = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we do not cache the rendered session brief between runs',
+      skipConflictDetection: true,
+    });
+
+    expect(replacement.conflicts).toBeUndefined();
+    expect(store.getNote(replacement.id)!.conflict).toBe(false);
+    expect(store.getNote(prior.id)!.conflict).toBe(false);
+  });
+
+  it('the same write DOES contest without the flag', () => {
+    // Pins that the flag is what suppresses it, not the content.
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+    const contested = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we do not cache the rendered session brief between runs',
+    });
+    expect(contested.conflicts).toHaveLength(1);
+  });
+});
+
+describe('CortexStore — contradiction detection is scope-aware', () => {
+  let db: Database.Database;
+  let store: CortexStore;
+
+  beforeEach(() => {
+    db = createTestDb();
+    store = new CortexStore(db);
+  });
+
+  it('does not contest a decision made on another branch', () => {
+    // Two branches holding opposite decisions is the ordinary reason branches
+    // exist, and the contest marker would surface in the other branch's
+    // working set.
+    const main = store.createSession({ scopeKey: 'branch:/repo:main' });
+    const feature = store.createSession({ scopeKey: 'branch:/repo:feature' });
+
+    const onMain = store.insertNote({
+      sessionId: main.id,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+    const onFeature = store.insertNote({
+      sessionId: feature.id,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we do not cache the rendered session brief between runs',
+    });
+
+    expect(onFeature.conflicts).toBeUndefined();
+    expect(store.getNote(onMain.id)!.conflict).toBe(false);
+  });
+
+  it('still contests within the same scope', () => {
+    const first = store.createSession({ scopeKey: 'branch:/repo:main' });
+    const second = store.createSession({ scopeKey: 'branch:/repo:main' });
+    store.insertNote({
+      sessionId: first.id,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+    const contested = store.insertNote({
+      sessionId: second.id,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we do not cache the rendered session brief between runs',
+    });
+    expect(contested.conflicts).toHaveLength(1);
+  });
+
+  it('leaves auto-supersede scope-blind, as it has always been', () => {
+    // Scoping the supersede too would be a behavior change this story does not
+    // own — and it broke the existing e2e workflow when tried.
+    const main = store.createSession({ scopeKey: 'branch:/repo:main' });
+    const other = store.createSession({ scopeKey: null });
+    const first = store.insertNote({
+      sessionId: main.id,
+      kind: 'decision',
+      subject: 'jwt-strategy',
+      content: 'chose jwt over sessions',
+    });
+    store.insertNote({
+      sessionId: other.id,
+      kind: 'decision',
+      subject: 'jwt-strategy',
+      content: 'jwt with revocation via redis',
+    });
+    expect(store.getNote(first.id)!.status).toBe('superseded');
+  });
+});
+
+describe('CortexStore — subject normalization', () => {
+  let store: CortexStore;
+  let sessionId: string;
+
+  beforeEach(() => {
+    store = new CortexStore(createTestDb());
+    sessionId = store.createSession().id;
+  });
+
+  it('rejects a whitespace-only subject on a kind that requires one', () => {
+    // `!opts.subject` is false for "   ", so the guard passed and the subject
+    // normalized to "" — not null — dropping every such note into one shared
+    // bucket where unrelated notes contested each other.
+    expect(() =>
+      store.insertNote({ sessionId, kind: 'decision', subject: '   ', content: 'x' }),
+    ).toThrow(/Subject is required/);
+  });
+
+  it('normalizes a whitespace-only subject to null on a kind that does not', () => {
+    const note = store.insertNote({
+      sessionId,
+      kind: 'insight',
+      subject: '  ',
+      content: 'a subjectless insight',
+    });
+    expect(store.getNote(note.id)!.subject).toBeNull();
+  });
+});
+
+describe('CortexStore — clearing a contest', () => {
+  let store: CortexStore;
+  let sessionId: string;
+
+  beforeEach(() => {
+    store = new CortexStore(createTestDb());
+    sessionId = store.createSession({ scopeKey: 'branch:/repo:main' }).id;
+  });
+
+  it('clears the marker on every contested note for the subject', () => {
+    // `markConflict` was the column's only writer, so a resolved pair rendered
+    // [contested] forever and SM-5's resolution rate was unmeasurable.
+    const a = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+    const b = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we do not cache the rendered session brief between runs',
+    });
+    expect(store.getNote(a.id)!.conflict).toBe(true);
+
+    const cleared = store.clearConflictsForSubject('brief caching', 'branch:/repo:main');
+
+    expect(cleared).toHaveLength(2);
+    expect(store.getNote(a.id)!.conflict).toBe(false);
+    expect(store.getNote(b.id)!.conflict).toBe(false);
+  });
+
+  it('does not reach into another scope', () => {
+    const other = store.createSession({ scopeKey: 'branch:/repo:feature' });
+    const a = store.insertNote({
+      sessionId: other.id,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+    store.markConflict(a.id);
+
+    store.clearConflictsForSubject('brief caching', 'branch:/repo:main');
+    expect(store.getNote(a.id)!.conflict).toBe(true);
+  });
+});
+
+describe('CortexStore — one lookup per write, every kind', () => {
+  let db: Database.Database;
+  let store: CortexStore;
+  let sessionId: string;
+
+  beforeEach(() => {
+    db = createTestDb();
+    store = new CortexStore(db);
+    sessionId = store.createSession({ scopeKey: 'branch:/repo:main' }).id;
+  });
+
+  function countSubjectLookups(write: () => void): number {
+    const prepared: string[] = [];
+    const originalPrepare = db.prepare.bind(db);
+    // @ts-expect-error — narrowing better-sqlite3's overloads is not worth it here
+    db.prepare = (sql: string) => {
+      prepared.push(sql);
+      return originalPrepare(sql);
+    };
+    try {
+      write();
+    } finally {
+      db.prepare = originalPrepare;
+    }
+    return prepared.filter(sql => /FROM notes/.test(sql) && sql.includes('subject = ?')).length;
+  }
+
+  it('an intent write issues one subject lookup, not two', () => {
+    // The detection lookup (kind='decision') and the supersede lookup
+    // (kind=opts.kind) diverge for every kind except decision, so the original
+    // "reuse the lookup" only held for the one kind the test covered.
+    store.insertNote({
+      sessionId,
+      kind: 'intent',
+      subject: 'ship r1',
+      content: 'ship the context economy release',
+    });
+    const count = countSubjectLookups(() => {
+      store.insertNote({
+        sessionId,
+        kind: 'intent',
+        subject: 'ship r1',
+        content: 'ship the context economy release in two parts',
+      });
+    });
+    expect(count).toBe(1);
+  });
+
+  it('a decision write issues one subject lookup', () => {
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+    const count = countSubjectLookups(() => {
+      store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'brief caching',
+        content: 'we do not cache the rendered session brief between runs',
+      });
+    });
+    expect(count).toBe(1);
   });
 });

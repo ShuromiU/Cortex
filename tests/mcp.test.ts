@@ -643,3 +643,197 @@ describe('cortex_note — contradiction reporting', () => {
     expect(store.getNote(noteId)!.status).toBe('resolved');
   });
 });
+
+// ── Review regressions: transport (story 1.1, round 2) ───────────────
+
+describe('cortex_resolve — contested subjects', () => {
+  let store: CortexStore;
+  let cwd: string;
+
+  function callTool(toolName: string, args: Record<string, unknown> = {}): string {
+    return handleToolCall(store, toolName, args, cwd);
+  }
+
+  function openContest(): { loser: string; winner: string } {
+    callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+    callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we do not cache the rendered session brief between runs',
+    });
+    const notes = store.getNotesByKindAndSubject('decision', 'brief caching');
+    const loser = notes.find(note => !note.content.includes('do not'))!;
+    const winner = notes.find(note => note.content.includes('do not'))!;
+    expect(loser.conflict).toBe(true);
+    expect(winner.conflict).toBe(true);
+    return { loser: loser.id, winner: winner.id };
+  }
+
+  beforeEach(() => {
+    store = createStore().store;
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-resolve-contest-'));
+    configureEngagementPath(path.join(cwd, '.cortex.state'));
+  });
+
+  it('refuses to resolve by subject while a contest is open', () => {
+    // Before contested priors were exempted from auto-supersede, a
+    // (kind, subject) pair had at most one active note, so
+    // findActiveNoteBySubject's LIMIT 1 was unambiguous. With a live contest
+    // it silently resolved the NEWEST — the agent's current position — leaving
+    // the retracted decision as the only active one.
+    const { loser, winner } = openContest();
+
+    const output = callTool('cortex_resolve', { subject: 'brief caching' });
+
+    expect(output).toContain('Error:');
+    expect(output).toContain('2 active notes');
+    expect(output).toContain(loser);
+    expect(output).toContain(winner);
+    // Nothing was resolved.
+    expect(store.getNote(loser)!.status).toBe('active');
+    expect(store.getNote(winner)!.status).toBe('active');
+  });
+
+  it('still resolves by subject when there is no contest', () => {
+    callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'primary store',
+      content: 'use postgres for the primary store',
+    });
+    const output = callTool('cortex_resolve', { subject: 'primary store' });
+    expect(output).toContain('Marked decision[primary store] as resolved');
+  });
+
+  it('clears the contest on both sides when one side is resolved', () => {
+    // markConflict was the column's only writer, so the survivor rendered
+    // [contested] forever against a note nobody was arguing with — and
+    // cortex_note's own advice to "close it with cortex_resolve" was false.
+    const { loser, winner } = openContest();
+
+    const output = callTool('cortex_resolve', { note_id: loser });
+
+    expect(output).toContain('Contest closed');
+    expect(store.getNote(loser)!.conflict).toBe(false);
+    expect(store.getNote(winner)!.conflict).toBe(false);
+  });
+
+  it('drops Conflict: true from the survivor memory item', () => {
+    const { loser, winner } = openContest();
+    callTool('cortex_resolve', { note_id: loser });
+
+    const item = store.getMemoryItemBySource('notes', winner);
+    expect(item?.text).not.toContain('Conflict: true');
+  });
+
+  it('says nothing about a contest when there was none', () => {
+    callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'primary store',
+      content: 'use postgres for the primary store',
+    });
+    const id = store.getNotesByKindAndSubject('decision', 'primary store')[0]!.id;
+    const output = callTool('cortex_resolve', { note_id: id });
+    expect(output).not.toContain('Contest closed');
+  });
+
+  it('never marks a conflict at all during a replacement resolve', () => {
+    // The end state is also corrected by clearConflictsForSubject, so asserting
+    // only on the final flag cannot tell whether detection ran. Spying on
+    // markConflict pins the call site: an explicit resolution must not
+    // manufacture the contest in the first place.
+    callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+    const outgoing = store.getNotesByKindAndSubject('decision', 'brief caching')[0]!.id;
+
+    const marked: string[] = [];
+    const originalMark = store.markConflict.bind(store);
+    store.markConflict = (id: string) => {
+      marked.push(id);
+      originalMark(id);
+    };
+    try {
+      callTool('cortex_resolve', {
+        note_id: outgoing,
+        status: 'superseded',
+        replacement: 'we do not cache the rendered session brief between runs',
+      });
+    } finally {
+      store.markConflict = originalMark;
+    }
+
+    expect(marked).toEqual([]);
+  });
+
+  it('does not contest a replacement against the note it replaces', () => {
+    // The outgoing note is still active when insertNote runs, and a
+    // replacement that reverses its predecessor is the common shape here — so
+    // detection fired and permanently flagged a brand-new note as contested
+    // with one the same call had just retired.
+    callTool('cortex_note', {
+      kind: 'decision',
+      subject: 'brief caching',
+      content: 'we cache the rendered session brief between runs',
+    });
+    const outgoing = store.getNotesByKindAndSubject('decision', 'brief caching')[0]!.id;
+
+    callTool('cortex_resolve', {
+      note_id: outgoing,
+      status: 'superseded',
+      replacement: 'we do not cache the rendered session brief between runs',
+    });
+
+    const replacement = store
+      .getNotesByKindAndSubject('decision', 'brief caching')
+      .find(note => note.content.includes('do not'))!;
+    expect(replacement.conflict).toBe(false);
+    expect(store.getNote(outgoing)!.status).toBe('superseded');
+  });
+});
+
+describe('cortex_note — the conflict block is bounded', () => {
+  let store: CortexStore;
+  let cwd: string;
+
+  beforeEach(() => {
+    store = createStore().store;
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-note-budget-'));
+    configureEngagementPath(path.join(cwd, '.cortex.state'));
+  });
+
+  it('caps how many contested priors a single write reports', () => {
+    // Contested priors are exempt from auto-supersede, so several can be
+    // active on one subject at once and the block would grow without limit.
+    const sessionId = store.createSession({ scopeKey: null }).id;
+    for (let i = 0; i < 5; i++) {
+      const note = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'brief caching',
+        content: `we cache the rendered session brief between runs variant ${i}`,
+      });
+      store.markConflict(note.id);
+    }
+
+    const output = handleToolCall(
+      store,
+      'cortex_note',
+      {
+        kind: 'decision',
+        subject: 'brief caching',
+        content: 'we do not cache the rendered session brief between runs',
+      },
+      cwd,
+    );
+
+    const bulletLines = output.split('\n').filter(line => line.startsWith('  - '));
+    expect(bulletLines.length).toBeLessThanOrEqual(3);
+    expect(output).toContain('more (cortex_recall for the rest)');
+  });
+});
