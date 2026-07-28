@@ -175,6 +175,13 @@ export interface MemoryAccessHistory {
   retrievals: MemoryAccessRetrieval[];
 }
 
+export interface MemoryCorrectionEntry {
+  operation: string;
+  created_at: string;
+  prior_text: string;
+  new_text: string | null;
+}
+
 export interface MemoryInspection {
   item: ParsedMemoryItem;
   /** Verbatim and untruncated — every other surface snippets, this one must not. */
@@ -184,6 +191,12 @@ export interface MemoryInspection {
   references: MemoryReferenceDetail[];
   conflict: MemoryConflictStatus;
   access: MemoryAccessHistory;
+  /**
+   * Prior versions recorded by `edit-memory` / `delete-memory` (FR-22).
+   * Without this the audit trail is written and reachable only by hand-querying
+   * SQLite — and `edit-memory` tells the user this command shows it.
+   */
+  corrections: MemoryCorrectionEntry[];
 }
 
 function sourceNote(store: CortexStore, item: ParsedMemoryItem): ParsedNote | undefined {
@@ -312,5 +325,11 @@ export function inspectMemory(store: CortexStore, id: string): MemoryInspection 
         session_id: log.session_id,
       })),
     },
+    corrections: store.getMemoryCorrections(item.id).map(correction => ({
+      operation: correction.operation,
+      created_at: correction.created_at,
+      prior_text: correction.prior_text,
+      new_text: correction.new_text,
+    })),
   };
 }

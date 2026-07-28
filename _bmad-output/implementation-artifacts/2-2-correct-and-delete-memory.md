@@ -261,6 +261,49 @@ The audit table **has no foreign key to `memory_items`**, and that is the design
 - `_bmad-output/implementation-artifacts/deferred-work.md` — modified; stale `SCHEMA_VERSION` line corrected, two new findings logged
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` — modified; story status, action items 2 and 3 closed
 
+## Senior Developer Review (AI)
+
+**Reviewed:** `c989412` vs `5170fc0` · three parallel layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) · 2026-07-28
+**Outcome:** Changes Requested → addressed in the repair round below.
+
+The Auditor confirmed AC #2 and AC #3 met by execution — including installing a `BEFORE DELETE … RAISE(ABORT)` trigger to prove the transaction is real (0 audit rows left behind) — and verified every numeric claim. AC #1 came back **partially met**. The Blind Hunter's summary is the line that matters: *"Full suite, lint, and gate all pass — so none of these are caught."* 860 green tests caught none of it.
+
+### The through-line
+
+**The story's central guarantee was broken on the mainline path, and my own fixtures hid it.** "Deletion survives the backfill" was the spine of the design, and I checked exactly one level of the source chain. Three of the six source tables are *themselves* re-derived: `command_runs` from `events`, `episodes` and `project_snapshots` from `state`, each reusing the same primary key. Deleting the source row is undone by the next command exactly as deleting the projection was.
+
+It shipped because the three "survives the backfill" tests built their fixtures with `insertCommandRun` / `insertEpisode` directly — leaving no `events` or `state` row for the backfill to resurrect from, so they could not fail. The one test that *did* establish the precondition used `notes`, the single source table with no second layer. **The story file warned, in its own words, that a non-adversarial fixture would defeat this exact guarantee.** Rebuilt through `handleCmdEvent` / `writeSessionSummary` / `replaceProjectState`, all three go red against the shipped code.
+
+**And I repeated Epic 1's named failure in a repair meant to fix contest handling.** The CLI's conflict clearing carried the comment "Mirrors `mcp.ts`" while porting half its guard: MCP gates on `note.conflict && note.subject`, with a comment naming the hazard; I gated on `note.subject`. Resolving an unrelated blocker on a subject silently closed a live contest between two decisions. That is "imported half of a discipline and claimed the whole", one epic after it was written down — and the same commit's `deleteMemoryItemCascade` carried the correct guard, so the file contradicted itself.
+
+### Action items — all addressed
+
+- [x] **[High] Deletion resurrected via second-order sources** (blind+edge+verified live). `deleteUpstreamOf` walks `command_runs → events` and `episodes`/`project_snapshots → state`; a `state`-backed delete also removes the twin projection sharing its id. A source table with **no** rule now throws instead of half-deleting. Verified end to end: all three kinds stay gone across a reopen.
+- [x] **[High] The three durability tests were vacuous** (blind+edge). Rebuilt through the real producers, each with a pre-asserted precondition; added the missing `project_snapshots` case.
+- [x] **[High] `edit-memory` reset `access_count`, `last_accessed_at` and tier on note-backed items** (all three layers). `syncMemoryItemForNote` read `existing` only for superseded notes, so its upsert wrote the defaults over real history — reheating cold memories and un-pinning pinned ones, both `computeHotness` inputs. Counters are now preserved unconditionally; tier by status (`superseded` keeps, `resolved` re-derives cold, `active` keeps). The old test used a `source_table`-NULL item and never reached the branch; note-backed and pinned cases are now pinned separately.
+- [x] **[High] `note-resolve` wiped unrelated contests** (edge+auditor). Guard completed to `note.conflict && note.subject`, with a test that pre-asserts the blocker is uncontested and the pair is.
+- [x] **[Med/High] `edit-memory` could manufacture the `diverged` state the README says it prevents** (blind). Text whose last non-empty line looks like a projection trailer is refused; a mid-text mention is allowed, and both are tested. `--file` would otherwise have promoted a documented bounded residual into a first-class input.
+- [x] **[Med/High] Both new transactions were DEFERRED** (blind+edge+auditor), against the rule CLAUDE.md states and `insertNote` follows. Now `runInImmediateTransaction`. See "Accepted" for the testing gap.
+- [x] **[Med] `cortex gc` never pruned `memory_corrections`** while three shipped surfaces said it did — including the line printed at every deletion. Added a retention rule (90 days, `CORTEX_GC_CORRECTION_DAYS`) so the sentence is true, rather than softening the sentence.
+- [x] **[Med] No command surfaced the audit trail**, though `edit-memory` told the user `inspect-memory` did. `inspectMemory` now returns `corrections` and the CLI renders them.
+- [x] **[Med] Preview and delete compared scope differently** (blind+auditor) — the preview used the `memory_items` column, the delete the session join, so a NULL-scope session made the confirmation surface report zero counterparts for a contest the delete then cleared. Both now use the session join; pinned with an unscoped-session fixture.
+- [x] **[Med] `prior_text` was unreplayable** (auditor). It recorded the projection while `edit-memory` consumes note content, so feeding it back doubled the kind prefix and the trailer — falsifying the story's stated reason for storing it. Now records the editable text, with a round-trip test.
+- [x] **[Med] The preview promised source-row deletion for tables the cascade skips** (edge), and understated aggregate sources. It now reports `NO deletion rule`, names the upstream table, and warns when a snapshot or state row carries more than the one item.
+- [x] **[Med] A failed delete printed `deleted <id>` with exit 0** (blind+edge). `deleteMemory` now runs preview and cascade in one immediate transaction, so the race cannot occur; the CLI still checks and exits non-zero.
+- [x] **[Med] `--text ""` blanked a memory** (blind+edge). Refused, pointing at `delete-memory`.
+- [x] **[Low] `--json` emitted nothing on the flag and file error paths** (edge). Both now emit `{error, id}`.
+- [x] **[Low] A UTF-8 BOM from `--file` was stored verbatim** (edge) — the likely source on Windows. Stripped.
+- [x] **[Low] Four stale or false doc claims of mine** (blind+auditor): the README transcript omitted three lines the command prints (regenerated from real output); CLAUDE.md called the `foreign_keys` pragma "the whole guarantee" when better-sqlite3 defaults it on; CLAUDE.md and `schema.ts` named the **withdrawn** Story 4.1 as a future `V5_TABLES` appender; and `replan-r1-2026-07-28.md` still said 3.1 takes the `SCHEMA_VERSION` bump that this story took. All corrected.
+
+### Accepted, not changed
+
+- **The IMMEDIATE guarantee has no automated test.** The failure it prevents is only observable across processes; an in-process attempt passed under both modes and was **removed rather than kept**, since a test that cannot fail is worse than none. Logged with the two-process harness that would close it — which would also cover `insertNote`'s identically untested guarantee.
+- **`deleteMemory`'s `deleted: false` branch is now unreachable** by construction (preview and cascade share one transaction), so its mutation survives as a true equivalent. Kept as defense-in-depth against a future loss of atomicity, and labelled as such rather than counted as a kill.
+- **`gc`'s command-run overflow prune is undone by the same backfill** (auditor). Real, measured, and explicitly out of this story's scope — but this story is what makes it legible, so it is logged with the fix (reuse the cascade).
+- **`edit-memory` does not re-run contradiction detection**, so it cannot clear a false contest. A behavior change that can newly mark items contested as a side effect of a typo fix; deferred with reasoning.
+- **`--status` coercion and `--subject` normalisation drift** — pre-existing, enlarged in consequence by this story, deferred with the `findActiveNoteBySubject` tiebreaker they belong with.
+
 ### Change Log
 
+- 2026-07-28 — Round-2 repair: 17 review findings addressed across 8 files; 879 tests (+19), 8 gate suites unchanged, 36/39 round-2 mutations killed with 0 unapplied (3 survivors classified: 2 untestable in-process, 1 equivalent by construction).
 - 2026-07-28 — Story 2.2 implemented. Edit re-extracts references and re-projects through the note; delete removes the source row, the item and its derived rows in one transaction, previews by default, and clears a contest it breaks up; both record the prior text in an audit trail that outlives them. Two `note-resolve` defects repaired. 860 tests (+39), 30 files (+1), 8 gate suites at zero delta, 23/23 mutations killed with 0 unapplied.

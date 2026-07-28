@@ -4,6 +4,7 @@ import { applySchema, initializeMeta } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import { editMemory, deleteMemory, previewMemoryDeletion } from '../src/query/correct.js';
 import { inspectMemory } from '../src/query/inspect.js';
+import { handleCmdEvent } from '../src/capture/hooks.js';
 
 function createStore(): { db: Database.Database; store: CortexStore } {
   const db = new Database(':memory:');
@@ -236,6 +237,68 @@ describe('deleteMemory', () => {
 
     expect(store.getMemoryItemSemantic('carded')).toBeUndefined();
     expect(store.getMemoryItem('carded')).toBeUndefined();
+  });
+
+  it('warns that the delete will be refused when no rule covers the source table', () => {
+    store.upsertMemoryItem({
+      id: 'foreign',
+      scopeType: 'project',
+      scopeKey: 'scope-a',
+      kind: 'note:insight',
+      sourceTable: 'file_cards',
+      sourceId: 'card-1',
+      text: 'an item from a table the cascade does not know',
+    });
+
+    const preview = previewMemoryDeletion(store, 'foreign')!;
+
+    // The preview must promise exactly what the delete performs. Advertising
+    // "deleted too" for a table the cascade skips would be a lie the user acts on.
+    expect(preview.source_table).toBe('file_cards');
+    expect(preview.deletable).toBe(false);
+    expect(() => deleteMemory(store, 'foreign')).toThrow(/no deletion rule/);
+  });
+
+  it('names the upstream table that would otherwise rebuild the source row', () => {
+    const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+    handleCmdEvent(store, sessionId, { exit: '1', cmd: 'npm run build', stderr: 'boom' });
+    const item = store.listMemoryItemsFiltered({ kinds: ['command_run'] })[0]!;
+
+    const preview = previewMemoryDeletion(store, item.id)!;
+
+    expect(preview.upstream_table).toBe('events');
+  });
+
+  it('counts counterparts the way the delete does, for a session with no scope key', () => {
+    // createSession() with no scopeKey leaves sessions.scope_key NULL, while
+    // resolveSessionScope stamps the memory item with the derived project key.
+    // Comparing counterparts against the item column instead of the session
+    // column then reports zero — and the delete clears the contest anyway.
+    const unscoped = store.createSession().id;
+    const first = store.insertNote({
+      sessionId: unscoped,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'flush the spool at turn end',
+    });
+    const second = store.insertNote({
+      sessionId: unscoped,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'do not flush the spool at turn end',
+    });
+    expect(store.getScopeKeyForNote(first.id)).toBeNull();
+    expect(store.getMemoryItemBySource('notes', first.id)!.scope_key).not.toBeNull();
+    expect(store.getNote(first.id)!.conflict).toBe(true);
+
+    const preview = previewMemoryDeletion(store, first.id)!;
+    expect(preview.contested).toBe(true);
+    // The preview is AC #2's confirmation surface; it must not understate what
+    // the delete is about to do.
+    expect(preview.counterparts.map(c => c.id)).toEqual([second.id]);
+
+    deleteMemory(store, first.id);
+    expect(store.getNote(second.id)!.conflict).toBe(false);
   });
 
   it('clears the contest for the survivor', () => {

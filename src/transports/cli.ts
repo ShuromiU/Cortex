@@ -163,6 +163,38 @@ function stripControlCharacters(value: string): string {
   return value.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '');
 }
 
+/**
+ * The trailer line a replacement text would be misread as, or null.
+ *
+ * `buildNoteMemoryText` appends `Subject:` / `Alternatives:` / `Conflict:` /
+ * `Status:` after the content, and every reader that recovers those flags
+ * (`isContested`, `renderedAlternatives`, `isSupersededMemoryItem`) is
+ * trailer-scoped — it walks back from the end. Content ending in one of those
+ * lines is therefore indistinguishable from real metadata, and the resulting
+ * `[contested]` / `(superseded)` cannot be cleared, because `cortex_resolve`
+ * clears a column while the marker is read from text. Stories 1.3 and 1.4
+ * documented this as a bounded residual reachable only by authoring such a
+ * note; `edit-memory --file` would make it a first-class input.
+ */
+function spoofedTrailerLine(text: string): string | null {
+  const trailerPrefixes = ['subject:', 'alternatives:', 'conflict:', 'status:'];
+  const lines = text.split('\n');
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!.trim();
+    if (line.length === 0) {
+      continue;
+    }
+    const lower = line.toLowerCase();
+    const match = trailerPrefixes.find(prefix => lower.startsWith(prefix));
+    // Only a *trailing* run of such lines is dangerous — the readers stop at
+    // the first line that is not one, so a mid-text mention is inert.
+    return match ? line : null;
+  }
+
+  return null;
+}
+
 /** Quote a value for the copy-pasteable next-page command. */
 function shellQuote(value: string): string {
   return /^[A-Za-z0-9,._:@/+-]+$/.test(value) ? value : JSON.stringify(value);
@@ -287,10 +319,25 @@ function renderDeletionPreview(preview: MemoryDeletionPreview, requestedId: stri
   ];
 
   if (preview.source_table) {
-    lines.push(`source row: ${preview.source_table}/${preview.source_id} — deleted too`);
-    lines.push(
-      '            (leaving it would resurrect this item on the next command)',
-    );
+    // Promise only what the cascade actually performs. A source table with no
+    // deletion rule would otherwise be advertised as "deleted too" and skipped.
+    if (preview.deletable) {
+      lines.push(`source row: ${preview.source_table}/${preview.source_id} — deleted too`);
+      lines.push('            (leaving it would resurrect this item on the next command)');
+      if (preview.upstream_table) {
+        lines.push(
+          `            plus its ${preview.upstream_table} row, which the backfill would rebuild it from`,
+        );
+      }
+    } else {
+      lines.push(
+        `source row: ${preview.source_table}/${preview.source_id} — NO deletion rule; this delete will be refused`,
+      );
+    }
+  }
+
+  if (preview.aggregate_warning) {
+    lines.push(`warning:    ${preview.aggregate_warning}`);
   }
 
   if (preview.contested) {
@@ -412,6 +459,18 @@ function renderMemoryInspection(inspection: MemoryInspection): string {
   // rows under a note blaming gc, when the immediate cause is the cap.
   lines.push(
     `  (showing at most ${ACCESS_HISTORY_LIMIT}; cortex gc also prunes the retrieval log — the access count is the durable figure)`,
+  );
+
+  if (inspection.corrections.length > 0) {
+    lines.push('', 'corrections:');
+    for (const correction of inspection.corrections) {
+      const when = formatMemoryTimestamp(correction.created_at) ?? correction.created_at;
+      lines.push(`  ${when}  ${correction.operation}`);
+      lines.push(`    was: ${collapseToLine(correction.prior_text).slice(0, 160)}`);
+    }
+  }
+
+  lines.push(
     '',
     'text:',
     stripControlCharacters(inspection.text),
@@ -875,7 +934,12 @@ export function createProgram(): Command {
       // Closing one side of a contest clears it for the subject, or the
       // survivor renders [contested] against a note nobody can act on and the
       // resolved note renders "[contested] (resolved)" forever.
-      if (note.subject) {
+      //
+      // Gated on `note.conflict`, not just on having a subject: an uncontested
+      // third note (a blocker, say) can be active on the same subject, and
+      // resolving it must not wipe the markers of a contest it has nothing to
+      // do with. This is the half of `mcp.ts`'s guard that matters here.
+      if (note.conflict && note.subject) {
         store.clearConflictsForSubject(note.subject, store.getScopeKeyForNote(note.id));
       }
       process.stdout.write(`Marked ${note.kind}${note.subject ? `[${note.subject}]` : ''} as ${status}.\n`);
@@ -1091,9 +1155,18 @@ export function createProgram(): Command {
     .option('--file <path>', 'Read replacement text from a file (for multi-line corrections)')
     .option('--json', 'Emit the result as JSON')
     .action((id: string, opts: { text?: string; file?: string; json?: boolean }) => {
-      if ((opts.text === undefined) === (opts.file === undefined)) {
-        process.stderr.write('Pass exactly one of --text or --file.\n');
+      const fail = (error: string, message: string): void => {
+        process.stderr.write(`${message}\n`);
+        // --json callers get a parseable object on every error path, not just
+        // the not-found one.
+        if (opts.json) {
+          process.stdout.write(`${JSON.stringify({ error, id }, null, 2)}\n`);
+        }
         process.exitCode = 1;
+      };
+
+      if ((opts.text === undefined) === (opts.file === undefined)) {
+        fail('bad_args', 'Pass exactly one of --text or --file.');
         return;
       }
 
@@ -1104,10 +1177,38 @@ export function createProgram(): Command {
             ? fs.readFileSync(path.resolve(process.cwd(), opts.file), 'utf8')
             : opts.text!;
       } catch (err) {
-        process.stderr.write(
-          `Could not read --file: ${err instanceof Error ? err.message : String(err)}\n`,
+        fail(
+          'file_unreadable',
+          `Could not read --file: ${err instanceof Error ? err.message : String(err)}`,
         );
-        process.exitCode = 1;
+        return;
+      }
+
+      // Windows editors write a BOM by default, and --file is advertised for
+      // multi-line corrections, so it is the likely source of one.
+      if (text.charCodeAt(0) === 0xfeff) {
+        text = text.slice(1);
+      }
+
+      if (text.trim().length === 0) {
+        fail(
+          'empty_text',
+          'Replacement text is empty. Use `cortex delete-memory` to remove a memory.',
+        );
+        return;
+      }
+
+      const spoofed = spoofedTrailerLine(text);
+      if (spoofed) {
+        // The projection appends `Subject:`/`Alternatives:`/`Conflict:`/`Status:`
+        // as its trailer, and the readers that recover those flags are
+        // trailer-scoped. Text ending in one of those lines would be read back
+        // as metadata — rendering [contested] or (superseded) with the column
+        // saying otherwise, and nothing able to clear it.
+        fail(
+          'spoofed_trailer',
+          `Replacement text ends with "${spoofed}", which the projection uses as a metadata line. Reword it, or move it away from the end of the text.`,
+        );
         return;
       }
 
@@ -1190,6 +1291,20 @@ export function createProgram(): Command {
 
       if (opts.json) {
         process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        if (!result.deleted) {
+          process.exitCode = 1;
+        }
+        return;
+      }
+
+      if (!result.deleted) {
+        // The preview read and the cascade are separate transactions, so the
+        // row can vanish between them. Reporting success for a deletion that
+        // never ran is worse than reporting the race.
+        process.stderr.write(
+          `Item ${result.item.id} vanished before the delete could run; nothing was removed.\n`,
+        );
+        process.exitCode = 1;
         return;
       }
 
@@ -1200,7 +1315,9 @@ export function createProgram(): Command {
       if (result.cleared_contest_for) {
         lines.push(`  cleared the contest on "${collapseToLine(result.cleared_contest_for)}"`);
       }
-      lines.push('  the removed text is kept in the audit trail until cortex gc prunes it');
+      lines.push(
+        '  the removed text is kept in the audit trail (cortex inspect-memory) until cortex gc prunes it',
+      );
       process.stdout.write(`${lines.join('\n')}\n`);
     });
 

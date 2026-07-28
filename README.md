@@ -429,24 +429,36 @@ Stored strings are author-supplied, so the renderer treats them as content rathe
 `delete-memory` previews by default and deletes only with `--yes`, the same shape `cortex gc` uses:
 
 ```text
-$ cortex delete-memory notes:ac2c7f50-ecce-42cb-94aa-05f7181ac22d
+$ cortex delete-memory notes:ed470662-a3ba-49aa-9867-bde32cdfccdc
 preview only — nothing has been deleted.
 
-id:         notes:ac2c7f50-ecce-42cb-94aa-05f7181ac22d
+id:         notes:ed470662-a3ba-49aa-9867-bde32cdfccdc
 kind:       Decision (note:decision)
 subject:    auth strategy
+scope:      branch:c:/work/cortex/.git:c:/work/cortex:main
 references: 0 will be removed with it
-source row: notes/ac2c7f50-ecce-42cb-94aa-05f7181ac22d — deleted too
+source row: notes/ed470662-a3ba-49aa-9867-bde32cdfccdc — deleted too
             (leaving it would resurrect this item on the next command)
 contest:    open — deleting this side clears it for 1 counterpart(s)
-            d66141d8-c4f0-4ae8-8a45-b76003e05f5a
+            b98baa9f-aab4-44cd-aa13-fc78bd1cb444
+
+text:
+decision: use OIDC with server-side sessions
+Subject: auth strategy
+Conflict: true
+
+to delete: cortex delete-memory ed470662-a3ba-49aa-9867-bde32cdfccdc --yes
 ```
 
-That "would resurrect" line is literal. Memory items are re-projected from their source rows (`notes`, `episodes`, `command_runs`, `project_snapshots`) every time the schema is ensured, which is every command — so deleting the projection alone would undo itself on your next invocation. Deletion removes the source row, the item, and everything derived from it in one transaction.
+That "would resurrect" line is literal. Memory items are re-projected from their source rows every time the schema is ensured, which is every command — so deleting the projection alone would undo itself on your next invocation. Deletion removes the source row, the item, and everything derived from it in one transaction.
+
+**And three of those source rows are themselves derived.** `command_runs` is rebuilt from `events`, and both `episodes` and `project_snapshots` are rebuilt from `state`, each reusing the same id — so deleting one level up is still not enough, and the delete walks the chain. A source table with no deletion rule is refused outright rather than half-deleted; the preview says so before you commit to it.
 
 Deleting one side of a contested pair clears the contest, so the surviving note stops rendering `[contested]` against a counterpart that no longer exists.
 
-**Corrections are recorded, and the record outlives what it describes.** Both edits and deletes write the prior text to a `memory_corrections` row that carries no foreign key to the item — with one, the audit trail would be destroyed by the very deletion it exists to document. The honest consequence: **text you delete remains readable in the audit trail** until `cortex gc` prunes it. If you are deleting something because it must not be readable, that is not yet enough.
+**Corrections are recorded, and the record outlives what it describes.** Both edits and deletes write the prior text to a `memory_corrections` row that carries no foreign key to the item — with one, the audit trail would be destroyed by the very deletion it exists to document. `cortex inspect-memory` shows the trail under `corrections:`, and `prior_text` records the value `edit-memory` *consumes*, so feeding it back restores the memory exactly.
+
+The honest consequence: **text you delete remains readable in the audit trail** for 90 days, until `cortex gc` prunes it (`CORTEX_GC_CORRECTION_DAYS` sets the window; `cortex gc --apply` prunes on demand). If you are deleting something because it must not be readable, delete it and then run gc.
 
 ## Reliability Evaluation
 

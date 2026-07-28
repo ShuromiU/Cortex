@@ -202,7 +202,7 @@ CREATE TABLE IF NOT EXISTS file_renames (
 /**
  * R1's single `SCHEMA_VERSION` increment (4 → 5), per AD-11's one-bump-per-release
  * rule. Story 2.2 is the first story in the release to add a table, so it owns the
- * bump and this constant; Stories 3.1, 4.1, 4.3 and 4.4 **append** their tables
+ * bump and this constant; Stories 3.1, 4.3 and 4.4 **append** their tables
  * here and leave the version alone. Safe because `applySchema` runs the DDL
  * unconditionally with `CREATE TABLE IF NOT EXISTS`, so a store already marked v5
  * still receives tables appended later.

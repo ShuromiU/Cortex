@@ -7,11 +7,13 @@ import { createProgram } from '../src/transports/cli.js';
 import { deriveEngagementPath } from '../src/transports/mcp.js';
 import { openDatabase, ensureCortexSchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
+import { handleCmdEvent } from '../src/capture/hooks.js';
 import {
   ACCESS_HISTORY_LIMIT,
   DEFAULT_PAGE_LIMIT,
   MAX_PAGE_LIMIT,
   MEMORY_LIST_ORDER,
+  inspectMemory,
 } from '../src/query/inspect.js';
 
 // ── createProgram ─────────────────────────────────────────────────────
@@ -823,6 +825,123 @@ describe('cortex edit-memory', () => {
     expect(json.exitCode).toBe(1);
     expect(JSON.parse(json.stdout)).toEqual({ error: 'not_found', id: 'ghost' });
   });
+
+  it('refuses replacement text that would be read back as projection metadata', async () => {
+    let noteId = '';
+    const cwd = seedTempProject(store => {
+      const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+      noteId = store.insertNote({
+        sessionId,
+        kind: 'insight',
+        content: 'the flush is batched',
+      }).id;
+    });
+
+    const run = await runCommand(cwd, [
+      'edit-memory',
+      noteId,
+      '--text',
+      'the flush is batched\nConflict: true',
+    ]);
+
+    // Trailer readers walk back from the end, so text ending in a trailer line
+    // renders [contested] with the column saying otherwise — unclearable.
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr).toContain('metadata line');
+
+    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const store = new CortexStore(db);
+    expect(store.getNote(noteId)!.content).toBe('the flush is batched');
+    expect(inspectMemory(store, noteId)!.conflict.diverged).toBe(false);
+    db.close();
+  });
+
+  it('allows a trailer-looking phrase that is not the last line', async () => {
+    let noteId = '';
+    const cwd = seedTempProject(store => {
+      const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+      noteId = store.insertNote({ sessionId, kind: 'insight', content: 'original' }).id;
+    });
+
+    // The readers stop at the first non-trailer line, so a mid-text mention is
+    // inert — refusing it would be over-blocking.
+    const run = await runCommand(cwd, [
+      'edit-memory',
+      noteId,
+      '--text',
+      'Status: superseded is the line the projection appends\nand this is the real content',
+    ]);
+
+    expect(run.exitCode).toBeFalsy();
+  });
+
+  it('refuses empty replacement text and points at delete-memory', async () => {
+    const cwd = seedTempProject(store => {
+      seedItem(store, 'item');
+    });
+
+    const run = await runCommand(cwd, ['edit-memory', 'item', '--text', '   ']);
+
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr).toContain('delete-memory');
+    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    expect(new CortexStore(db).getMemoryItem('item')!.text).not.toBe('   ');
+    db.close();
+  });
+
+  it('emits a JSON error object on the flag and file error paths too', async () => {
+    const cwd = seedTempProject(store => {
+      seedItem(store, 'item');
+    });
+
+    const badArgs = await runCommand(cwd, ['edit-memory', 'item', '--json']);
+    expect(badArgs.exitCode).toBe(1);
+    expect((JSON.parse(badArgs.stdout) as { error: string }).error).toBe('bad_args');
+
+    const badFile = await runCommand(cwd, [
+      'edit-memory',
+      'item',
+      '--file',
+      path.join(cwd, 'nope.txt'),
+      '--json',
+    ]);
+    expect(badFile.exitCode).toBe(1);
+    expect((JSON.parse(badFile.stdout) as { error: string }).error).toBe('file_unreadable');
+  });
+
+  it('strips a UTF-8 BOM from --file content', async () => {
+    const cwd = seedTempProject(store => {
+      seedItem(store, 'item');
+    });
+    const file = path.join(cwd, 'correction.txt');
+    fs.writeFileSync(file, '\uFEFFcorrected text');
+
+    await runCommand(cwd, ['edit-memory', 'item', '--file', file]);
+
+    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    expect(new CortexStore(db).getMemoryItem('item')!.text).toBe('corrected text');
+    db.close();
+  });
+
+  it('surfaces the audit trail through inspect-memory, as edit-memory promises', async () => {
+    const cwd = seedTempProject(store => {
+      store.upsertMemoryItem({
+        id: 'item',
+        scopeType: 'project',
+        scopeKey: 'scope-a',
+        kind: 'note:insight',
+        text: 'the original wording',
+      });
+    });
+
+    await runCommand(cwd, ['edit-memory', 'item', '--text', 'the corrected wording']);
+    const inspect = await runCommand(cwd, ['inspect-memory', 'item']);
+
+    // edit-memory tells the user "cortex inspect-memory shows the item"; before
+    // this, nothing surfaced the trail at all.
+    expect(inspect.stdout).toContain('corrections:');
+    expect(inspect.stdout).toContain('the original wording');
+  });
 });
 
 describe('cortex delete-memory', () => {
@@ -908,6 +1027,41 @@ describe('cortex delete-memory', () => {
     const db = openDatabase(path.join(cwd, '.cortex.db'));
     expect(new CortexStore(db).getNote(secondId)!.conflict).toBe(false);
     db.close();
+  });
+
+  it('says in the preview when the source table has no deletion rule', async () => {
+    const cwd = seedTempProject(store => {
+      store.upsertMemoryItem({
+        id: 'foreign',
+        scopeType: 'project',
+        scopeKey: 'scope-a',
+        kind: 'note:insight',
+        sourceTable: 'file_cards',
+        sourceId: 'card-1',
+        text: 'an item from a table the cascade does not know',
+      });
+    });
+
+    const preview = await runCommand(cwd, ['delete-memory', 'foreign']);
+
+    // Promising "deleted too" for a table the cascade skips is a lie the user
+    // acts on — and the delete would resurrect the item while reporting success.
+    expect(preview.stdout).toContain('NO deletion rule');
+    expect(preview.stdout).not.toContain('deleted too');
+  });
+
+  it('names the upstream row the backfill would rebuild the source from', async () => {
+    const cwd = seedTempProject(store => {
+      const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+      handleCmdEvent(store, sessionId, { exit: '1', cmd: 'npm run build', stderr: 'boom' });
+    });
+
+    const listed = await runCommand(cwd, ['list-memory', '--kind', 'command_run', '--json']);
+    const itemId = (JSON.parse(listed.stdout) as { items: Array<{ id: string }> }).items[0]!.id;
+
+    const preview = await runCommand(cwd, ['delete-memory', itemId]);
+
+    expect(preview.stdout).toContain('plus its events row');
   });
 
   it('exits non-zero for an unknown id in preview and in --yes mode', async () => {
@@ -1009,6 +1163,51 @@ describe('cortex note-resolve', () => {
     const store = new CortexStore(db);
     expect(store.getNote(firstId)!.status).toBe('active');
     expect(store.getNote(secondId)!.status).toBe('active');
+    db.close();
+  });
+
+  it('does not clear an unrelated open contest when resolving an uncontested note', async () => {
+    let decisionA = '';
+    let decisionB = '';
+    let blockerId = '';
+    const cwd = seedTempProject(store => {
+      const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+      decisionA = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'spool flush',
+        content: 'flush the spool at turn end',
+      }).id;
+      decisionB = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'spool flush',
+        content: 'do not flush the spool at turn end',
+      }).id;
+      blockerId = store.insertNote({
+        sessionId,
+        kind: 'blocker',
+        subject: 'spool flush',
+        content: 'spool flush blocked on the jq dependency',
+      }).id;
+    });
+
+    const before = openDatabase(path.join(cwd, '.cortex.db'));
+    const beforeStore = new CortexStore(before);
+    expect(beforeStore.getNote(decisionA)!.conflict).toBe(true);
+    expect(beforeStore.getNote(blockerId)!.conflict).toBe(false);
+    before.close();
+
+    const run = await runCommand(cwd, ['note-resolve', '--id', blockerId]);
+    expect(run.exitCode).toBeFalsy();
+
+    // Resolving a note that is not part of the contest must leave the contest
+    // standing — clearing is per-subject, so gating on `subject` alone wipes it.
+    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const store = new CortexStore(db);
+    expect(store.getNote(decisionA)!.conflict).toBe(true);
+    expect(store.getNote(decisionB)!.conflict).toBe(true);
+    expect(store.getNote(blockerId)!.status).toBe('resolved');
     db.close();
   });
 

@@ -128,3 +128,55 @@ describe('gc', () => {
     expect(shouldAutoGc(db, new Date(Date.now() + 25 * 60 * 60 * 1000))).toBe(true);
   });
 });
+
+// ── memory_corrections retention (FR-22) ──────────────────────────────
+//
+// `delete-memory` prints "kept in the audit trail until cortex gc prunes it"
+// on every deletion. That sentence is only true if this rule exists.
+
+describe('runGc — memory_corrections', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    applySchema(db);
+    initializeMeta(db, '/repo');
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function seedCorrection(id: string, createdAt: string): void {
+    db.prepare(
+      `INSERT INTO memory_corrections (id, memory_item_id, operation, prior_text, created_at)
+       VALUES (?, 'item-1', 'delete', 'the deleted text', ?)`,
+    ).run(id, createdAt);
+  }
+
+  it('prunes corrections past the retention window and keeps recent ones', () => {
+    const now = new Date('2026-07-28T00:00:00.000Z');
+    seedCorrection('old', '2026-01-01T00:00:00.000Z');
+    seedCorrection('recent', '2026-07-27T00:00:00.000Z');
+
+    const report = runGc(db, { dryRun: false, vacuum: 'never', now });
+
+    expect(report.memory_corrections.deleted).toBe(1);
+    const ids = (
+      db.prepare('SELECT id FROM memory_corrections').all() as Array<{ id: string }>
+    ).map(row => row.id);
+    expect(ids).toEqual(['recent']);
+  });
+
+  it('reports candidates without deleting on a dry run', () => {
+    const now = new Date('2026-07-28T00:00:00.000Z');
+    seedCorrection('old', '2026-01-01T00:00:00.000Z');
+
+    const report = runGc(db, { dryRun: true, vacuum: 'never', now });
+
+    expect(report.memory_corrections.candidates).toBe(1);
+    expect(report.memory_corrections.deleted).toBe(0);
+    expect(db.prepare('SELECT COUNT(*) as n FROM memory_corrections').get()).toEqual({ n: 1 });
+  });
+});

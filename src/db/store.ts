@@ -458,6 +458,21 @@ export interface UpsertMemoryItemOpts {
   createdAt?: string;
 }
 
+/**
+ * Source tables `deleteMemoryItemCascade` knows how to remove, including their
+ * upstream producers. Exported so the deletion preview promises exactly what
+ * the delete performs — a table missing here must not be advertised as "deleted
+ * too", and a future source table must be added in both places at once.
+ */
+export const DELETABLE_SOURCE_TABLES: ReadonlySet<string> = new Set([
+  'notes',
+  'episodes',
+  'command_runs',
+  'project_snapshots',
+  'branch_snapshots',
+  'state',
+]);
+
 /** An audit-trail row (FR-22). Outlives the item it names — see the DDL. */
 export interface ParsedMemoryCorrection {
   id: string;
@@ -848,10 +863,14 @@ export class CortexStore {
     // Preserve the existing item's state instead; `memoryStateForNote` is only
     // the landing for a projection with no prior item (backfill, fresh seed).
     // This also keeps pre-1.4 rows archived: forward-only, no resurrection.
-    const existing =
-      note.status === 'superseded'
-        ? this.getMemoryItemBySource('notes', note.id)
-        : undefined;
+    // Read the existing projection unconditionally, not just for superseded
+    // notes. `upsertMemoryItem`'s ON CONFLICT writes `access_count` and
+    // `last_accessed_at` from the (defaulted) opts, so omitting them resets a
+    // re-synced item's access history to 0/NULL and re-derives its tier —
+    // silently reheating a cold memory, un-pinning a pinned one, and moving
+    // both `computeHotness` inputs. Every re-sync path hits this: an edit
+    // (FR-22), `markConflict`, and `clearConflictsForSubject`.
+    const existing = this.getMemoryItemBySource('notes', note.id);
 
     this.upsertMemoryItem({
       id: `notes:${note.id}`,
@@ -863,8 +882,23 @@ export class CortexStore {
       sourceId: note.id,
       subject: note.subject,
       text: buildNoteMemoryText(note),
-      state: existing ? existing.state : memoryStateForNote(note.kind, note.status),
+      // Tier and counters are preserved on different rules.
+      //
+      // Tier: a `superseded` note's tier is set exactly once at the status
+      // transition (FR-4), so preserve it. A `resolved` note must land cold —
+      // that is the close-out contract, and re-deriving is what enforces it.
+      // An `active` note keeps whatever tier it had, so a correction or a
+      // conflict re-sync cannot reheat a decayed memory or un-pin a pinned one.
+      state:
+        existing && note.status !== 'resolved'
+          ? existing.state
+          : memoryStateForNote(note.kind, note.status),
       importance: noteImportance(note.kind),
+      // Counters are preserved unconditionally: they are `computeHotness`
+      // inputs and durable access history, and no status transition is a
+      // reason to forget how often a memory was used.
+      ...(existing ? { accessCount: existing.access_count } : {}),
+      ...(existing ? { lastAccessedAt: existing.last_accessed_at } : {}),
       createdAt: note.timestamp,
     });
   }
@@ -2796,8 +2830,21 @@ export class CortexStore {
    * a new memory, and reheating one as a side effect of fixing a typo would
    * change retrieval ranking for a reason the user never asked for.
    */
+  /**
+   * The text a correction command reads and writes for an item: a note-backed
+   * item is edited through `notes.content`, everything else through
+   * `memory_items.text`. Keeps `prior_text` round-trippable.
+   */
+  private editableTextFor(item: ParsedMemoryItem): string {
+    if (item.source_table === 'notes' && item.source_id) {
+      return this.getNote(item.source_id)?.content ?? item.text;
+    }
+
+    return item.text;
+  }
+
   updateMemoryItemText(id: string, text: string): boolean {
-    return this.runInTransaction(() => {
+    return this.runInImmediateTransaction(() => {
       const item = this.getMemoryItem(id);
       if (!item) {
         return false;
@@ -2805,13 +2852,18 @@ export class CortexStore {
 
       // Inside the transaction: "recorded in an audit trail" is only true if
       // the record cannot survive a correction that rolled back, or vice versa.
+      //
+      // `prior_text` records the value `edit-memory` *consumes*, not the
+      // projection it produces — for a note-backed item those differ by the
+      // kind prefix and the appended trailer, so recording `item.text` would
+      // make the audit row unreplayable: feeding it back doubles both.
       this.recordMemoryCorrection({
         memoryItemId: item.id,
         sourceTable: item.source_table,
         sourceId: item.source_id,
         scopeKey: item.scope_key,
         operation: 'edit',
-        priorText: item.text,
+        priorText: this.editableTextFor(item),
         newText: text,
         priorSubject: item.subject,
       });
@@ -2846,7 +2898,7 @@ export class CortexStore {
    * trigger. They are pinned by test rather than trusted.
    */
   deleteMemoryItemCascade(id: string): boolean {
-    return this.runInTransaction(() => {
+    return this.runInImmediateTransaction(() => {
       const item = this.getMemoryItem(id);
       if (!item) {
         return false;
@@ -2866,7 +2918,7 @@ export class CortexStore {
         sourceId: item.source_id,
         scopeKey: item.scope_key,
         operation: 'delete',
-        priorText: item.text,
+        priorText: this.editableTextFor(item),
         priorSubject: item.subject,
       });
 
@@ -2877,19 +2929,19 @@ export class CortexStore {
       }
 
       if (item.source_table && item.source_id) {
-        const sourceTables = new Set([
-          'notes',
-          'episodes',
-          'command_runs',
-          'project_snapshots',
-          'branch_snapshots',
-          'state',
-        ]);
-        if (sourceTables.has(item.source_table)) {
-          this.db
-            .prepare(`DELETE FROM ${item.source_table} WHERE id = ?`)
-            .run(item.source_id);
+        if (!DELETABLE_SOURCE_TABLES.has(item.source_table)) {
+          // Refuse rather than half-delete. Falling through would drop the
+          // memory item while its source survives — and the backfill would
+          // bring the item straight back, with the caller told it succeeded.
+          throw new Error(
+            `Cannot delete a memory item sourced from "${item.source_table}": no deletion rule exists for that table.`,
+          );
         }
+
+        this.db
+          .prepare(`DELETE FROM ${item.source_table} WHERE id = ?`)
+          .run(item.source_id);
+        this.deleteUpstreamOf(item.source_table, item.source_id);
       }
 
       this.db.prepare('DELETE FROM memory_items WHERE id = ?').run(id);
@@ -2897,9 +2949,59 @@ export class CortexStore {
     });
   }
 
+  /**
+   * Delete the rows a source row is itself re-derived from.
+   *
+   * Three of the six source tables are **second-order**: the backfill rebuilds
+   * them from `events` and `state`, reusing the same primary key. Deleting only
+   * the source row therefore looks correct and is undone by the next
+   * `ensureCortexSchema` — the very failure `deleteMemoryItemCascade` exists to
+   * prevent, one level further up than it originally looked.
+   *
+   *   command_runs      ← events   (type='cmd';  `handleCmdEvent` reuses the event id)
+   *   episodes          ← state    (layer='session'; `writeSessionSummary` reuses the state id)
+   *   project_snapshots ← state    (layer='project'; `insertState` reuses its own id)
+   *
+   * A `state` row is itself upstream of the other two, so deleting a
+   * `state`-backed item takes its twin projection with it — one piece of
+   * content is otherwise projected as two memory items sharing an id.
+   */
+  private deleteUpstreamOf(sourceTable: string, sourceId: string): void {
+    if (sourceTable === 'command_runs') {
+      this.db.prepare('DELETE FROM events WHERE id = ?').run(sourceId);
+      return;
+    }
+
+    if (sourceTable === 'episodes' || sourceTable === 'project_snapshots') {
+      this.db.prepare('DELETE FROM state WHERE id = ?').run(sourceId);
+      return;
+    }
+
+    if (sourceTable === 'state') {
+      this.db.prepare('DELETE FROM episodes WHERE id = ?').run(sourceId);
+      this.db.prepare('DELETE FROM project_snapshots WHERE id = ?').run(sourceId);
+      this.db
+        .prepare('DELETE FROM memory_items WHERE source_table IN (?, ?) AND source_id = ?')
+        .run('episodes', 'project_snapshots', sourceId);
+    }
+  }
+
   // ── Transactions ──────────────────────────────────────────────────
 
   runInTransaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
+  }
+
+  /**
+   * Like `runInTransaction`, but takes the write lock up front.
+   *
+   * Required for any read-then-write sequence: a DEFERRED transaction upgrades
+   * lazily, and the upgrade fails with `SQLITE_BUSY_SNAPSHOT`, which **bypasses
+   * the busy handler** — so `busy_timeout` never applies and the work is
+   * discarded instead of waiting. `insertNote` and `updateNoteStatus` use this
+   * for the same reason; two sessions share one database file.
+   */
+  runInImmediateTransaction<T>(fn: () => T): T {
+    return this.db.transaction(fn).immediate();
   }
 }

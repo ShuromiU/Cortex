@@ -1,3 +1,4 @@
+import { DELETABLE_SOURCE_TABLES } from '../db/store.js';
 import type { CortexStore, ParsedMemoryItem, ParsedNote } from '../db/store.js';
 import type { MemoryReferenceDetail } from './inspect.js';
 
@@ -86,12 +87,33 @@ export interface MemoryDeletionPreview {
   item: ParsedMemoryItem;
   source_table: string | null;
   source_id: string | null;
+  /** False when no deletion rule exists for `source_table`; the delete refuses. */
+  deletable: boolean;
+  /** The table the source row would be rebuilt from, if any. */
+  upstream_table: string | null;
   reference_count: number;
   /** True when the item is one side of an open contest. */
   contested: boolean;
   /** The other side(s), whose contest this deletion will clear. */
   counterparts: DeletionCounterpart[];
+  /** Set when the source row holds more than this item's text. */
+  aggregate_warning: string | null;
 }
+
+/** What each second-order source row is re-derived from. See `deleteUpstreamOf`. */
+const UPSTREAM_OF: Readonly<Record<string, string>> = {
+  command_runs: 'events',
+  episodes: 'state',
+  project_snapshots: 'state',
+};
+
+/** Source rows that carry more than the one item's text. */
+const AGGREGATE_SOURCES: Readonly<Record<string, string>> = {
+  branch_snapshots:
+    'the whole branch snapshot goes — focus, intents, blockers, recent files and last session for this scope',
+  project_snapshots: 'the whole project snapshot goes, not just this item',
+  state: 'the session summary goes, and its twin episode projection with it',
+};
 
 /**
  * What a deletion would remove, without removing it.
@@ -112,23 +134,36 @@ export function previewMemoryDeletion(
 
   const note = sourceNote(store, item);
   const contested = Boolean(note?.conflict);
+  // Scope must be compared the way the *delete* compares it. `clearConflictsForSubject`
+  // matches `sessions.scope_key IS ?` — session join against session join — while
+  // `item.scope_key` is the memory_items column, which `resolveSessionScope`
+  // fills with a derived project key when the session's own is NULL. Comparing
+  // against the column made the preview report zero counterparts for a contest
+  // the delete then cleared: the confirmation surface understating its own blast
+  // radius, which is the one thing it must not do.
+  const noteScopeKey = note ? store.getScopeKeyForNote(note.id) : null;
   const counterparts: DeletionCounterpart[] =
     contested && note?.subject
       ? store
           .getActiveNotesBySubject(note.subject)
           .filter(other => other.id !== note.id && other.conflict)
           // Detection is scope-keyed, so the counterpart search must be too.
-          .filter(other => store.getScopeKeyForNote(other.id) === item.scope_key)
+          .filter(other => store.getScopeKeyForNote(other.id) === noteScopeKey)
           .map(other => ({ id: other.id, subject: other.subject }))
       : [];
 
+  const sourceTable = item.source_table;
+
   return {
     item,
-    source_table: item.source_table,
+    source_table: sourceTable,
     source_id: item.source_id,
+    deletable: sourceTable === null || DELETABLE_SOURCE_TABLES.has(sourceTable),
+    upstream_table: sourceTable ? (UPSTREAM_OF[sourceTable] ?? null) : null,
     reference_count: store.getMemoryReferences(item.id).length,
     contested,
     counterparts,
+    aggregate_warning: sourceTable ? (AGGREGATE_SOURCES[sourceTable] ?? null) : null,
   };
 }
 
@@ -146,19 +181,25 @@ export interface MemoryDeletionResult {
  * transaction. Returns null when the id resolves to nothing.
  */
 export function deleteMemory(store: CortexStore, id: string): MemoryDeletionResult | null {
-  const preview = previewMemoryDeletion(store, id);
-  if (!preview) {
-    return null;
-  }
+  // Preview and cascade run as one atomic unit. Read separately, the row could
+  // vanish between them and the caller would be handed a result describing a
+  // deletion that never happened — source row, cleared contest and all. The
+  // store's own transaction nests into this one as a savepoint.
+  return store.runInImmediateTransaction(() => {
+    const preview = previewMemoryDeletion(store, id);
+    if (!preview) {
+      return null;
+    }
 
-  const note = sourceNote(store, preview.item);
-  const deleted = store.deleteMemoryItemCascade(preview.item.id);
+    const note = sourceNote(store, preview.item);
+    const deleted = store.deleteMemoryItemCascade(preview.item.id);
 
-  return {
-    deleted,
-    item: preview.item,
-    source_table: preview.source_table,
-    source_id: preview.source_id,
-    cleared_contest_for: preview.contested ? (note?.subject ?? null) : null,
-  };
+    return {
+      deleted,
+      item: preview.item,
+      source_table: preview.source_table,
+      source_id: preview.source_id,
+      cleared_contest_for: preview.contested ? (note?.subject ?? null) : null,
+    };
+  });
 }

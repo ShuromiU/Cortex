@@ -10,6 +10,8 @@ import {
   parseNoteRow,
 } from '../src/db/store.js';
 import { refreshMemoryHotness } from '../src/memory/hotness.js';
+import { handleCmdEvent } from '../src/capture/hooks.js';
+import { writeSessionSummary } from '../src/capture/consolidate.js';
 import type { SessionRow, EventRow, NoteRow } from '../src/db/store.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -2452,6 +2454,73 @@ describe('CortexStore — memory correction', () => {
     expect(item.access_count).toBe(9);
     expect(item.last_accessed_at).toBe('2026-07-01T00:00:00.000Z');
   });
+
+  it('does not reheat or reset a NOTE-BACKED item it corrects', () => {
+    // The branch that matters and the one the plain-item test above never
+    // reaches: a note-backed edit re-projects through syncMemoryItemForNote,
+    // whose upsert would otherwise write the access-count and last-accessed
+    // defaults straight over the item's real history.
+    const note = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'auth',
+      content: 'use OIDC',
+    });
+    const itemId = store.getMemoryItemBySource('notes', note.id)!.id;
+    // Touch first — it reheats to hot — then set the tier we want to see survive.
+    store.touchMemoryItems([itemId], '2026-07-01T00:00:00.000Z');
+    store.updateMemoryItemStates([{ id: itemId, state: 'cold' }]);
+    const before = store.getMemoryItem(itemId)!;
+    expect(before.state).toBe('cold');
+    expect(before.access_count).toBeGreaterThan(0);
+
+    store.updateMemoryItemText(itemId, 'use OIDC with refresh rotation');
+
+    const after = store.getMemoryItem(itemId)!;
+    expect(after.text).toContain('use OIDC with refresh rotation');
+    expect(after.state).toBe('cold');
+    expect(after.access_count).toBe(before.access_count);
+    expect(after.last_accessed_at).toBe(before.last_accessed_at);
+  });
+
+  it('never un-pins a pinned note by correcting it', () => {
+    const note = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'auth',
+      content: 'use OIDC',
+    });
+    const itemId = store.getMemoryItemBySource('notes', note.id)!.id;
+    store.updateMemoryItemStates([{ id: itemId, state: 'pinned' }]);
+
+    store.updateMemoryItemText(itemId, 'use OIDC with refresh rotation');
+
+    expect(store.getMemoryItem(itemId)!.state).toBe('pinned');
+  });
+
+  it('records prior text that can be fed straight back to restore the note', () => {
+    const note = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'auth',
+      content: 'use OIDC',
+      alternatives: ['saml'],
+    });
+    const itemId = store.getMemoryItemBySource('notes', note.id)!.id;
+
+    store.updateMemoryItemText(itemId, 'use OIDC with refresh rotation');
+    const [audit] = store.getMemoryCorrections(itemId);
+
+    // prior_text must be the value edit-memory CONSUMES, not the projection it
+    // produces — otherwise replaying it doubles the kind prefix and the trailer.
+    expect(audit!.prior_text).toBe('use OIDC');
+    store.updateMemoryItemText(itemId, audit!.prior_text);
+    expect(store.getNote(note.id)!.content).toBe('use OIDC');
+    expect(store.getMemoryItem(itemId)!.text).toBe(
+      store.getMemoryItemBySource('notes', note.id)!.text,
+    );
+    expect(store.getMemoryItem(itemId)!.text.split('Subject: auth')).toHaveLength(2);
+  });
 });
 
 describe('CortexStore — memory deletion', () => {
@@ -2608,41 +2677,98 @@ describe('CortexStore — deletion survives re-opening', () => {
     second.db.close();
   });
 
-  it('keeps a deleted episode-backed item deleted across a re-open', () => {
+  it('keeps a deleted episode-backed item deleted — built through writeSessionSummary', () => {
     const first = open();
     const sessionId = first.store.createSession({ scopeType: 'project', scopeKey: 's' }).id;
-    const episode = first.store.insertEpisode({
-      sessionId,
-      kind: 'command_failure',
-      summary: 'npm test failed with a stack trace',
-    });
-    const itemId = first.store.getMemoryItemBySource('episodes', episode.id)!.id;
-    expect(first.store.deleteMemoryItemCascade(itemId)).toBe(true);
+    // Through the real producer, NOT insertEpisode: writeSessionSummary writes a
+    // `state` row and an `episodes` row sharing an id, and backfillEpisodes
+    // rebuilds episodes from `state`. An insertEpisode fixture has no state row,
+    // so it cannot reach the resurrection path this test exists to close.
+    writeSessionSummary(first.store, sessionId, 'session summary for the delete test');
+    const item = first.store.listMemoryItemsFiltered({ kinds: ['episode:session_summary'] })[0]!;
+    expect(item).toBeTruthy();
+    expect(first.store.deleteMemoryItemCascade(item.id)).toBe(true);
     first.db.close();
 
     const second = open();
-    expect(second.store.getMemoryItem(itemId)).toBeUndefined();
-    expect(second.store.getEpisode(episode.id)).toBeUndefined();
+    expect(second.store.getMemoryItem(item.id)).toBeUndefined();
+    expect(
+      second.store.listMemoryItemsFiltered({ kinds: ['episode:session_summary'] }),
+    ).toHaveLength(0);
     second.db.close();
   });
 
-  it('keeps a deleted command-run-backed item deleted across a re-open', () => {
+  it('keeps a deleted command-run-backed item deleted — captured through the hook path', () => {
     const first = open();
     const sessionId = first.store.createSession({ scopeType: 'project', scopeKey: 's' }).id;
-    const run = first.store.insertCommandRun({
-      sessionId,
-      commandSummary: 'npm run build',
-      exitCode: 1,
-      stderrTail: 'type error in src/a.ts',
+    // handleCmdEvent writes an `events` row AND a `command_runs` row with the
+    // same id; backfillCommandRuns rebuilds command_runs from `events`. Calling
+    // insertCommandRun directly leaves no event, so the old fixture could never
+    // fail — the item had nothing to be resurrected from.
+    handleCmdEvent(first.store, sessionId, {
+      exit: '1',
+      cmd: 'npm run build',
+      stderr: 'type error in src/a.ts',
     });
-    const item = first.store.getMemoryItemBySource('command_runs', run.id);
+    const item = first.store.listMemoryItemsFiltered({ kinds: ['command_run'] })[0]!;
+    expect(item).toBeTruthy();
+    // Pre-assert the resurrection precondition really exists for this fixture.
+    expect(
+      first.db.prepare("SELECT COUNT(*) as n FROM events WHERE type = 'cmd'").get(),
+    ).toEqual({ n: 1 });
+
+    expect(first.store.deleteMemoryItemCascade(item.id)).toBe(true);
+    first.db.close();
+
+    const second = open();
+    expect(second.store.getMemoryItem(item.id)).toBeUndefined();
+    expect(second.store.listMemoryItemsFiltered({ kinds: ['command_run'] })).toHaveLength(0);
+    second.db.close();
+  });
+
+  it('keeps a deleted project-snapshot item deleted across a re-open', () => {
+    const first = open();
+    // insertState({layer:'project'}) writes a state row and a project_snapshots
+    // row with the same id; backfillProjectSnapshots rebuilds from `state`.
+    first.store.replaceProjectState('the project summary');
+    const item = first.store.listMemoryItemsFiltered({ kinds: ['project_snapshot'] })[0];
     expect(item).toBeTruthy();
     expect(first.store.deleteMemoryItemCascade(item!.id)).toBe(true);
     first.db.close();
 
     const second = open();
     expect(second.store.getMemoryItem(item!.id)).toBeUndefined();
-    expect(second.store.getCommandRun(run.id)).toBeUndefined();
+    expect(second.store.listMemoryItemsFiltered({ kinds: ['project_snapshot'] })).toHaveLength(0);
     second.db.close();
+  });
+
+  // NOTE: there is deliberately no in-process test for the IMMEDIATE vs
+  // DEFERRED transaction mode of `updateMemoryItemText` / `deleteMemoryItemCascade`.
+  // The difference is only observable when a second *process* holds the write
+  // lock: a DEFERRED transaction upgrades lazily and raises SQLITE_BUSY_SNAPSHOT,
+  // which bypasses the busy handler so `busy_timeout` never applies. A single
+  // vitest worker cannot create that interleaving — an attempt to do so passed
+  // under both modes, which is a test that proves nothing. The guarantee rests
+  // on the same repo convention `insertNote` and `updateNoteStatus` follow, and
+  // the gap is recorded in deferred-work.md rather than papered over here.
+
+  it('refuses to delete an item whose source table has no deletion rule', () => {
+    const first = open();
+    first.store.upsertMemoryItem({
+      id: 'unknown-source',
+      scopeType: 'project',
+      scopeKey: 's',
+      kind: 'note:insight',
+      sourceTable: 'file_cards',
+      sourceId: 'card-1',
+      text: 'an item from a table the cascade does not know',
+    });
+
+    // Half-deleting would drop the item, leave the source, and let the backfill
+    // return it — while telling the caller it succeeded.
+    expect(() => first.store.deleteMemoryItemCascade('unknown-source')).toThrow(/no deletion rule/);
+    expect(first.store.getMemoryItem('unknown-source')).toBeTruthy();
+    expect(first.store.getMemoryCorrections('unknown-source')).toHaveLength(0);
+    first.db.close();
   });
 });

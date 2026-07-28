@@ -13,6 +13,8 @@ export interface GcOptions {
   retrievalLogKeep?: number;
   /** Roll up raw ledger rows older than this into one row per session/direction. */
   ledgerDays?: number;
+  /** Delete correction audit rows older than this (FR-22). */
+  correctionDays?: number;
   /** Delete archived memory items with zero accesses older than this. */
   archivedDays?: number;
   commandRunCapPerScope?: number;
@@ -31,6 +33,7 @@ export interface GcReport {
   events: GcCategoryReport;
   retrieval_log: GcCategoryReport;
   token_ledger: GcCategoryReport;
+  memory_corrections: GcCategoryReport;
   archived_memory_items: GcCategoryReport;
   command_run_items: GcCategoryReport;
   freelist_ratio: number;
@@ -42,6 +45,7 @@ const DEFAULTS = {
   retrievalLogDays: 30,
   retrievalLogKeep: 2000,
   ledgerDays: 14,
+  correctionDays: 90,
   archivedDays: 90,
   commandRunCapPerScope: 200,
 } as const;
@@ -63,6 +67,8 @@ function resolveGcOptions(options: GcOptions = {}): Required<Omit<GcOptions, 'no
     retrievalLogKeep:
       options.retrievalLogKeep ?? envNumber('CORTEX_GC_RETRIEVAL_LOG_KEEP') ?? DEFAULTS.retrievalLogKeep,
     ledgerDays: options.ledgerDays ?? envNumber('CORTEX_GC_LEDGER_DAYS') ?? DEFAULTS.ledgerDays,
+    correctionDays:
+      options.correctionDays ?? envNumber('CORTEX_GC_CORRECTION_DAYS') ?? DEFAULTS.correctionDays,
     archivedDays: options.archivedDays ?? envNumber('CORTEX_GC_ARCHIVED_DAYS') ?? DEFAULTS.archivedDays,
     commandRunCapPerScope:
       options.commandRunCapPerScope ??
@@ -111,6 +117,17 @@ const RETRIEVAL_LOG_WHERE = `
 
 const ARCHIVED_ITEMS_WHERE = `
   state = 'archived' AND access_count = 0 AND created_at < ?`;
+
+/**
+ * Corrections older than the retention window (FR-22).
+ *
+ * The audit row deliberately outlives the item it describes, and it holds the
+ * full prior text — so without a rule here it grows without bound and, worse,
+ * `delete-memory` prints "kept in the audit trail until cortex gc prunes it"
+ * on every deletion, which would be false. A privacy-relevant promise the user
+ * reads at the moment they delete something has to be one gc actually keeps.
+ */
+const CORRECTIONS_WHERE = `created_at < ?`;
 
 const COMMAND_RUN_OVERFLOW_SQL = `
   SELECT id FROM (
@@ -181,6 +198,14 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
 
   const ledger = rollupLedger(db, isoDaysAgo(now, resolved.ledgerDays), dryRun);
 
+  const corrections = countThenDelete(
+    db,
+    `SELECT COUNT(*) as count FROM memory_corrections WHERE ${CORRECTIONS_WHERE}`,
+    `DELETE FROM memory_corrections WHERE ${CORRECTIONS_WHERE}`,
+    [isoDaysAgo(now, resolved.correctionDays)],
+    dryRun,
+  );
+
   const archived = countThenDelete(
     db,
     `SELECT COUNT(*) as count FROM memory_items WHERE ${ARCHIVED_ITEMS_WHERE}`,
@@ -226,6 +251,7 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
     events,
     retrieval_log: retrievalLog,
     token_ledger: ledger,
+    memory_corrections: corrections,
     archived_memory_items: archived,
     command_run_items: commandRuns,
     freelist_ratio: Number(ratio.toFixed(4)),
