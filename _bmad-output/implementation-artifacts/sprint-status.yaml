@@ -81,7 +81,7 @@ development_status:
 
   # Epic 2 — Operability (FR-21..FR-26)
   epic-2: in-progress
-  2-1-list-and-inspect-memory: review
+  2-1-list-and-inspect-memory: done
   2-2-correct-and-delete-memory: backlog
   2-3-diagnose-the-installation: backlog
   2-4-install-in-one-idempotent-command: backlog

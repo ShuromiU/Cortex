@@ -4,7 +4,7 @@ baseline_commit: f79b19a
 
 # Story 2.1: List and inspect memory
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
