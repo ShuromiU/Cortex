@@ -44,14 +44,18 @@
 # ==============
 # Every epic below is release R1 (Cortex Context Economy). Source of truth for
 # scope, acceptance criteria and dependency ordering is:
-#   _bmad-output/planning-artifacts/epics.md            (6 epics, 29 stories, 127 ACs)
+#   _bmad-output/planning-artifacts/epics.md            (6 epics, 27 stories after the 2026-07-28 amendment)
+#   _bmad-output/planning-artifacts/replan-r1-2026-07-28.md  (competitive-research course correction)
 #   _bmad-output/planning-artifacts/implementation-readiness-report-2026-07-24.md
 # Epic order is dependency-driven, not thematic. Do not reorder epics without
 # re-reading the readiness report — Epic 3 exists before Epic 4 so the cache is
 # measurable on arrival, and Epic 5 depends on Epic 0's session identity fix.
+# 2026-07-28 amendment: stories 4-1, 4-2, 5-4 withdrawn from R1 (FR-10/11/20
+# back to PRD roadmap); Epic 4 execution order is 4.5 -> 4.3 -> 4.4 -> 4.6;
+# story 2-7 (docs repositioning) added.
 
 generated: 2026-07-24
-last_updated: 2026-07-27
+last_updated: 2026-07-28
 project: cortex
 project_key: NOKEY
 tracking_system: file-system
@@ -82,11 +86,12 @@ development_status:
   # Epic 2 — Operability (FR-21..FR-26)
   epic-2: in-progress
   2-1-list-and-inspect-memory: done
-  2-2-correct-and-delete-memory: backlog
+  2-2-correct-and-delete-memory: in-progress
   2-3-diagnose-the-installation: backlog
   2-4-install-in-one-idempotent-command: backlog
   2-5-relocate-the-store-out-of-the-project-root: backlog
   2-6-bound-the-write-ahead-log: backlog
+  2-7-reposition-the-docs: backlog # added 2026-07-28 (replan); docs-only, no dependencies
   epic-2-retrospective: optional
 
   # Epic 3 — Read Ledger and Token P&L (FR-5..FR-9; 3.2 carries AD-3, no FR)
@@ -99,27 +104,31 @@ development_status:
   3-6-report-the-pl: backlog # epic title: "Story 3.6: Report the P&L"
   epic-3-retrospective: optional
 
-  # Epic 4 — Content Cache (FR-10..FR-16, FR-6 substitution)
+  # Epic 4 — Content Cache (FR-12..FR-16, FR-6 substitution; FR-10/FR-11 withdrawn 2026-07-28)
+  # EXECUTION ORDER (2026-07-28 replan): 4.5 FIRST, then 4.3 -> 4.4 -> 4.6.
+  # Story numbering unchanged (Epic 1 precedent). 4.5 is time-sensitive
+  # (platform hook shipped in CC v2.1.121; competitors ship partial mechanisms)
+  # and is BLOCKED on the open B-4 re-base action item before create-story.
   epic-4: backlog
-  4-1-derive-file-cards-deterministically: backlog
-  4-2-serve-file-cards-with-a-freshness-verdict: backlog
+  # 4-1-derive-file-cards-deterministically: withdrawn from R1 2026-07-28 (FR-10 to roadmap; see replan-r1-2026-07-28.md)
+  # 4-2-serve-file-cards-with-a-freshness-verdict: withdrawn from R1 2026-07-28 (FR-11 to roadmap; see replan-r1-2026-07-28.md)
   4-3-remember-searches-that-found-nothing: backlog
   4-4-remember-the-outcome-of-expensive-commands: backlog
   4-5-refund-redundant-reads-through-verified-substitution: backlog
   4-6-bound-and-evict-the-derived-cache: backlog
   epic-4-retrospective: optional
 
-  # Epic 5 — Subagent Memory (FR-17..FR-20; depends on Epic 0)
+  # Epic 5 — Subagent Memory (FR-17..FR-19; depends on Epic 0; FR-20 withdrawn 2026-07-28)
   epic-5: backlog
-  5-1-link-subagent-sessions-to-their-parent: backlog
+  5-1-link-subagent-sessions-to-their-parent: backlog # reduced scope: Epic 0 landed agent_id child sessions; remaining is SubagentStart proactive path + disengaged guard
   5-2-brief-subagents-automatically: backlog
   5-3-write-subagent-conclusions-back: backlog
-  5-4-record-sibling-claims-during-fan-out: backlog
+  # 5-4-record-sibling-claims-during-fan-out: withdrawn from R1 2026-07-28 (FR-20 to roadmap; Agent Teams ships lock-and-claim natively; see replan-r1-2026-07-28.md)
   epic-5-retrospective: optional
 
 action_items:
   - epic: 1
-    action: "Re-base B-4 (hook latency budget) against the Windows/Git Bash platform — PRD amendment; ~400 ms measured vs <=15 ms budget; adopted from Epic 0's never-run retrospective"
+    action: "Re-base B-4 (hook latency budget) against the Windows/Git Bash platform — PRD amendment; ~400 ms measured vs <=15 ms budget; adopted from Epic 0's never-run retrospective. 2026-07-28: now also BLOCKS Story 4.5 creation — B-4a (<=100 ms substitution path) inherits the same platform reality"
     owner: "ShuromiU (PRD decision)"
     status: open
   - epic: 1

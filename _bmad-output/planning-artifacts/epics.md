@@ -19,6 +19,26 @@ This document provides the complete epic and story breakdown for Release 1 of th
 
 **No UX design contract exists or is required.** Cortex is a CLI and MCP surface with no user interface. The equivalent "interface" concerns — output shape, token budgets, silence discipline — are captured as NFRs.
 
+## Amendment — 2026-07-28 (competitive-research course correction)
+
+Scope amended after a four-quadrant competitive research sweep; full rationale
+and consequences in `replan-r1-2026-07-28.md` (same directory). Summary:
+
+- **Withdrawn from R1:** Stories 4.1, 4.2 (file cards — commoditized by Aider
+  repomap and peers; FR-10/FR-11 return to PRD roadmap) and Story 5.4 (sibling
+  claims — shipped natively by Claude Code Agent Teams; FR-20 returns to PRD
+  roadmap).
+- **Epic 4 execution order:** 4.5 → 4.3 → 4.4 → 4.6. Story numbering unchanged
+  (Epic 1 precedent). 4.5 is time-sensitive: the platform hook it needs
+  (`updatedToolOutput` for built-in tools) shipped in Claude Code v2.1.121 and
+  competitors ship partial mechanisms. 4.5 is blocked on the open B-4 re-base
+  action item (Windows hook latency) before story creation.
+- **Added:** Story 2.7, a docs-only repositioning pass.
+- Epics 0, 1, 3 and Stories 2.1–2.6, 5.1–5.3 are unchanged. Withdrawn story
+  text below is retained for the future release that picks it back up.
+
+R1 story count: 29 → 27.
+
 ## Requirements Inventory
 
 ### Functional Requirements
@@ -130,7 +150,7 @@ Not applicable — no user interface. See Overview.
 | FR-7 | 3 | 3.4 |
 | FR-8 | 3 | 3.5 |
 | FR-9 | 3 | 3.6 |
-| FR-10, FR-11 | 4 | 4.1, 4.2 |
+| FR-10, FR-11 | 4 | ~~4.1, 4.2~~ withdrawn from R1 (2026-07-28) |
 | FR-12, FR-13 | 4 | 4.3 |
 | FR-14, FR-15 | 4 | 4.4 |
 | FR-6 (substitution) | 4 | 4.5 |
@@ -138,9 +158,9 @@ Not applicable — no user interface. See Overview.
 | FR-17 | 5 | 5.1 |
 | FR-18 | 5 | 5.2 |
 | FR-19 | 5 | 5.3 |
-| FR-20 | 5 | 5.4 |
+| FR-20 | 5 | ~~5.4~~ withdrawn from R1 (2026-07-28) |
 
-Every R1 FR maps to at least one story. FR-6 appears twice by design: the query surface (3.3) and the substitution path built on it (4.5). Story 3.2 carries no FR — it exists because AD-3's flat digest index is required by Story 4.5 and was otherwise unowned; see Validation Finding 1.
+Every R1 FR maps to at least one story *(amended 2026-07-28: FR-10, FR-11, and FR-20 returned to PRD roadmap with their stories' withdrawal)*. FR-6 appears twice by design: the query surface (3.3) and the substitution path built on it (4.5). Story 3.2 carries no FR — it exists because AD-3's flat digest index is required by Story 4.5 and was otherwise unowned; see Validation Finding 1.
 
 ## Validation Findings
 
@@ -162,8 +182,8 @@ Step-4 validation was run against the completed breakdown. Three findings; the f
 | **1** | Trust Activation | Smallest new surface, activates dormant schema, no new subsystems. Establishes the AD-5 fixture discipline on the cheapest possible change. | FR-1..FR-4, FR-44 |
 | **2** | Operability | Everything after this needs to be debuggable and inspectable. Ships `doctor` before the subsystems that will need diagnosing. | FR-21..FR-26 |
 | **3** | Read Ledger and Token P&L | Establishes the measurement the rest of the release is judged by, before the thing being measured exists. | FR-5..FR-9 |
-| **4** | Content Cache | The largest new surface — and now measurable on arrival. | FR-10..FR-16, FR-6 substitution |
-| **5** | Subagent Memory | Depends on Epic 0's session identity being correct. | FR-17..FR-20 |
+| **4** | Content Cache | The largest new surface — and now measurable on arrival. | FR-12..FR-16, FR-6 substitution *(FR-10/FR-11 withdrawn 2026-07-28)* |
+| **5** | Subagent Memory | Depends on Epic 0's session identity being correct. | FR-17..FR-19 *(FR-20 withdrawn 2026-07-28)* |
 
 ---
 
@@ -506,6 +526,26 @@ So that Cortex's footprint stays bounded and visible.
 **When** it reports footprint
 **Then** it names database and WAL size separately.
 
+### Story 2.7: Reposition the docs (added 2026-07-28)
+
+As a maintainer,
+I want the README and CLAUDE.md to lead with what is unique,
+So that the project is not pitched into a category already owned by claude-mem's install base and Anthropic's default-on auto-memory.
+
+**Acceptance Criteria:**
+
+**Given** the README
+**When** it introduces the project
+**Then** it leads with the trust/freshness/economy framing — the layer that makes agent memory trustworthy and accountable — not "memory for Claude Code".
+
+**Given** the comparison section
+**When** it names alternatives
+**Then** it honestly describes native auto-memory and claude-mem, and names the six capabilities unique here: branch/worktree scoping, subagent sessions, deterministic contradiction detection, checkout-freshness with rename resolution, enforced budgets, CI-gated retrieval quality.
+
+**Given** the change ships
+**When** it is reviewed
+**Then** it contains no behavior changes, and docs land in one commit per repo convention.
+
 ---
 
 ## Epic 3: Read Ledger and Token P&L
@@ -705,7 +745,19 @@ So that I can judge it on a number rather than a claim.
 
 The largest new surface, and now measurable on arrival. Digests become answers: cards substitute for reading, negative results stop repeated fruitless searches, and cached command outcomes stop repeated expensive runs. Every assertion here is fenced by AD-6 — evidence in hand, ambiguity resolves to a miss.
 
-### Story 4.1: Derive file cards deterministically
+**EXECUTION ORDER (amended 2026-07-28): 4.5 → 4.3 → 4.4 → 4.6.** Story
+numbering unchanged (Epic 1 precedent). 4.5 leads because its platform
+dependency (`updatedToolOutput` for built-in tools) shipped in Claude Code
+v2.1.121 and partial competitor mechanisms exist — see
+`replan-r1-2026-07-28.md`. 4.5 is blocked on the open B-4 re-base action item
+before story creation. Stories 4.1 and 4.2 are withdrawn from R1.
+
+### Story 4.1: Derive file cards deterministically — WITHDRAWN FROM R1 (2026-07-28)
+
+*Withdrawn: file cards are the most commoditized item in the plan (Aider
+repomap, tokensave symbol graphs, DeepWiki) and the weakest fit with the
+determinism story. FR-10 returns to PRD roadmap. Text retained for a future
+release. See `replan-r1-2026-07-28.md`.*
 
 As an agent needing orientation on a file,
 I want a bounded summary I can read instead of the file,
@@ -744,7 +796,10 @@ So that orientation costs 200 tokens instead of 4,000.
 **When** card generation completes
 **Then** no network request was made by any production code path, and this is asserted by test rather than assumed (N-5, PRD §11.1).
 
-### Story 4.2: Serve file cards with a freshness verdict
+### Story 4.2: Serve file cards with a freshness verdict — WITHDRAWN FROM R1 (2026-07-28)
+
+*Withdrawn with Story 4.1 (FR-11 returns to PRD roadmap). Text retained for a
+future release.*
 
 As an agent,
 I want a card returned together with its file's current state,
@@ -863,7 +918,7 @@ So that Cortex's footprint does not grow with my codebase.
 
 **Given** `gc` runs
 **When** it prunes
-**Then** it removes digests for files absent from the current app graph, cards whose source digest is gone, negative results past the configured horizon, and tool outputs whose `head_oid` is no longer an ancestor of HEAD.
+**Then** it removes digests for files absent from the current app graph, negative results past the configured horizon, and tool outputs whose `head_oid` is no longer an ancestor of HEAD *(amended 2026-07-28: card pruning removed with Story 4.1's withdrawal; restore it when cards return)*.
 
 **Given** the derived cache exceeds its configured ceiling
 **When** eviction runs
@@ -952,7 +1007,13 @@ So that a 200k-token run leaves more than one paragraph behind.
 **When** the change ships
 **Then** a locked eval fixture exercising that kind ships with it (AD-5).
 
-### Story 5.4: Record sibling claims during fan-out
+### Story 5.4: Record sibling claims during fan-out — WITHDRAWN FROM R1 (2026-07-28)
+
+*Withdrawn: Claude Code Agent Teams ships lock-and-claim natively at task
+granularity; do not duplicate it. FR-20 returns to PRD roadmap. Post-R1
+replacement direction: read native Agent Teams claim state and surface it in
+the subagent brief rather than maintaining a parallel claim store. Text
+retained below. See `replan-r1-2026-07-28.md`.*
 
 As one of several agents working in parallel,
 I want to see what my siblings have already covered,
