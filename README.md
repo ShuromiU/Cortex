@@ -267,6 +267,10 @@ cortex list-memory --kind note:decision --state hot,warm --limit 50
 cortex list-memory --scope "branch:c:/work/cortex/.git:c:/work/cortex:main" --offset 20 --json
 cortex inspect-memory <id>
 cortex inspect-memory <id> --json
+cortex edit-memory <id> --text "the corrected text"
+cortex edit-memory <id> --file correction.txt
+cortex delete-memory <id>          # preview; deletes nothing
+cortex delete-memory <id> --yes    # actually delete
 cortex note-resolve --subject "auth transport" --status superseded
 cortex flush-spool
 cortex gc            # dry-run report
@@ -417,6 +421,32 @@ Stored text is printed verbatim except for terminal control characters, which ar
 Both commands are read-only in the sense that matters: neither creates a session, and neither touches access counts, so inspecting memory cannot change the ranking it exists to reveal. `--json` on either emits the same data as a structure; a missing id exits non-zero in both modes and `--json` gets a parseable `{"error":"not_found"}` rather than empty output.
 
 Stored strings are author-supplied, so the renderer treats them as content rather than as its own output: alternatives and subjects are each collapsed onto a single line, and the alternatives payload is capped. Without that, an alternative containing a newline could print what looked like a counterpart line inside the conflict section of a note that has no contest at all.
+
+## Correcting and deleting memory
+
+`edit-memory` replaces an item's text, re-extracts its file references and re-projects it. A note-backed item is corrected *through its note*, so the projected trailer stays consistent with the columns it mirrors — `inspect-memory` will not start reporting a divergence on an item you just fixed. Access counts and decay state are left alone: a correction is not a new memory, and reheating one as a side effect of fixing a typo would change what retrieval surfaces for a reason you never asked for.
+
+`delete-memory` previews by default and deletes only with `--yes`, the same shape `cortex gc` uses:
+
+```text
+$ cortex delete-memory notes:ac2c7f50-ecce-42cb-94aa-05f7181ac22d
+preview only — nothing has been deleted.
+
+id:         notes:ac2c7f50-ecce-42cb-94aa-05f7181ac22d
+kind:       Decision (note:decision)
+subject:    auth strategy
+references: 0 will be removed with it
+source row: notes/ac2c7f50-ecce-42cb-94aa-05f7181ac22d — deleted too
+            (leaving it would resurrect this item on the next command)
+contest:    open — deleting this side clears it for 1 counterpart(s)
+            d66141d8-c4f0-4ae8-8a45-b76003e05f5a
+```
+
+That "would resurrect" line is literal. Memory items are re-projected from their source rows (`notes`, `episodes`, `command_runs`, `project_snapshots`) every time the schema is ensured, which is every command — so deleting the projection alone would undo itself on your next invocation. Deletion removes the source row, the item, and everything derived from it in one transaction.
+
+Deleting one side of a contested pair clears the contest, so the surviving note stops rendering `[contested]` against a counterpart that no longer exists.
+
+**Corrections are recorded, and the record outlives what it describes.** Both edits and deletes write the prior text to a `memory_corrections` row that carries no foreign key to the item — with one, the audit trail would be destroyed by the very deletion it exists to document. The honest consequence: **text you delete remains readable in the audit trail** until `cortex gc` prunes it. If you are deleting something because it must not be readable, that is not yet enough.
 
 ## Reliability Evaluation
 

@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import Database from 'better-sqlite3';
-import { applySchema } from '../src/db/schema.js';
+import { applySchema, ensureCortexSchema, openDatabase } from '../src/db/schema.js';
 import {
   CortexStore,
   parseEventRow,
@@ -2354,5 +2357,292 @@ describe('CortexStore — retrieval log lookup by memory item', () => {
     ).run(sessionId);
 
     expect(store.getRetrievalLogsForItem('target', 10).map(log => log.topic)).toEqual(['good']);
+  });
+});
+
+// ── Correction and deletion (FR-22) ───────────────────────────────────
+
+describe('CortexStore — memory correction', () => {
+  let db: Database.Database;
+  let store: CortexStore;
+  let sessionId: string;
+
+  beforeEach(() => {
+    db = createTestDb();
+    store = new CortexStore(db);
+    sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+  });
+
+  it('records and reads back a correction', () => {
+    store.recordMemoryCorrection({
+      memoryItemId: 'item-1',
+      operation: 'edit',
+      priorText: 'the old text',
+      newText: 'the new text',
+      scopeKey: 'scope-a',
+    });
+
+    const [correction] = store.getMemoryCorrections('item-1');
+    expect(correction).toMatchObject({
+      memory_item_id: 'item-1',
+      operation: 'edit',
+      prior_text: 'the old text',
+      new_text: 'the new text',
+    });
+    expect(correction!.created_at).toBeTruthy();
+  });
+
+  it('re-projects a note-backed item through the note, keeping the trailer consistent', () => {
+    const note = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'auth',
+      content: 'use OIDC',
+      alternatives: ['saml'],
+    });
+    const itemId = store.getMemoryItemBySource('notes', note.id)!.id;
+
+    store.updateMemoryItemText(itemId, 'use OIDC with refresh rotation');
+
+    // The note is the source of truth; the projection is rebuilt from it, so
+    // the appended trailer survives rather than being overwritten by hand.
+    expect(store.getNote(note.id)!.content).toBe('use OIDC with refresh rotation');
+    const text = store.getMemoryItem(itemId)!.text;
+    expect(text).toContain('use OIDC with refresh rotation');
+    expect(text).toContain('Subject: auth');
+    expect(text).toContain('Alternatives: saml');
+  });
+
+  it('re-extracts references in both directions', () => {
+    store.upsertMemoryItem({
+      id: 'refs',
+      scopeType: 'project',
+      scopeKey: 'scope-a',
+      kind: 'note:insight',
+      text: 'the bug is in src/old.ts',
+    });
+    expect(store.getMemoryReferences('refs').map(r => r.normalized_path)).toEqual(['src/old.ts']);
+
+    store.updateMemoryItemText('refs', 'the bug is in src/new.ts');
+
+    const paths = store.getMemoryReferences('refs').map(r => r.normalized_path);
+    expect(paths).toEqual(['src/new.ts']);
+    expect(paths).not.toContain('src/old.ts');
+  });
+
+  it('does not reheat or reset an item it corrects', () => {
+    store.upsertMemoryItem({
+      id: 'cool',
+      scopeType: 'project',
+      scopeKey: 'scope-a',
+      kind: 'note:insight',
+      text: 'original',
+      state: 'cold',
+      accessCount: 9,
+      lastAccessedAt: '2026-07-01T00:00:00.000Z',
+    });
+
+    store.updateMemoryItemText('cool', 'corrected');
+
+    const item = store.getMemoryItem('cool')!;
+    expect(item.text).toBe('corrected');
+    // A correction is not a new memory. Resetting these would change ranking
+    // as a side effect of fixing a typo.
+    expect(item.state).toBe('cold');
+    expect(item.access_count).toBe(9);
+    expect(item.last_accessed_at).toBe('2026-07-01T00:00:00.000Z');
+  });
+});
+
+describe('CortexStore — memory deletion', () => {
+  let db: Database.Database;
+  let store: CortexStore;
+  let sessionId: string;
+
+  beforeEach(() => {
+    db = createTestDb();
+    store = new CortexStore(db);
+    sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+  });
+
+  it('removes the item, its derived rows and its FTS entry together', () => {
+    store.upsertMemoryItem({
+      id: 'doomed',
+      scopeType: 'project',
+      scopeKey: 'scope-a',
+      kind: 'note:insight',
+      text: 'a doomed memory about src/gone.ts',
+    });
+    store.upsertMemoryItemSemantic({
+      memoryItemId: 'doomed',
+      summary: 'doomed',
+      concepts: [],
+      entities: [],
+      embeddingModel: 'fake',
+      embedding: [0.1],
+      sourceHash: 'h',
+    });
+    // Pre-assert every derived row exists, so absence afterwards means removal
+    // rather than never having been there.
+    expect(store.getMemoryReferences('doomed')).toHaveLength(1);
+    expect(store.getMemoryItemSemantic('doomed')).toBeTruthy();
+    expect(store.searchMemoryItems('doomed', 10).map(i => i.id)).toContain('doomed');
+
+    store.deleteMemoryItemCascade('doomed');
+
+    expect(store.getMemoryItem('doomed')).toBeUndefined();
+    expect(store.getMemoryReferences('doomed')).toHaveLength(0);
+    expect(store.getMemoryItemSemantic('doomed')).toBeUndefined();
+    expect(store.searchMemoryItems('doomed', 10).map(i => i.id)).not.toContain('doomed');
+  });
+
+  it('deletes the source note as well, and records what was removed', () => {
+    const note = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'auth',
+      content: 'a decision that turned out wrong',
+    });
+    const itemId = store.getMemoryItemBySource('notes', note.id)!.id;
+
+    store.deleteMemoryItemCascade(itemId);
+
+    // Leaving the note behind is not a deletion: backfillMemoryItems
+    // re-projects it on the next schema ensure.
+    expect(store.getNote(note.id)).toBeUndefined();
+    expect(store.getMemoryItem(itemId)).toBeUndefined();
+
+    const [audit] = store.getMemoryCorrections(itemId);
+    expect(audit).toMatchObject({ operation: 'delete', source_table: 'notes', source_id: note.id });
+    expect(audit!.prior_text).toContain('a decision that turned out wrong');
+  });
+
+  it('clears the contest when one side of a contested pair is deleted', () => {
+    const first = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'flush the spool at turn end',
+    });
+    const second = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'spool flush',
+      content: 'do not flush the spool at turn end',
+    });
+    expect(store.getNote(first.id)!.conflict).toBe(true);
+    expect(store.getNote(second.id)!.conflict).toBe(true);
+
+    const firstItemId = store.getMemoryItemBySource('notes', first.id)!.id;
+    store.deleteMemoryItemCascade(firstItemId);
+
+    // The survivor must not keep pointing at a counterpart that no longer exists.
+    expect(store.getNote(second.id)!.conflict).toBe(false);
+    expect(store.getMemoryItemBySource('notes', second.id)!.text).not.toContain('Conflict: true');
+  });
+
+  it('reports a miss without writing an audit row', () => {
+    expect(store.deleteMemoryItemCascade('no-such-item')).toBe(false);
+    expect(store.getMemoryCorrections('no-such-item')).toHaveLength(0);
+  });
+});
+
+// ── Deletion must survive the backfill (FR-22) ────────────────────────
+//
+// backfillMemoryItems re-inserts memory items from their source tables on
+// every ensureCortexSchema, which every CLI command triggers. A delete that
+// leaves the source row behind is undone by the next invocation — so these
+// tests reopen the database rather than asserting against the live handle.
+
+describe('CortexStore — deletion survives re-opening', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-delete-'));
+  });
+
+  function open(): { db: Database.Database; store: CortexStore } {
+    const db = openDatabase(path.join(dir, '.cortex.db'));
+    ensureCortexSchema(db, dir);
+    return { db, store: new CortexStore(db) };
+  }
+
+  it('an item whose source row is left behind IS resurrected — the adversarial precondition', () => {
+    const first = open();
+    const sessionId = first.store.createSession({ scopeType: 'project', scopeKey: 's' }).id;
+    const note = first.store.insertNote({
+      sessionId,
+      kind: 'insight',
+      content: 'a note that outlives its projection',
+    });
+    const itemId = first.store.getMemoryItemBySource('notes', note.id)!.id;
+    // Delete ONLY the projection, exactly the naive implementation.
+    first.db.prepare('DELETE FROM memory_items WHERE id = ?').run(itemId);
+    expect(first.store.getMemoryItem(itemId)).toBeUndefined();
+    first.db.close();
+
+    const second = open();
+    // Proof that the backfill is real and that this fixture reaches it.
+    expect(second.store.getMemoryItem(itemId)).toBeTruthy();
+    second.db.close();
+  });
+
+  it('keeps a deleted note-backed item deleted across a re-open', () => {
+    const first = open();
+    const sessionId = first.store.createSession({ scopeType: 'project', scopeKey: 's' }).id;
+    const note = first.store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'auth',
+      content: 'a decision that turned out wrong',
+    });
+    const itemId = first.store.getMemoryItemBySource('notes', note.id)!.id;
+    expect(first.store.deleteMemoryItemCascade(itemId)).toBe(true);
+    first.db.close();
+
+    const second = open();
+    expect(second.store.getMemoryItem(itemId)).toBeUndefined();
+    expect(second.store.getNote(note.id)).toBeUndefined();
+    // The audit row is the one thing that must survive both the delete and the reopen.
+    expect(second.store.getMemoryCorrections(itemId)).toHaveLength(1);
+    second.db.close();
+  });
+
+  it('keeps a deleted episode-backed item deleted across a re-open', () => {
+    const first = open();
+    const sessionId = first.store.createSession({ scopeType: 'project', scopeKey: 's' }).id;
+    const episode = first.store.insertEpisode({
+      sessionId,
+      kind: 'command_failure',
+      summary: 'npm test failed with a stack trace',
+    });
+    const itemId = first.store.getMemoryItemBySource('episodes', episode.id)!.id;
+    expect(first.store.deleteMemoryItemCascade(itemId)).toBe(true);
+    first.db.close();
+
+    const second = open();
+    expect(second.store.getMemoryItem(itemId)).toBeUndefined();
+    expect(second.store.getEpisode(episode.id)).toBeUndefined();
+    second.db.close();
+  });
+
+  it('keeps a deleted command-run-backed item deleted across a re-open', () => {
+    const first = open();
+    const sessionId = first.store.createSession({ scopeType: 'project', scopeKey: 's' }).id;
+    const run = first.store.insertCommandRun({
+      sessionId,
+      commandSummary: 'npm run build',
+      exitCode: 1,
+      stderrTail: 'type error in src/a.ts',
+    });
+    const item = first.store.getMemoryItemBySource('command_runs', run.id);
+    expect(item).toBeTruthy();
+    expect(first.store.deleteMemoryItemCascade(item!.id)).toBe(true);
+    first.db.close();
+
+    const second = open();
+    expect(second.store.getMemoryItem(item!.id)).toBeUndefined();
+    expect(second.store.getCommandRun(run.id)).toBeUndefined();
+    second.db.close();
   });
 });

@@ -734,6 +734,326 @@ describe('cortex inspect-memory', () => {
   });
 });
 
+// ── edit-memory / delete-memory (FR-22) ───────────────────────────────
+
+describe('cortex edit-memory', () => {
+  it('replaces the text, re-extracts references and keeps the prior text', async () => {
+    const cwd = seedTempProject(store => {
+      store.upsertMemoryItem({
+        id: 'item',
+        scopeType: 'project',
+        scopeKey: 'scope-a',
+        kind: 'note:insight',
+        text: 'the bug is in src/old.ts',
+      });
+    });
+
+    const run = await runCommand(cwd, [
+      'edit-memory',
+      'item',
+      '--text',
+      'the bug is in src/new.ts',
+      '--json',
+    ]);
+    const parsed = JSON.parse(run.stdout) as {
+      prior_text: string;
+      item: { text: string };
+      references: Array<{ normalized_path: string }>;
+    };
+
+    expect(run.exitCode).toBeFalsy();
+    expect(parsed.prior_text).toBe('the bug is in src/old.ts');
+    expect(parsed.item.text).toBe('the bug is in src/new.ts');
+    expect(parsed.references.map(r => r.normalized_path)).toEqual(['src/new.ts']);
+
+    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const store = new CortexStore(db);
+    expect(store.getMemoryCorrections('item')[0]).toMatchObject({
+      operation: 'edit',
+      prior_text: 'the bug is in src/old.ts',
+    });
+    db.close();
+  });
+
+  it('accepts replacement text from a file', async () => {
+    const cwd = seedTempProject(store => {
+      store.upsertMemoryItem({
+        id: 'item',
+        scopeType: 'project',
+        scopeKey: 'scope-a',
+        kind: 'note:insight',
+        text: 'one line',
+      });
+    });
+    const textFile = path.join(cwd, 'correction.txt');
+    fs.writeFileSync(textFile, 'first line\nsecond line\n');
+
+    const run = await runCommand(cwd, ['edit-memory', 'item', '--file', textFile, '--json']);
+
+    expect(run.exitCode).toBeFalsy();
+    expect((JSON.parse(run.stdout) as { item: { text: string } }).item.text).toContain(
+      'second line',
+    );
+  });
+
+  it('requires exactly one of --text and --file', async () => {
+    const cwd = seedTempProject(store => {
+      seedItem(store, 'item');
+    });
+
+    const neither = await runCommand(cwd, ['edit-memory', 'item']);
+    expect(neither.exitCode).toBe(1);
+    expect(neither.stderr).toContain('exactly one');
+
+    const both = await runCommand(cwd, ['edit-memory', 'item', '--text', 'x', '--file', 'y']);
+    expect(both.exitCode).toBe(1);
+    expect(both.stderr).toContain('exactly one');
+  });
+
+  it('exits non-zero for an unknown id in both modes', async () => {
+    const cwd = seedTempProject(store => {
+      seedItem(store, 'item');
+    });
+
+    const text = await runCommand(cwd, ['edit-memory', 'ghost', '--text', 'x']);
+    expect(text.exitCode).toBe(1);
+    expect(text.stderr).toContain('ghost');
+
+    const json = await runCommand(cwd, ['edit-memory', 'ghost', '--text', 'x', '--json']);
+    expect(json.exitCode).toBe(1);
+    expect(JSON.parse(json.stdout)).toEqual({ error: 'not_found', id: 'ghost' });
+  });
+});
+
+describe('cortex delete-memory', () => {
+  it('previews without deleting, and deletes only with --yes', async () => {
+    const cwd = seedTempProject(store => {
+      store.upsertMemoryItem({
+        id: 'doomed',
+        scopeType: 'project',
+        scopeKey: 'scope-a',
+        kind: 'note:insight',
+        text: 'a memory about src/a.ts',
+      });
+    });
+
+    const preview = await runCommand(cwd, ['delete-memory', 'doomed']);
+    expect(preview.exitCode).toBeFalsy();
+    expect(preview.stdout).toContain('preview only');
+    expect(preview.stdout).toContain('--yes');
+
+    // The preview must not have deleted anything — the confirmation is the point.
+    const midDb = openDatabase(path.join(cwd, '.cortex.db'));
+    expect(new CortexStore(midDb).getMemoryItem('doomed')).toBeTruthy();
+    midDb.close();
+
+    const deleted = await runCommand(cwd, ['delete-memory', 'doomed', '--yes']);
+    expect(deleted.exitCode).toBeFalsy();
+    expect(deleted.stdout).toContain('deleted doomed');
+
+    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    expect(new CortexStore(db).getMemoryItem('doomed')).toBeUndefined();
+    db.close();
+  });
+
+  it('keeps a note-backed deletion deleted after the schema re-opens', async () => {
+    let noteId = '';
+    const cwd = seedTempProject(store => {
+      const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+      noteId = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'auth',
+        content: 'a decision that turned out wrong',
+      }).id;
+    });
+
+    await runCommand(cwd, ['delete-memory', noteId, '--yes']);
+
+    // Every command re-runs ensureCortexSchema, which re-projects memory items
+    // from their source rows. Running a second command is the real test.
+    const after = await runCommand(cwd, ['list-memory', '--json']);
+    const ids = (JSON.parse(after.stdout) as { items: Array<{ id: string }> }).items.map(
+      i => i.id,
+    );
+    expect(ids).not.toContain(`notes:${noteId}`);
+    expect(ids).toHaveLength(0);
+  });
+
+  it('warns in the preview that a contest will be cleared', async () => {
+    let firstId = '';
+    let secondId = '';
+    const cwd = seedTempProject(store => {
+      const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+      firstId = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'spool flush',
+        content: 'flush the spool at turn end',
+      }).id;
+      secondId = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'spool flush',
+        content: 'do not flush the spool at turn end',
+      }).id;
+    });
+
+    const preview = await runCommand(cwd, ['delete-memory', firstId]);
+    expect(preview.stdout).toContain('contest:');
+    expect(preview.stdout).toContain(secondId);
+
+    await runCommand(cwd, ['delete-memory', firstId, '--yes']);
+
+    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    expect(new CortexStore(db).getNote(secondId)!.conflict).toBe(false);
+    db.close();
+  });
+
+  it('exits non-zero for an unknown id in preview and in --yes mode', async () => {
+    const cwd = seedTempProject(store => {
+      seedItem(store, 'item');
+    });
+
+    const preview = await runCommand(cwd, ['delete-memory', 'ghost']);
+    expect(preview.exitCode).toBe(1);
+    expect(preview.stderr).toContain('ghost');
+
+    const confirmed = await runCommand(cwd, ['delete-memory', 'ghost', '--yes', '--json']);
+    expect(confirmed.exitCode).toBe(1);
+    expect(JSON.parse(confirmed.stdout)).toEqual({ error: 'not_found', id: 'ghost' });
+  });
+
+  it('strips control characters from the previewed text', async () => {
+    const cwd = seedTempProject(store => {
+      store.upsertMemoryItem({
+        id: 'esc',
+        scopeType: 'project',
+        scopeKey: 'scope-a',
+        kind: 'episode:command_failure',
+        text: 'red\u001b[31m\u0007bell\rCARRIAGE',
+      });
+    });
+
+    const preview = await runCommand(cwd, ['delete-memory', 'esc']);
+
+    expect(preview.stdout).not.toContain('\u001b');
+    expect(preview.stdout).not.toContain('\u0007');
+    expect(preview.stdout).toContain('CARRIAGE');
+  });
+});
+
+// ── note-resolve repairs (retrospective action item 2) ────────────────
+
+describe('cortex note-resolve', () => {
+  it('clears the contest so a resolved note stops rendering as contested', async () => {
+    let firstId = '';
+    let secondId = '';
+    const cwd = seedTempProject(store => {
+      const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+      firstId = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'spool flush',
+        content: 'flush the spool at turn end',
+      }).id;
+      secondId = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'spool flush',
+        content: 'do not flush the spool at turn end',
+      }).id;
+    });
+
+    const run = await runCommand(cwd, ['note-resolve', '--id', firstId]);
+    expect(run.exitCode).toBeFalsy();
+
+    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const store = new CortexStore(db);
+    // Before this repair the CLI called only updateNoteStatus, so the resolved
+    // note kept Conflict: true and rendered "[contested] (resolved)" forever
+    // while the survivor kept a bare [contested].
+    expect(store.getNote(firstId)!.conflict).toBe(false);
+    expect(store.getNote(secondId)!.conflict).toBe(false);
+    expect(store.getMemoryItemBySource('notes', secondId)!.text).not.toContain('Conflict: true');
+    db.close();
+  });
+
+  it('refuses to resolve by subject while a contest is open, naming both sides', async () => {
+    let firstId = '';
+    let secondId = '';
+    const cwd = seedTempProject(store => {
+      const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+      firstId = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'spool flush',
+        content: 'flush the spool at turn end',
+      }).id;
+      secondId = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'spool flush',
+        content: 'do not flush the spool at turn end',
+      }).id;
+    });
+
+    const run = await runCommand(cwd, ['note-resolve', '--subject', 'spool flush']);
+
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr).toContain(firstId);
+    expect(run.stderr).toContain(secondId);
+
+    // Nothing was resolved — the point is that it refused to guess.
+    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const store = new CortexStore(db);
+    expect(store.getNote(firstId)!.status).toBe('active');
+    expect(store.getNote(secondId)!.status).toBe('active');
+    db.close();
+  });
+
+  it('still resolves by subject for the ordinary decision-plus-blocker case', async () => {
+    const ids: string[] = [];
+    const cwd = seedTempProject(store => {
+      const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+      ids.push(
+        store.insertNote({
+          sessionId,
+          kind: 'blocker',
+          subject: 'spool flush',
+          content: 'spool flush blocked on the jq dependency',
+        }).id,
+      );
+      ids.push(
+        store.insertNote({
+          sessionId,
+          kind: 'decision',
+          subject: 'spool flush',
+          content: 'flush the spool at turn end',
+        }).id,
+      );
+    });
+
+    const run = await runCommand(cwd, ['note-resolve', '--subject', 'spool flush']);
+
+    // The guard must refuse only a live contest. Over-refusing an ordinary
+    // decision-plus-blocker subject would break a documented workflow.
+    expect(run.exitCode).toBeFalsy();
+    expect(run.stdout).toContain('as resolved');
+
+    // *Which* of the two resolves is not asserted: findActiveNoteBySubject
+    // orders by `timestamp DESC` with no tiebreaker, and these two share a
+    // millisecond. That latent ambiguity is pre-existing and out of this
+    // story's scope — it is logged in deferred-work rather than pinned here,
+    // because pinning it would freeze whichever order SQLite happens to pick.
+    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const store = new CortexStore(db);
+    const statuses = ids.map(id => store.getNote(id)!.status).sort();
+    expect(statuses).toEqual(['active', 'resolved']);
+    db.close();
+  });
+});
+
 // ── Stored content must not be able to forge output ───────────────────
 //
 // The inspection prints author-supplied strings. Every one of them is a place

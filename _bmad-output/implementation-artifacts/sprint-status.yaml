@@ -134,11 +134,11 @@ action_items:
   - epic: 1
     action: "Fold the two CLI resolve defects (note-resolve conflict clearing; contested --subject refusal) into Story 2.2's scope at create-story time"
     owner: "create-story (Story 2.2)"
-    status: open
+    status: done
   - epic: 1
     action: "Decide contested-pair deletion semantics before Story 2.2 implements — deleting one side must not leave a dangling [contested] survivor"
     owner: "Winston (Architect) + ShuromiU"
-    status: open
+    status: done  # decided at 2.2 create-story: deleting one side clears the contest for the subject, in the same transaction
   - epic: 1
     action: "Codify the mutation-campaign checklist in project-context.md: mutate source not dist, EOL-adaptive anchors, prove every mutation applied via red-check"
     owner: "Amelia (Developer)"

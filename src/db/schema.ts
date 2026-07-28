@@ -8,7 +8,7 @@ import {
 } from '../memory/items.js';
 import { extractMemoryReferences } from '../memory/references.js';
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 const CORE_TABLES = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -199,6 +199,33 @@ CREATE TABLE IF NOT EXISTS file_renames (
 );
 `;
 
+/**
+ * R1's single `SCHEMA_VERSION` increment (4 → 5), per AD-11's one-bump-per-release
+ * rule. Story 2.2 is the first story in the release to add a table, so it owns the
+ * bump and this constant; Stories 3.1, 4.1, 4.3 and 4.4 **append** their tables
+ * here and leave the version alone. Safe because `applySchema` runs the DDL
+ * unconditionally with `CREATE TABLE IF NOT EXISTS`, so a store already marked v5
+ * still receives tables appended later.
+ */
+const V5_TABLES = `
+-- The audit trail for FR-22. memory_item_id carries NO foreign key on purpose:
+-- ON DELETE CASCADE would destroy the trail together with the item, which is
+-- exactly what "an audit trail that survives the correction" forbids, and a
+-- non-cascading FK would make the delete fail outright. Absent, not forgotten.
+CREATE TABLE IF NOT EXISTS memory_corrections (
+  id             TEXT PRIMARY KEY,
+  memory_item_id TEXT NOT NULL,
+  source_table   TEXT,
+  source_id      TEXT,
+  scope_key      TEXT,
+  operation      TEXT NOT NULL,
+  prior_text     TEXT NOT NULL,
+  new_text       TEXT,
+  prior_subject  TEXT,
+  created_at     TEXT NOT NULL
+);
+`;
+
 const V2_FTS = `
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts
 USING fts5(
@@ -257,6 +284,7 @@ CREATE INDEX IF NOT EXISTS idx_current_app_graphs_updated ON current_app_graphs(
 CREATE INDEX IF NOT EXISTS idx_memory_references_item ON memory_references(memory_item_id);
 CREATE INDEX IF NOT EXISTS idx_memory_references_status ON memory_references(status);
 CREATE INDEX IF NOT EXISTS idx_retrieval_log_session ON retrieval_log(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_memory_corrections_item ON memory_corrections(memory_item_id, created_at);
 `;
 
 interface MetaRow {
@@ -349,6 +377,7 @@ export function applySchema(db: Database.Database): void {
   db.exec(V2_TABLES);
   db.exec(V3_TABLES);
   db.exec(V4_TABLES);
+  db.exec(V5_TABLES);
   db.exec(V2_FTS);
   ensureSessionScopeColumns(db);
   ensureMemoryReferenceColumns(db);

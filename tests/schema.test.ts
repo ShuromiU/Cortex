@@ -147,8 +147,12 @@ describe('Schema', () => {
     ensureCortexSchema(db, '/repo');
 
     expect(columnNames()).toContain('agent_id');
-    expect(getSchemaVersion(db)).toBe(4);
-    expect(SCHEMA_VERSION).toBe(4);
+    // The column arrives through an unconditional column-ensure, not a
+    // version-gated migration — that is what this test pins. The version does
+    // now advance to 5, but for an unrelated reason: R1's single AD-11 bump,
+    // which Story 2.2 spent on `memory_corrections`.
+    expect(getSchemaVersion(db)).toBe(SCHEMA_VERSION);
+    expect(SCHEMA_VERSION).toBe(5);
     // Pre-existing rows survive and default to primary (no agent identity).
     expect(
       (db.prepare('SELECT agent_id FROM sessions WHERE id = ?').get('legacy-1') as {
@@ -159,7 +163,7 @@ describe('Schema', () => {
     // Re-running changes nothing.
     ensureCortexSchema(db, '/repo');
     expect(columnNames().filter(name => name === 'agent_id').length).toBe(1);
-    expect(getSchemaVersion(db)).toBe(4);
+    expect(getSchemaVersion(db)).toBe(SCHEMA_VERSION);
   });
 
   it('stores semantic metadata keyed by memory item id', () => {
@@ -391,5 +395,80 @@ describe('Schema', () => {
       )
       .get() as { count: number };
     expect(ftsHits.count).toBeGreaterThan(0);
+  });
+});
+
+// ── memory_corrections (FR-22) ────────────────────────────────────────
+
+describe('memory_corrections table', () => {
+  let dbPath: string;
+  let db: Database.Database;
+
+  beforeEach(() => {
+    dbPath = tmpDb();
+    db = openDatabase(dbPath);
+  });
+
+  afterEach(() => {
+    db.close();
+    cleanup(dbPath);
+  });
+
+  function tableNames(): string[] {
+    return (
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
+        name: string;
+      }>
+    ).map(row => row.name);
+  }
+
+  it('is created by applySchema and re-applying is idempotent', () => {
+    applySchema(db);
+    expect(tableNames()).toContain('memory_corrections');
+
+    applySchema(db);
+    expect(tableNames().filter(name => name === 'memory_corrections')).toHaveLength(1);
+  });
+
+  it('upgrades a v4 store to v5 without losing rows', () => {
+    applySchema(db);
+    initializeMeta(db, '/repo', 4);
+    db.prepare(
+      `INSERT INTO memory_items (id, scope_type, scope_key, kind, text, created_at)
+       VALUES ('keep-me', 'project', 'scope-a', 'note:decision', 'prior text', '2026-07-01T00:00:00.000Z')`,
+    ).run();
+    expect(getSchemaVersion(db)).toBe(4);
+
+    ensureCortexSchema(db, '/repo');
+
+    expect(getSchemaVersion(db)).toBe(5);
+    expect(SCHEMA_VERSION).toBe(5);
+    expect(db.prepare('SELECT id FROM memory_items WHERE id = ?').get('keep-me')).toBeTruthy();
+  });
+
+  it('keeps an audit row after the memory item it names is deleted', () => {
+    // The whole point of the table, and the reason it carries NO foreign key
+    // to memory_items: ON DELETE CASCADE would destroy the trail with the item,
+    // and a non-cascading FK would make the delete fail outright.
+    applySchema(db);
+    initializeMeta(db, '/repo');
+    db.pragma('foreign_keys = ON');
+    db.prepare(
+      `INSERT INTO memory_items (id, scope_type, scope_key, kind, text, created_at)
+       VALUES ('doomed', 'project', 'scope-a', 'note:decision', 'the wrong memory', '2026-07-01T00:00:00.000Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO memory_corrections
+         (id, memory_item_id, operation, prior_text, created_at)
+       VALUES ('audit-1', 'doomed', 'delete', 'the wrong memory', '2026-07-02T00:00:00.000Z')`,
+    ).run();
+
+    db.prepare('DELETE FROM memory_items WHERE id = ?').run('doomed');
+
+    expect(db.prepare('SELECT id FROM memory_items WHERE id = ?').get('doomed')).toBeUndefined();
+    const audit = db
+      .prepare('SELECT memory_item_id, prior_text FROM memory_corrections WHERE id = ?')
+      .get('audit-1') as { memory_item_id: string; prior_text: string } | undefined;
+    expect(audit).toEqual({ memory_item_id: 'doomed', prior_text: 'the wrong memory' });
   });
 });

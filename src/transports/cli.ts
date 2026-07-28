@@ -58,6 +58,12 @@ import {
   humanizeMemoryKind,
   renderMemorySnippet,
 } from '../query/render.js';
+import {
+  editMemory,
+  deleteMemory,
+  previewMemoryDeletion,
+  type MemoryDeletionPreview,
+} from '../query/correct.js';
 
 function findDbPath(startDir: string): string {
   return path.join(startDir, '.cortex.db');
@@ -267,6 +273,44 @@ function renderAlternativesLine(alternatives: string[]): string | null {
       ? joined
       : `${joined.slice(0, MAX_INSPECT_ALTERNATIVES_CHARS - 1).trimEnd()}…`;
   return `  already rejected: ${capped}`;
+}
+
+function renderDeletionPreview(preview: MemoryDeletionPreview, requestedId: string): string {
+  const lines = [
+    'preview only — nothing has been deleted.',
+    '',
+    `id:         ${preview.item.id}`,
+    `kind:       ${humanizeMemoryKind(preview.item.kind)} (${preview.item.kind})`,
+    ...(preview.item.subject ? [`subject:    ${collapseToLine(preview.item.subject)}`] : []),
+    `scope:      ${preview.item.scope_key}`,
+    `references: ${preview.reference_count} will be removed with it`,
+  ];
+
+  if (preview.source_table) {
+    lines.push(`source row: ${preview.source_table}/${preview.source_id} — deleted too`);
+    lines.push(
+      '            (leaving it would resurrect this item on the next command)',
+    );
+  }
+
+  if (preview.contested) {
+    lines.push(
+      `contest:    open — deleting this side clears it for ${preview.counterparts.length} counterpart(s)`,
+    );
+    for (const counterpart of preview.counterparts) {
+      lines.push(`            ${counterpart.id}`);
+    }
+  }
+
+  lines.push(
+    '',
+    'text:',
+    stripControlCharacters(preview.item.text),
+    '',
+    `to delete: cortex delete-memory ${shellQuote(requestedId)} --yes`,
+  );
+
+  return lines.join('\n');
 }
 
 function renderConflictSection(conflict: MemoryInspection['conflict']): string[] {
@@ -787,6 +831,36 @@ export function createProgram(): Command {
     .action((opts: { id?: string; subject?: string; status?: string }) => {
       const { store } = openCortexDb(process.cwd());
       const status = opts.status === 'superseded' ? 'superseded' : 'resolved';
+
+      // Resolving by subject leaned on an invariant that no longer holds: once
+      // contested priors were exempted from auto-supersede, a (kind, subject)
+      // pair can have two active notes, and `findActiveNoteBySubject`'s LIMIT 1
+      // would close the newest while leaving the retracted one as the sole
+      // active decision. Only a live contest is ambiguous — a decision plus a
+      // blocker on one subject is ordinary usage and must still resolve. The
+      // lookup is scope-blind, so this guard is too. Mirrors `mcp.ts`.
+      if (!opts.id && opts.subject) {
+        const contested = store
+          .getActiveNotesBySubject(opts.subject)
+          .filter(candidate => candidate.conflict);
+        if (contested.length > 1) {
+          const lines = contested.map(candidate => {
+            const stamp = formatMemoryTimestamp(candidate.timestamp);
+            return `  - ${candidate.id}${stamp ? ` [${stamp}]` : ''}`;
+          });
+          process.stderr.write(
+            [
+              `Subject "${opts.subject}" has ${contested.length} contested notes — resolving by subject would pick one arbitrarily.`,
+              'Re-run with --id for the side you want to close:',
+              ...lines,
+              '',
+            ].join('\n'),
+          );
+          process.exitCode = 1;
+          return;
+        }
+      }
+
       const note = opts.id
         ? store.getNote(opts.id)
         : opts.subject
@@ -798,6 +872,12 @@ export function createProgram(): Command {
         return;
       }
       store.updateNoteStatus(note.id, status);
+      // Closing one side of a contest clears it for the subject, or the
+      // survivor renders [contested] against a note nobody can act on and the
+      // resolved note renders "[contested] (resolved)" forever.
+      if (note.subject) {
+        store.clearConflictsForSubject(note.subject, store.getScopeKeyForNote(note.id));
+      }
       process.stdout.write(`Marked ${note.kind}${note.subject ? `[${note.subject}]` : ''} as ${status}.\n`);
     });
 
@@ -1001,6 +1081,127 @@ export function createProgram(): Command {
       }
 
       process.stdout.write(`${renderMemoryInspection(inspection)}\n`);
+    });
+
+  program
+    .command('edit-memory')
+    .description('Replace a memory item\'s text; references are re-extracted and it is re-projected')
+    .argument('<id>', 'Memory item id, or the id of the note behind it')
+    .option('--text <text>', 'Replacement text')
+    .option('--file <path>', 'Read replacement text from a file (for multi-line corrections)')
+    .option('--json', 'Emit the result as JSON')
+    .action((id: string, opts: { text?: string; file?: string; json?: boolean }) => {
+      if ((opts.text === undefined) === (opts.file === undefined)) {
+        process.stderr.write('Pass exactly one of --text or --file.\n');
+        process.exitCode = 1;
+        return;
+      }
+
+      let text: string;
+      try {
+        text =
+          opts.file !== undefined
+            ? fs.readFileSync(path.resolve(process.cwd(), opts.file), 'utf8')
+            : opts.text!;
+      } catch (err) {
+        process.stderr.write(
+          `Could not read --file: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      const { store } = openCortexDb(process.cwd());
+      const result = editMemory(store, id, text);
+      if (!result) {
+        process.stderr.write(
+          `No memory item found for id "${id}". List ids with: cortex list-memory\n`,
+        );
+        if (opts.json) {
+          process.stdout.write(`${JSON.stringify({ error: 'not_found', id }, null, 2)}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      if (opts.json) {
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return;
+      }
+
+      process.stdout.write(
+        [
+          `edited ${result.item.id}`,
+          `references: ${result.references.length} re-extracted`,
+          'the prior text is recorded in the audit trail (cortex inspect-memory shows the item)',
+          '',
+          'text:',
+          stripControlCharacters(result.item.text),
+          '',
+        ].join('\n'),
+      );
+    });
+
+  program
+    .command('delete-memory')
+    .description('Delete a memory item, its source row and its derived rows. Previews by default.')
+    .argument('<id>', 'Memory item id, or the id of the note behind it')
+    .option('--yes', 'Actually delete (default is a preview)')
+    .option('--json', 'Emit the preview or result as JSON')
+    .action((id: string, opts: { yes?: boolean; json?: boolean }) => {
+      const { store } = openCortexDb(process.cwd());
+
+      // Preview-by-default is the confirmation AC #2 requires, and it matches
+      // `cortex gc`, the only other destructive command. An interactive prompt
+      // is not an option: the CLI runs under hooks with no TTY.
+      if (!opts.yes) {
+        const preview = previewMemoryDeletion(store, id);
+        if (!preview) {
+          process.stderr.write(
+            `No memory item found for id "${id}". List ids with: cortex list-memory\n`,
+          );
+          if (opts.json) {
+            process.stdout.write(`${JSON.stringify({ error: 'not_found', id }, null, 2)}\n`);
+          }
+          process.exitCode = 1;
+          return;
+        }
+
+        if (opts.json) {
+          process.stdout.write(`${JSON.stringify({ ...preview, deleted: false }, null, 2)}\n`);
+          return;
+        }
+
+        process.stdout.write(`${renderDeletionPreview(preview, id)}\n`);
+        return;
+      }
+
+      const result = deleteMemory(store, id);
+      if (!result) {
+        process.stderr.write(
+          `No memory item found for id "${id}". List ids with: cortex list-memory\n`,
+        );
+        if (opts.json) {
+          process.stdout.write(`${JSON.stringify({ error: 'not_found', id }, null, 2)}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      if (opts.json) {
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return;
+      }
+
+      const lines = [`deleted ${result.item.id}`];
+      if (result.source_table) {
+        lines.push(`  source row: ${result.source_table}/${result.source_id}`);
+      }
+      if (result.cleared_contest_for) {
+        lines.push(`  cleared the contest on "${collapseToLine(result.cleared_contest_for)}"`);
+      }
+      lines.push('  the removed text is kept in the audit trail until cortex gc prunes it');
+      process.stdout.write(`${lines.join('\n')}\n`);
     });
 
   program

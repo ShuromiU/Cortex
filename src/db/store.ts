@@ -458,6 +458,33 @@ export interface UpsertMemoryItemOpts {
   createdAt?: string;
 }
 
+/** An audit-trail row (FR-22). Outlives the item it names — see the DDL. */
+export interface ParsedMemoryCorrection {
+  id: string;
+  memory_item_id: string;
+  source_table: string | null;
+  source_id: string | null;
+  scope_key: string | null;
+  operation: string;
+  prior_text: string;
+  new_text: string | null;
+  prior_subject: string | null;
+  created_at: string;
+}
+
+export interface RecordMemoryCorrectionOpts {
+  id?: string;
+  memoryItemId: string;
+  sourceTable?: string | null;
+  sourceId?: string | null;
+  scopeKey?: string | null;
+  operation: 'edit' | 'delete';
+  priorText: string;
+  newText?: string | null;
+  priorSubject?: string | null;
+  createdAt?: string;
+}
+
 /** Column filters for the memory-item listing (FR-21). Absent = unfiltered. */
 export interface MemoryItemFilter {
   scopeKeys?: string[];
@@ -2710,6 +2737,164 @@ export class CortexStore {
     }
 
     return { ...totals, byType };
+  }
+
+  // ── Correction and deletion (FR-22) ───────────────────────────────
+
+  recordMemoryCorrection(opts: RecordMemoryCorrectionOpts): ParsedMemoryCorrection {
+    const id = opts.id ?? crypto.randomUUID();
+    const createdAt = opts.createdAt ?? new Date().toISOString();
+
+    this.db
+      .prepare(
+        `INSERT INTO memory_corrections (
+           id, memory_item_id, source_table, source_id, scope_key,
+           operation, prior_text, new_text, prior_subject, created_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        opts.memoryItemId,
+        opts.sourceTable ?? null,
+        opts.sourceId ?? null,
+        opts.scopeKey ?? null,
+        opts.operation,
+        opts.priorText,
+        opts.newText ?? null,
+        opts.priorSubject ?? null,
+        createdAt,
+      );
+
+    return this.db
+      .prepare('SELECT * FROM memory_corrections WHERE id = ?')
+      .get(id) as ParsedMemoryCorrection;
+  }
+
+  /** Corrections recorded against an item, newest first. Outlives the item. */
+  getMemoryCorrections(memoryItemId: string): ParsedMemoryCorrection[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM memory_corrections
+          WHERE memory_item_id = ?
+          ORDER BY created_at DESC, rowid DESC`,
+      )
+      .all(memoryItemId) as ParsedMemoryCorrection[];
+  }
+
+  /**
+   * Replace an item's text and re-derive everything that hangs off it (FR-22).
+   *
+   * A note-backed item is corrected **through its note**: `notes.content` is
+   * updated and the existing projection rebuilds the item, so the trailer
+   * (`Subject:` / `Alternatives:` / `Conflict:` / `Status:`) stays consistent
+   * with the columns it mirrors. Patching `memory_items.text` directly instead
+   * would desynchronise the two — the exact drift `inspect-memory` reports as
+   * `diverged`, introduced by the command meant to repair memory.
+   *
+   * Access counters and state are deliberately preserved: a correction is not
+   * a new memory, and reheating one as a side effect of fixing a typo would
+   * change retrieval ranking for a reason the user never asked for.
+   */
+  updateMemoryItemText(id: string, text: string): boolean {
+    return this.runInTransaction(() => {
+      const item = this.getMemoryItem(id);
+      if (!item) {
+        return false;
+      }
+
+      // Inside the transaction: "recorded in an audit trail" is only true if
+      // the record cannot survive a correction that rolled back, or vice versa.
+      this.recordMemoryCorrection({
+        memoryItemId: item.id,
+        sourceTable: item.source_table,
+        sourceId: item.source_id,
+        scopeKey: item.scope_key,
+        operation: 'edit',
+        priorText: item.text,
+        newText: text,
+        priorSubject: item.subject,
+      });
+
+      if (item.source_table === 'notes' && item.source_id && this.getNote(item.source_id)) {
+        this.db
+          .prepare('UPDATE notes SET content = ? WHERE id = ?')
+          .run(text, item.source_id);
+        this.syncMemoryItemForNote(item.source_id);
+        return true;
+      }
+
+      this.db.prepare('UPDATE memory_items SET text = ? WHERE id = ?').run(text, id);
+      this.replaceMemoryReferences(id, extractMemoryReferences(item.subject, text));
+      return true;
+    });
+  }
+
+  /**
+   * Delete a memory item, its source row, and everything derived from it —
+   * in one transaction (FR-22).
+   *
+   * Deleting the `memory_items` row alone is not a deletion. `backfillMemoryItems`
+   * re-inserts from `notes`, `episodes`, `project_snapshots` and `command_runs`
+   * on every `ensureCortexSchema`, which every CLI command triggers, so the item
+   * returns with its original id on the next invocation. The source row is what
+   * makes the removal durable.
+   *
+   * `memory_references`, `memory_item_semantics` and the FTS row follow the
+   * item automatically — the first two by `ON DELETE CASCADE` (which relies on
+   * `openDatabase` setting `foreign_keys = ON`), the third by an AFTER DELETE
+   * trigger. They are pinned by test rather than trusted.
+   */
+  deleteMemoryItemCascade(id: string): boolean {
+    return this.runInTransaction(() => {
+      const item = this.getMemoryItem(id);
+      if (!item) {
+        return false;
+      }
+
+      const note =
+        item.source_table === 'notes' && item.source_id
+          ? this.getNote(item.source_id)
+          : undefined;
+      // Read the scope before the note row is gone: clearConflictsForSubject
+      // resolves scope by joining through the note's session.
+      const noteScopeKey = note ? this.getScopeKeyForNote(note.id) : null;
+
+      this.recordMemoryCorrection({
+        memoryItemId: item.id,
+        sourceTable: item.source_table,
+        sourceId: item.source_id,
+        scopeKey: item.scope_key,
+        operation: 'delete',
+        priorText: item.text,
+        priorSubject: item.subject,
+      });
+
+      // Deleting one side of a contest must not leave the survivor rendering
+      // [contested] against a counterpart that no longer exists.
+      if (note?.subject && note.conflict) {
+        this.clearConflictsForSubject(note.subject, noteScopeKey);
+      }
+
+      if (item.source_table && item.source_id) {
+        const sourceTables = new Set([
+          'notes',
+          'episodes',
+          'command_runs',
+          'project_snapshots',
+          'branch_snapshots',
+          'state',
+        ]);
+        if (sourceTables.has(item.source_table)) {
+          this.db
+            .prepare(`DELETE FROM ${item.source_table} WHERE id = ?`)
+            .run(item.source_id);
+        }
+      }
+
+      this.db.prepare('DELETE FROM memory_items WHERE id = ?').run(id);
+      return true;
+    });
   }
 
   // ── Transactions ──────────────────────────────────────────────────
