@@ -4,7 +4,7 @@ baseline_commit: 5170fc0
 
 # Story 2.2: Correct and delete memory
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
