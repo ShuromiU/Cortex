@@ -278,6 +278,54 @@ Access history has two halves with different durability and the output says so: 
 - `CLAUDE.md` — modified; `src/query/inspect.ts` in § Core Files, five § Expected Behavior bullets
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` — modified; epic-2 in-progress, story 2.1 review
 
+## Senior Developer Review (AI)
+
+**Reviewed:** `b4c5f7f` vs `f79b19a` · three parallel layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) · 2026-07-28
+**Outcome:** Changes Requested → addressed in the repair round below.
+
+The Auditor's verdict on the ACs was clean, verified by driving the built CLI against its own seeded stores: all three ACs met, all numeric claims true (801/29, eight suites at the exact stated values, +52 tests), no writes on either command, and the surgical staging confirmed intact. The two hunters found the defects where the story stopped looking — and the Auditor found the one that mattered most, which was in the verification rather than the code.
+
+### The through-line
+
+**I imported the authoritative column and left its discipline behind.** `notes.alternatives` is the real column, and reading it directly was the right call — but `renderedAlternatives` exists on every other surface precisely because `buildNoteMemoryText` collapses whitespace first, and the story's own design section quotes that guard while specifying the bypass. Rendering the column raw let an alternative containing a newline emit extra lines *inside the conflict section*: a note whose `conflict` column is `false` printed `contested with FAKE-ID-9999`. This is Epic 1's "importing half of a discipline" lesson, one epic later, on the surface CLAUDE.md calls the authority.
+
+**And the mutation campaign that was supposed to catch it never looked there.** The Auditor's independent campaign found 12 of 15 text-renderer mutations surviving — references section emptied, conflict line always "none", divergence warning removed, all green. Round 1 mutated the query/store layer and the CLI's *structure*, then reported 28/28 and read as exhaustive. The lesson generalises past Epic 1's "prove the mutation applied": **prove the campaign reached every surface it claims to cover.** A campaign's coverage is a claim like any other.
+
+Round 1 had already taught the narrower version of this: its "unknown id exits zero" mutation applied cleanly and survived, and the code was innocent — `process.exitCode = 1;` occurs four times in `cli.ts` and `String.replace` patched `note-resolve`. The round-2 harness therefore rejects any anchor matching more than once.
+
+### Action items — all addressed
+
+- [x] **[High] Note content could forge conflict metadata** (blind). Alternatives now render through `renderAlternativesLine`: each entry collapsed to one line, empties dropped, payload capped at 240 chars like `render.ts`. Pinned by a test that asserts no forged `contested with` line reaches the conflict section while the content still appears inside the `already rejected:` line where it belongs.
+- [x] **[High] A newline in `subject` forged a second listing row** (edge). Collapsed the same way; `renderMemorySnippet` already handled the text but subject reached the line raw.
+- [x] **[High] The next-page footer was unrunnable on real scope keys** (blind+edge). Keys embed the worktree path, and this repo's own is `branch:c:/claude code/cortex/…` — the printed command failed with "too many arguments". Values are now quoted; the test pastes the footer back through a shell-style parse and asserts it pages. The old test passed vacuously on a space-free fixture.
+- [x] **[High] `--offset` above int64 crashed with a raw stack trace** (edge). `resolvePageOffset` clamps to `Number.MAX_SAFE_INTEGER`; a top-level catch now turns any remaining store-level failure into one diagnostic line.
+- [x] **[Med] Terminal control characters printed verbatim** (edge). This is the first surface printing text untruncated and `captureOutputTail` keeps ESC and lone CR, so stored content could overwrite or recolour the terminal. Stripped in text mode; `--json` stays byte-faithful, and both halves are pinned.
+- [x] **[Med] `--kind ""` listed the whole store while `--kind ","` listed nothing** (blind+edge). Truthiness replaced with `!== undefined`, so an empty filter narrows — matching the store layer's own contract, which the CLI was contradicting.
+- [x] **[Med] `parseInt` truncated `--limit 1e3` to 1** (blind+edge). `Number` + `Math.trunc`; a partially-parsed value never reached the documented `NaN` fallback.
+- [x] **[Med] Fixed column padding collided precisely on `archived`** (blind+edge+auditor). Widths are computed per page and joined with an explicit separator.
+- [x] **[Med] `--offset 100` printed `memory items 101-100 of 3`** (blind+edge+auditor). Empty pages now report either "no items match these filters" or "offset N is past the end".
+- [x] **[Med] Unvalidated `--state` was indistinguishable from an empty store** (edge). Validated against the closed set with the valid values named.
+- [x] **[Med] A comma in a scope key shattered the filter** (edge). `--scope` is repeatable rather than comma-split; git permits commas in branch names.
+- [x] **[Med] The text renderer was untested** (auditor). Round-2 campaign of 29 mutations aimed at it: **29/29 killed, 0 unapplied**, after the two survivors were investigated — one was a genuinely missing test (divergence warning in text mode, added), the other an equivalent mutant for its fixture (`padEnd(8)` vs `padEnd(stateWidth)` where the widest state *is* 8) and was replaced with the real defect, removing the separator.
+- [x] **[Med] Three vacuous assertions in the AC #2 text test** (blind+auditor). `toContain('src/present.ts')` passed off the verbatim text block and `toContain('transport')` off the subject line. Rewritten as anchored per-section regexes with a retrieval topic that appears nowhere else.
+- [x] **[Low] `scope:` printed `branch:branch:…`** (blind), unusable with `--scope`. Now round-trips, pinned by a test that pastes it back.
+- [x] **[Low] `--json` not-found emitted zero bytes** (edge). Emits `{"error":"not_found","id":…}`; exit code unchanged.
+- [x] **[Low] An orphaned note-backed item reported `diverged: false`** (edge) — the projection still drives decay and channel exclusion with no column left to correct it, so the detector was blind to the one drift it cannot repair.
+- [x] **[Low] The printed ordering criterion omitted the tiebreaker** CLAUDE.md called load-bearing (blind+auditor). Now `newest first (created_at DESC, rowid DESC)`.
+- [x] **[Low] The access-history caveat blamed gc for a shortfall the cap caused** (blind). Both causes named, and the cap disclosed.
+- [x] **[Low] `total` and `items` were two untransacted queries** (blind). One `runInTransaction` snapshot.
+- [x] **[Low] `json_valid` as a sibling `AND` term relied on unspecified WHERE evaluation order** (blind, flagged as unproven). Moved inside `json_each`'s argument as a `CASE`, which cannot be reordered away.
+- [x] **[Low] Three false documentation sentences of my own** (blind+auditor): the README's `--scope "proj:cortex@main"` example is a form `src/scope/keys.ts` never emits, the sample listing showed elided ids the renderer never produces, and CLAUDE.md claimed the page cap binds "every caller including the library API" when `listMemoryItemsFiltered({})` returns everything by design. All corrected against real output.
+
+### Accepted, not changed
+
+- **Cross-scope trust labels can be wrong** (blind, with live evidence: 4 of 7 scopes in the real store have no app graph and one is ~7 weeks stale). `ReferenceValidator` validates against the item's own scope graph and this is pre-existing behaviour shared with retrieval — but list/inspect is the first surface where cross-scope items are the *point*. Fixing it means touching the module that feeds the locked gate. Documented honestly in both README and CLAUDE.md instead; the principled fix belongs with a story that can re-run the gate against it.
+- **`.cortex.db` is created by a read-only command in whatever directory it runs from** (blind). Real, and shared by every command through `openCortexDb`; Story 2.5 relocates the store and owns this.
+- **Offset paging can repeat or skip under concurrent writes** (edge). Inherent to offset paging; a keyset cursor would close it. Benign for an operator tool, and the docstring's stability claim is about a static store.
+- **`json_each` matches non-array JSON shapes** (edge). `insertRetrievalLog` only ever writes flat string arrays; no external writer exists.
+- **Over ~32764 filter values the list throws while the count succeeds** (edge). Unreachable from the CLI (argv limit bites first), reachable from the library API.
+
 ### Change Log
 
+- 2026-07-28 — Round-2 repair: 21 review findings addressed across 5 files; 821 tests (+20), 8 gate suites unchanged, 29/29 round-2 mutations killed (57 across both rounds), 0 unapplied.
 - 2026-07-27 — Story 2.1 implemented. `cortex list-memory` and `cortex inspect-memory` land as a read-only operator surface: filtered, capped, order-stated paging, and full-item inspection carrying references, trust label, authoritative conflict status with divergence reporting, and access history. 801 tests (+52), 29 files (+1), 8 gate suites at zero delta, 28/28 mutations killed with 0 unapplied.

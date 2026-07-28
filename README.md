@@ -264,7 +264,7 @@ cortex suggest-notes
 cortex validate-memory --topic "Activity notes portal"
 cortex list-memory
 cortex list-memory --kind note:decision --state hot,warm --limit 50
-cortex list-memory --scope "proj:cortex@main" --offset 20 --json
+cortex list-memory --scope "branch:c:/work/cortex/.git:c:/work/cortex:main" --offset 20 --json
 cortex inspect-memory <id>
 cortex inspect-memory <id> --json
 cortex note-resolve --subject "auth transport" --status superseded
@@ -373,16 +373,19 @@ Written as `cortex_note(kind='decision', alternatives=['…'])`. Rationale you p
 Retrieval decides what you see. `list-memory` and `inspect-memory` show you everything else.
 
 ```text
-$ cortex list-memory
-memory items 1-3 of 3 · newest first (created_at DESC) · filters: none
-notes:81f51bbe…  warm    Insight     2026-07-28 03:37Z  insight: the porter tokenizer stems queries too
-notes:1ee6685d…  warm    Decision    2026-07-28 03:37Z  [auth strategy] decision: do not use OIDC …
-notes:5fbea824…  warm    Decision    2026-07-28 03:37Z  [auth strategy] decision: use OIDC with …
+$ cortex list-memory --limit 2
+memory items 1-2 of 3 · newest first (created_at DESC, rowid DESC) · filters: none
+notes:208ece98-638a-4c79-b649-ab326abe8ef9  warm  Insight   2026-07-28 04:23Z  insight: the porter tokenizer stems queries too
+notes:73e34db9-e13c-4950-a6a4-281e917330e9  warm  Decision  2026-07-28 04:23Z  [auth strategy] decision: do not use OIDC with server-side sessions
+
+next page: cortex list-memory --limit 2 --offset 2
 ```
 
-Filter with `--scope`, `--kind` and `--state`, each taking a comma-separated list. Two defaults are deliberate and differ from every other surface: **no state filter is applied, so `archived` items are listed too**, and **no scope filter is applied, so other branches' memory is visible**. A listing that quietly omits rows cannot answer "what does Cortex actually hold".
+Filter with `--kind` and `--state` (comma-separated) and `--scope` (repeat the flag for more than one). `--scope` is deliberately not comma-split: scope keys embed the worktree path and the branch ref — they look like `branch:c:/work/cortex/.git:c:/work/cortex:main` — and git permits commas in branch names, so splitting would shatter a legitimate key.
 
-Pages are capped: 20 items by default, 200 at most, however large a `--limit` you pass. When more remain, the footer prints the exact command for the next page. The ordering criterion is printed in the header rather than left implicit.
+Two defaults are deliberate and differ from every other surface: **no state filter is applied, so `archived` items are listed too**, and **no scope filter is applied, so other branches' memory is visible**. A listing that quietly omits rows cannot answer "what does Cortex actually hold".
+
+Pages are capped: 20 items by default, 200 at most, however large a `--limit` you pass. When more remain, the footer prints the next page's command with its filter values quoted, so it runs as printed even when a scope key contains spaces — which, on a path like `C:/Claude Code/cortex`, it does. The ordering criterion is printed in the header, tiebreaker included, rather than left implicit.
 
 `inspect-memory <id>` takes a memory-item id or the id of the note behind it — including the counterpart ids that the conflict section prints — and shows the full stored text untruncated, alongside the four things retrieval only ever summarises:
 
@@ -391,7 +394,7 @@ trust:      refs OK
 
 conflict:   contested — an unresolved contradiction on this subject
 status:     active
-  contested with 1ee6685d-c281-4a0c-a468-efe535be4c83 (decision, 2026-07-28 03:37Z)
+  contested with 73e34db9-e13c-4950-a6a4-281e917330e9 (decision, 2026-07-28 04:23Z)
   already rejected: session cookies (no SSO path), JWT-in-localStorage (XSS surface)
 
 references:
@@ -399,15 +402,21 @@ references:
 
 access history:
   count 0, last never
-  2026-07-28 03:37Z  auth strategy
-  (cortex gc prunes the retrieval log; the access count is the durable figure)
+  2026-07-28 04:23Z  auth strategy
+  (showing at most 10; cortex gc also prunes the retrieval log — the access count is the durable figure)
 ```
 
-The trust label is the same one `cortex_recall` prints in its lead line. The two halves of access history have different durability, which is why the caveat is printed: `access_count` survives, the per-retrieval list is trimmed by `cortex gc`.
+The trust label is the same one `cortex_recall` prints in its lead line. It describes the item's references against **its own scope's** recorded file inventory, which for another branch may be older than that branch's current checkout — so a cross-scope `stale refs` means "stale as of what Cortex last recorded there", not necessarily "missing on disk today".
+
+The two halves of access history have different durability and can disagree for two separate reasons, both named in the trailer: the list is capped at the most recent 10, and `cortex gc` trims the retrieval log independently. `access_count` is the durable figure.
+
+Stored text is printed verbatim except for terminal control characters, which are stripped: captured stderr can carry ESC and lone CR, and this is the first surface that prints text untruncated. `--json` stays byte-faithful.
 
 **Inspect is the only surface that reads `notes.conflict` directly.** Every other renderer recovers the flag from the projected memory text, because `memory_items` has no conflict column. Inspect has the id, so it joins to the note itself — and when the column and the projection disagree, it says so rather than silently preferring one. That disagreement is invisible everywhere else.
 
-Both commands are read-only in the sense that matters: neither creates a session, and neither touches access counts, so inspecting memory cannot change the ranking it exists to reveal. `--json` on either emits the same data as a structure, and a missing id exits non-zero in both modes.
+Both commands are read-only in the sense that matters: neither creates a session, and neither touches access counts, so inspecting memory cannot change the ranking it exists to reveal. `--json` on either emits the same data as a structure; a missing id exits non-zero in both modes and `--json` gets a parseable `{"error":"not_found"}` rather than empty output.
+
+Stored strings are author-supplied, so the renderer treats them as content rather than as its own output: alternatives and subjects are each collapsed onto a single line, and the alternatives payload is capped. Without that, an alternative containing a newline could print what looked like a counterpart line inside the conflict section of a note that has no contest at all.
 
 ## Reliability Evaluation
 

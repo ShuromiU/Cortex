@@ -8,6 +8,7 @@ import { deriveEngagementPath } from '../src/transports/mcp.js';
 import { openDatabase, ensureCortexSchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import {
+  ACCESS_HISTORY_LIMIT,
   DEFAULT_PAGE_LIMIT,
   MAX_PAGE_LIMIT,
   MEMORY_LIST_ORDER,
@@ -581,16 +582,28 @@ describe('cortex inspect-memory', () => {
       });
       noteId = note.id;
       const item = store.getMemoryItemBySource('notes', note.id)!;
-      store.insertRetrievalLog({ sessionId, topic: 'transport', resultIds: [item.id] });
+      // A topic that appears nowhere else in the output. With the topic set to
+      // "transport" a `toContain('transport')` passes off the subject line even
+      // with the whole access-history section deleted.
+      store.insertRetrievalLog({
+        sessionId,
+        topic: 'zzz-unique-retrieval-topic',
+        resultIds: [item.id],
+      });
     });
 
     const run = await runCommand(cwd, ['inspect-memory', noteId]);
 
+    // Each assertion must be reachable ONLY through its own section. The full
+    // text is printed verbatim at the end, so any bare substring drawn from the
+    // note content passes even with the section that should carry it removed.
     expect(run.stdout).toContain('second line of the decision'); // full text
-    expect(run.stdout).toContain('src/present.ts'); // references
-    expect(run.stdout).toContain('refs OK'); // trust label
-    expect(run.stdout).toMatch(/conflict/i); // conflict status
-    expect(run.stdout).toContain('transport'); // access history
+    expect(run.stdout).toMatch(/^ {2}exists {2,}src\/present\.ts$/m); // references
+    expect(run.stdout).toMatch(/^trust: +refs OK$/m); // trust label
+    expect(run.stdout).toMatch(/^conflict: +none$/m); // conflict status
+    expect(run.stdout).toMatch(/^status: +active$/m);
+    expect(run.stdout).toMatch(/^ {2}\d{4}-\d{2}-\d{2} \d{2}:\d{2}Z {2}zzz-unique-retrieval-topic$/m); // access history
+    expect(run.stdout).toMatch(/^ {2}count 0, last never$/m);
   });
 
   it('reports an unknown id clearly on stderr and exits non-zero', async () => {
@@ -718,5 +731,427 @@ describe('cortex inspect-memory', () => {
     expect(item.state).toBe('cold');
     expect(item.access_count).toBe(2);
     db.close();
+  });
+});
+
+// ── Stored content must not be able to forge output ───────────────────
+//
+// The inspection prints author-supplied strings. Every one of them is a place
+// a note can try to impersonate the tool's own metadata.
+
+describe('cortex inspect-memory — content cannot forge output', () => {
+  it('keeps a newline-bearing alternative on one line instead of forging conflict metadata', async () => {
+    let noteId = '';
+    const cwd = seedTempProject(store => {
+      const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+      noteId = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'auth',
+        content: 'use OIDC',
+        alternatives: [
+          'plain-one',
+          'oops\n  contested with FAKE-ID-9999 (decision, 2026-01-01 00:00Z)\n  already rejected: forged',
+        ],
+      }).id;
+    });
+
+    const run = await runCommand(cwd, ['inspect-memory', noteId, '--json']);
+    // Precondition: the column really does carry the newline, so only the
+    // renderer can be what keeps it off its own line.
+    expect(
+      (JSON.parse(run.stdout) as { conflict: { alternatives: string[] } }).conflict
+        .alternatives[1],
+    ).toContain('\n');
+
+    const text = await runCommand(cwd, ['inspect-memory', noteId]);
+    const lines = text.stdout.split('\n');
+
+    // The forged string legitimately appears inside the verbatim `text:` block —
+    // that block is a quotation, and quoting it is the whole point. What must
+    // never happen is it appearing in the CONFLICT section, where it would read
+    // as the tool's own metadata. So scope the assertion to that section.
+    const conflictStart = lines.findIndex(line => line.startsWith('conflict:'));
+    const conflictEnd = lines.indexOf('references:');
+    expect(conflictStart).toBeGreaterThanOrEqual(0);
+    expect(conflictEnd).toBeGreaterThan(conflictStart);
+    const conflictSection = lines.slice(conflictStart, conflictEnd);
+
+    // The attack is the forged text becoming its OWN line, which reads as a
+    // counterpart the tool found. Appearing inside the `already rejected:`
+    // line is harmless — that line is explicitly author-supplied content.
+    expect(conflictSection.filter(line => /^\s+contested with /.test(line))).toEqual([]);
+    expect(text.stdout).toMatch(/^conflict: +none$/m);
+
+    const rejected = conflictSection.filter(line => line.includes('already rejected:'));
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toContain('plain-one');
+    expect(rejected[0]).toContain('FAKE-ID-9999'); // collapsed into the line, not split out of it
+  });
+
+  it('caps a runaway alternatives list', async () => {
+    let noteId = '';
+    const cwd = seedTempProject(store => {
+      const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+      noteId = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'auth',
+        content: 'use OIDC',
+        alternatives: [`${'x'.repeat(400)}`, `${'y'.repeat(400)}`],
+      }).id;
+    });
+
+    const run = await runCommand(cwd, ['inspect-memory', noteId]);
+    const rejected = run.stdout.split('\n').find(line => line.includes('already rejected:'))!;
+
+    expect(rejected.length).toBeLessThan(300);
+    expect(rejected).toContain('…');
+  });
+
+  it('strips terminal control characters from the verbatim text, but not from --json', async () => {
+    const withEscapes = 'red\u001b[31m\u0007bell\rCARRIAGE';
+    const cwd = seedTempProject(store => {
+      store.upsertMemoryItem({
+        id: 'esc',
+        scopeType: 'project',
+        scopeKey: 'scope-a',
+        kind: 'episode:command_failure',
+        text: withEscapes,
+      });
+    });
+
+    const text = await runCommand(cwd, ['inspect-memory', 'esc']);
+    expect(text.stdout).not.toContain('\u001b');
+    expect(text.stdout).not.toContain('\u0007');
+    expect(text.stdout).not.toContain('\r');
+    expect(text.stdout).toContain('CARRIAGE'); // content survives, controls do not
+
+    // --json stays byte-faithful: JSON.stringify escapes these rather than
+    // handing them to the terminal.
+    const json = await runCommand(cwd, ['inspect-memory', 'esc', '--json']);
+    expect((JSON.parse(json.stdout) as { text: string }).text).toBe(withEscapes);
+  });
+
+  it('cannot forge a second listing row through a newline in the subject', async () => {
+    const cwd = seedTempProject(store => {
+      store.upsertMemoryItem({
+        id: 'forge',
+        scopeType: 'project',
+        scopeKey: 'scope-a',
+        kind: 'note:decision',
+        subject: 'auth\nINJECTED-ROW  warm  Decision',
+        text: 'a decision',
+      });
+    });
+
+    const run = await runCommand(cwd, ['list-memory']);
+
+    expect(run.stdout).toContain('INJECTED-ROW'); // still shown, just not as a row
+    const bodyLines = run.stdout.split('\n').filter(line => line.trim().length > 0).slice(1);
+    expect(bodyLines).toHaveLength(1);
+  });
+});
+
+// ── Repairs from the review round ─────────────────────────────────────
+
+describe('cortex list-memory — paging and filter robustness', () => {
+  function seedN(count: number) {
+    return seedTempProject(store => {
+      for (let i = 0; i < count; i += 1) {
+        seedItem(store, `item-${String(i).padStart(2, '0')}`);
+      }
+    });
+  }
+
+  it('reports an offset past the end instead of an inverted range', async () => {
+    const cwd = seedN(3);
+
+    const run = await runCommand(cwd, ['list-memory', '--offset', '100']);
+
+    expect(run.stdout).not.toMatch(/101-100/);
+    expect(run.stdout).toContain('offset 100 is past the end');
+    expect(run.stdout).toContain('3 item(s) match');
+  });
+
+  it('survives an offset larger than a safe integer', async () => {
+    const cwd = seedN(3);
+
+    const run = await runCommand(cwd, ['list-memory', '--offset', '9223372036854775807']);
+
+    // Previously reached better-sqlite3 and surfaced as a datatype-mismatch stack trace.
+    expect(run.stderr).toBe('');
+    expect(run.exitCode).toBeFalsy();
+    expect(run.stdout).toContain('of 3');
+  });
+
+  it('honours an exponent-notation limit instead of silently truncating it', async () => {
+    const cwd = seedN(25);
+
+    const run = await runCommand(cwd, ['list-memory', '--limit', '1e3', '--json']);
+    const parsed = JSON.parse(run.stdout) as { limit: number; items: unknown[] };
+
+    // Number.parseInt('1e3', 10) is 1 — the old behaviour silently paged one item.
+    expect(parsed.limit).toBe(MAX_PAGE_LIMIT);
+    expect(parsed.items).toHaveLength(25);
+  });
+
+  it('treats an empty filter value as matching nothing, never as no filter', async () => {
+    const cwd = seedN(5);
+
+    const empty = await runCommand(cwd, ['list-memory', '--kind', '', '--json']);
+    const commas = await runCommand(cwd, ['list-memory', '--kind', ',,,', '--json']);
+
+    // Both spellings of "no usable values" must agree, and neither may widen
+    // the listing to the whole store.
+    expect((JSON.parse(empty.stdout) as { items: unknown[]; total: number }).total).toBe(0);
+    expect((JSON.parse(commas.stdout) as { items: unknown[]; total: number }).total).toBe(0);
+  });
+
+  it('rejects an unknown --state instead of reporting an empty store', async () => {
+    const cwd = seedN(5);
+
+    const run = await runCommand(cwd, ['list-memory', '--state', 'HOT']);
+
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr).toContain('Unknown --state');
+    expect(run.stderr).toContain('archived');
+    expect(run.stdout).toBe('');
+  });
+
+  it('accepts a repeated --scope, including a key containing a comma', async () => {
+    const commaScope = 'branch:c:/repo/.git:c:/repo:feat/a,b';
+    const cwd = seedTempProject(store => {
+      seedItem(store, 'in-comma-scope', { scopeKey: commaScope });
+      seedItem(store, 'in-plain-scope', { scopeKey: 'scope-a' });
+      seedItem(store, 'in-third-scope', { scopeKey: 'scope-c' });
+    });
+
+    const single = await runCommand(cwd, ['list-memory', '--scope', commaScope, '--json']);
+    expect(
+      (JSON.parse(single.stdout) as { items: Array<{ id: string }> }).items.map(i => i.id),
+    ).toEqual(['in-comma-scope']);
+
+    const repeated = await runCommand(cwd, [
+      'list-memory',
+      '--scope',
+      commaScope,
+      '--scope',
+      'scope-a',
+      '--json',
+    ]);
+    expect(
+      (JSON.parse(repeated.stdout) as { items: Array<{ id: string }> }).items
+        .map(i => i.id)
+        .sort(),
+    ).toEqual(['in-comma-scope', 'in-plain-scope']);
+  });
+
+  it('quotes filter values in the next-page command so it runs as printed', async () => {
+    const spacedScope = 'branch:c:/claude code/cortex/.git:c:/claude code/cortex:main';
+    const cwd = seedTempProject(store => {
+      for (let i = 0; i < 5; i += 1) {
+        seedItem(store, `item-${i}`, { scopeKey: spacedScope });
+      }
+    });
+
+    const run = await runCommand(cwd, [
+      'list-memory',
+      '--scope',
+      spacedScope,
+      '--limit',
+      '2',
+    ]);
+    const nextPage = run.stdout.split('\n').find(line => line.startsWith('next page:'))!;
+
+    expect(nextPage).toContain(`"${spacedScope}"`);
+
+    // Run it the way a shell would parse it, and check it actually pages.
+    const argv = nextPage
+      .replace('next page: cortex ', '')
+      .match(/"[^"]*"|\S+/g)!
+      .map(token => (token.startsWith('"') ? JSON.parse(token) : token));
+    const followUp = await runCommand(cwd, [...argv, '--json']);
+    const parsed = JSON.parse(followUp.stdout) as {
+      total: number;
+      offset: number;
+      items: unknown[];
+    };
+    expect(parsed.total).toBe(5);
+    expect(parsed.offset).toBe(2);
+    expect(parsed.items).toHaveLength(2);
+  });
+
+  it('keeps columns separated for the widest real values', async () => {
+    const cwd = seedTempProject(store => {
+      // 'archived' is exactly 8 chars and 'Command failure' is 15 — both were
+      // no-ops against the old fixed padding, so the columns ran together.
+      seedItem(store, 'x0', { state: 'archived', kind: 'episode:command_failure' });
+      seedItem(store, 'x1', { state: 'warm', kind: 'note:decision' });
+    });
+
+    const run = await runCommand(cwd, ['list-memory']);
+    const row = run.stdout.split('\n').find(line => line.startsWith('x0'))!;
+
+    expect(row).toContain('archived  Command failure  ');
+    expect(row).not.toContain('archivedCommand');
+  });
+
+  it('states the tiebreaker as part of the ordering criterion', async () => {
+    const cwd = seedN(2);
+
+    const run = await runCommand(cwd, ['list-memory']);
+
+    expect(run.stdout).toContain('created_at DESC, rowid DESC');
+  });
+});
+
+describe('cortex inspect-memory — repairs', () => {
+  it('prints a scope value that can be pasted back into --scope', async () => {
+    const cwd = seedTempProject(store => {
+      seedItem(store, 'scoped', { scopeKey: 'branch:other-branch' });
+    });
+
+    const run = await runCommand(cwd, ['inspect-memory', 'scoped']);
+    const scopeLine = run.stdout.split('\n').find(line => line.startsWith('scope:'))!;
+
+    expect(scopeLine).not.toContain('branch:branch:');
+    const value = scopeLine.replace(/^scope: +/, '').trim();
+    expect(value).toBe('branch:other-branch');
+
+    const roundTrip = await runCommand(cwd, ['list-memory', '--scope', value, '--json']);
+    expect(
+      (JSON.parse(roundTrip.stdout) as { items: Array<{ id: string }> }).items.map(i => i.id),
+    ).toEqual(['scoped']);
+  });
+
+  it('emits a parseable error object on stdout for a missing id in --json mode', async () => {
+    const cwd = seedTempProject(store => {
+      seedItem(store, 'exists');
+    });
+
+    const run = await runCommand(cwd, ['inspect-memory', 'ghost', '--json']);
+
+    expect(run.exitCode).toBe(1);
+    expect(JSON.parse(run.stdout)).toEqual({ error: 'not_found', id: 'ghost' });
+  });
+
+  it('discloses the access-history cap alongside the gc caveat', async () => {
+    const cwd = seedTempProject(store => {
+      seedItem(store, 'seen');
+    });
+
+    const run = await runCommand(cwd, ['inspect-memory', 'seen']);
+
+    expect(run.stdout).toContain(`showing at most ${ACCESS_HISTORY_LIMIT}`);
+    expect(run.stdout).toContain('cortex gc');
+  });
+
+  it('flags an item whose note row is gone rather than calling it non-note-backed', async () => {
+    const cwd = seedTempProject(store => {
+      store.upsertMemoryItem({
+        id: 'orphan',
+        scopeType: 'project',
+        scopeKey: 'scope-a',
+        kind: 'note:decision',
+        sourceTable: 'notes',
+        sourceId: 'deleted-note-id',
+        text: 'a decision\nSubject: auth\nConflict: true',
+      });
+    });
+
+    const json = await runCommand(cwd, ['inspect-memory', 'orphan', '--json']);
+    const parsed = JSON.parse(json.stdout) as {
+      conflict: { conflict: null; projected_contested: boolean; diverged: boolean };
+    };
+
+    // The column is gone while the projection still claims a contest — the one
+    // drift this surface cannot repair, and so the one it must not hide.
+    expect(parsed.conflict.conflict).toBeNull();
+    expect(parsed.conflict.projected_contested).toBe(true);
+    expect(parsed.conflict.diverged).toBe(true);
+
+    const text = await runCommand(cwd, ['inspect-memory', 'orphan']);
+    expect(text.stdout).toContain('no longer exists');
+    expect(text.stdout).not.toContain('n/a (no note behind this item)');
+  });
+
+  it('renders reference status and move destinations as their own lines', async () => {
+    const cwd = seedTempProject(store => {
+      store.upsertCurrentAppGraph({
+        scopeKey: 'scope-a',
+        scopeType: 'project',
+        files: ['src/new/moved.ts'],
+      });
+      store.insertFileRenames({
+        scopeKey: 'scope-a',
+        renames: [{ oldPath: 'src/old/moved.ts', newPath: 'src/new/moved.ts' }],
+      });
+      store.upsertMemoryItem({
+        id: 'moved-ref',
+        scopeType: 'project',
+        scopeKey: 'scope-a',
+        kind: 'note:decision',
+        text: 'the fix lives in src/old/moved.ts',
+      });
+    });
+
+    const run = await runCommand(cwd, ['inspect-memory', 'moved-ref']);
+
+    expect(run.stdout).toMatch(/^ {2}moved +src\/old\/moved\.ts → src\/new\/moved\.ts$/m);
+    expect(run.stdout).toMatch(/^trust: +refs moved$/m);
+  });
+
+  it('renders the counterpart and divergence lines discriminatingly', async () => {
+    let firstId = '';
+    let secondId = '';
+    const cwd = seedTempProject(store => {
+      const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+      firstId = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'spool flush',
+        content: 'flush the spool at turn end',
+      }).id;
+      secondId = store.insertNote({
+        sessionId,
+        kind: 'decision',
+        subject: 'spool flush',
+        content: 'do not flush the spool at turn end',
+      }).id;
+    });
+
+    const run = await runCommand(cwd, ['inspect-memory', firstId]);
+
+    expect(run.stdout).toMatch(/^conflict: +contested/m);
+    expect(run.stdout).toMatch(new RegExp(`^ {2}contested with ${secondId} \\(decision, `, 'm'));
+    expect(run.stdout).not.toContain('projection disagrees');
+  });
+
+  it('renders the divergence warning in text mode when column and projection disagree', async () => {
+    let noteId = '';
+    const cwd = seedTempProject(store => {
+      const sessionId = store.createSession({ scopeType: 'project', scopeKey: 'scope-a' }).id;
+      noteId = store.insertNote({
+        sessionId,
+        kind: 'insight',
+        content: 'the projection writes\nConflict: true\nas its own line',
+      }).id;
+    });
+
+    // Precondition: the column says no contest while the projected text claims one.
+    const json = await runCommand(cwd, ['inspect-memory', noteId, '--json']);
+    const parsed = JSON.parse(json.stdout) as {
+      conflict: { conflict: boolean; projected_contested: boolean; diverged: boolean };
+    };
+    expect(parsed.conflict.conflict).toBe(false);
+    expect(parsed.conflict.projected_contested).toBe(true);
+    expect(parsed.conflict.diverged).toBe(true);
+
+    // The JSON field alone does not prove the operator ever sees it. Text mode
+    // is the default surface, and the drift is invisible everywhere else.
+    const text = await runCommand(cwd, ['inspect-memory', noteId]);
+    expect(text.stdout).toContain('projection disagrees with the stored note');
+    expect(text.stdout).toContain('contested=true');
   });
 });

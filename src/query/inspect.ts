@@ -11,15 +11,24 @@ import {
 export const DEFAULT_PAGE_LIMIT = 20;
 
 /**
- * Hard ceiling on one page, applied to every caller including the library
- * API. This is the clause that makes "never dumps the whole store" a
- * property of the code rather than a habit of its callers: a cap that lives
- * inline in a CLI action is a cap nobody can test across its boundary.
+ * Hard ceiling on one page, applied by `listMemory` to every caller that goes
+ * through it — which is every path that renders a page. This is the clause
+ * that makes "never dumps the whole store" a property of the code rather than
+ * a habit of its callers: a cap that lives inline in a CLI action is a cap
+ * nobody can test across its boundary.
+ *
+ * It is not a ceiling on the *store* method. `listMemoryItemsFiltered`
+ * deliberately treats an absent limit as unlimited (SQLite `LIMIT -1`) because
+ * internal callers need that; the guarantee belongs to this layer, not below it.
  */
 export const MAX_PAGE_LIMIT = 200;
 
-/** Stated ordering criterion, printed with every page (AC #1). */
-export const MEMORY_LIST_ORDER = 'newest first (created_at DESC)';
+/**
+ * Stated ordering criterion, printed with every page (AC #1). It names the
+ * tiebreaker as well as the sort key, because the tiebreaker is what makes the
+ * order *total* — a script author paging this output needs to know that.
+ */
+export const MEMORY_LIST_ORDER = 'newest first (created_at DESC, rowid DESC)';
 
 /** How many retrieval-log entries an inspection reports. */
 export const ACCESS_HISTORY_LIMIT = 10;
@@ -44,12 +53,19 @@ export function resolvePageLimit(raw: number | undefined): number {
   return Math.min(floored, MAX_PAGE_LIMIT);
 }
 
+/**
+ * Offsets are clamped to a safe integer, not merely floored at zero.
+ * better-sqlite3 refuses to bind a float beyond `Number.MAX_SAFE_INTEGER`, so
+ * an offset like `9223372036854775807` — a plausible typo — otherwise reaches
+ * the driver and surfaces as a raw `datatype mismatch` stack trace instead of
+ * an empty page.
+ */
 export function resolvePageOffset(raw: number | undefined): number {
   if (raw === undefined || !Number.isFinite(raw)) {
     return 0;
   }
 
-  return Math.max(0, Math.floor(raw));
+  return Math.min(Math.max(0, Math.floor(raw)), Number.MAX_SAFE_INTEGER);
 }
 
 // ── Listing ───────────────────────────────────────────────────────────
@@ -89,9 +105,18 @@ export function listMemory(store: CortexStore, options: MemoryListOptions = {}):
     ...(options.states !== undefined ? { states: options.states } : {}),
   };
 
-  return {
+  // One snapshot for both queries. The shared WHERE builder guarantees the
+  // same *filter*; only a transaction guarantees the same *store*. Capture
+  // runs continuously in this repo, so a spool flush landing between the two
+  // would print an `of N` that disagrees with the rows beneath it.
+  const { items, total } = store.runInTransaction(() => ({
     items: store.listMemoryItemsFiltered({ ...filter, limit, offset }),
     total: store.countMemoryItemsFiltered(filter),
+  }));
+
+  return {
+    items,
+    total,
     limit,
     offset,
     order: MEMORY_LIST_ORDER,
@@ -207,12 +232,18 @@ function conflictStatus(
   const projectedSuperseded = isSupersededMemoryItem(item);
 
   if (!note) {
+    // Two different situations reach here and only one is unremarkable. An
+    // item that was never note-backed has nothing to diverge from. An item
+    // whose note row is *gone* has lost the column while its projection still
+    // drives the demote cap, the stale penalty and the brief exclusion — the
+    // one drift this surface exists to catch, and the one it cannot repair.
+    const orphaned = item.source_table === 'notes';
     return {
       conflict: null,
       note_status: null,
       projected_contested: projectedContested,
       projected_superseded: projectedSuperseded,
-      diverged: false,
+      diverged: orphaned,
       counterparts: [],
       alternatives: null,
     };

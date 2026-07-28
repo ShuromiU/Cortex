@@ -2453,20 +2453,28 @@ export class CortexStore {
    *
    * `result_ids_json` is a JSON array, so the match goes through `json_each`
    * rather than `LIKE '%id%'` — a substring scan matches any id that merely
-   * *contains* this one, and every id here is caller-supplied. `json_valid`
-   * is load-bearing, not defensive noise: `json_each` over a malformed or
-   * NULL value raises, and the raise takes the whole query with it rather
-   * than skipping the row.
+   * *contains* this one, and every id here is caller-supplied.
+   *
+   * Guarding malformed rows is load-bearing, not defensive noise: `json_each`
+   * over a malformed or NULL value raises, and the raise takes the whole query
+   * with it rather than skipping the row — one bad row would make access
+   * history unreadable for every item in the store. The guard is applied
+   * *inside* `json_each`'s argument rather than as a sibling `AND` term,
+   * because SQLite does not contractually fix the evaluation order of WHERE
+   * conjuncts; substituting an empty array cannot be reordered away.
    */
   getRetrievalLogsForItem(memoryItemId: string, limit: number): ParsedRetrievalLog[] {
     const rows = this.db
       .prepare(
         `SELECT * FROM retrieval_log
-         WHERE json_valid(result_ids_json)
-           AND EXISTS (
-             SELECT 1 FROM json_each(retrieval_log.result_ids_json)
-              WHERE json_each.value = ?
+         WHERE EXISTS (
+           SELECT 1 FROM json_each(
+             CASE WHEN json_valid(retrieval_log.result_ids_json)
+                  THEN retrieval_log.result_ids_json
+                  ELSE '[]' END
            )
+            WHERE json_each.value = ?
+         )
          ORDER BY created_at DESC, rowid DESC
          LIMIT ?`,
       )

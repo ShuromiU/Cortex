@@ -47,6 +47,7 @@ import { validateMemory } from '../query/validate-memory.js';
 import {
   listMemory,
   inspectMemory,
+  ACCESS_HISTORY_LIMIT,
   DEFAULT_PAGE_LIMIT,
   MAX_PAGE_LIMIT,
   type MemoryInspection,
@@ -93,6 +94,15 @@ function parseTopics(raw?: string): string[] {
     .filter(topic => topic.length > 0);
 }
 
+/** The closed set of `memory_items.state` values, for `--state` validation. */
+const KNOWN_MEMORY_STATES: ReadonlySet<string> = new Set([
+  'pinned',
+  'hot',
+  'warm',
+  'cold',
+  'archived',
+]);
+
 /** Comma-separated option values, trimmed, empties dropped. */
 function parseList(raw: string): string[] {
   return raw
@@ -106,9 +116,50 @@ function parseList(raw: string): string[] {
  * arrives as `NaN` rather than an error. Passing it through unchanged lets
  * `resolvePageLimit` apply the single documented fallback instead of two
  * different ones in two places.
+ *
+ * `Number`, not `parseInt`: `parseInt` succeeds on a *prefix*, so `--limit 1e3`
+ * silently becomes 1 and `--offset 0x10` silently becomes 0 — a partially
+ * parsed value never reaches the `NaN` fallback, and the page size the
+ * operator asked for is quietly replaced by a different one.
  */
 function parseCount(raw: string | undefined): number | undefined {
-  return raw === undefined ? undefined : Number.parseInt(raw, 10);
+  if (raw === undefined) {
+    return undefined;
+  }
+
+  const value = Number(raw.trim());
+  return Number.isFinite(value) ? Math.trunc(value) : Number.NaN;
+}
+
+/**
+ * Collapse a value onto one line for the listing.
+ *
+ * `renderMemorySnippet` already does this for item text, but `subject` reaches
+ * the line raw, and `insertNote` only trims it — an embedded newline therefore
+ * splits one item across two rows, the second of which is entirely
+ * author-controlled text that reads as another entry.
+ */
+function collapseToLine(value: string): string {
+  return value.replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Strip terminal control characters, keeping tabs and newlines.
+ *
+ * `inspect-memory` is the first surface that prints stored text untruncated,
+ * and `captureOutputTail` strips only CRLF and NUL — so ESC, lone CR and BEL
+ * from captured stderr survive into the store. Printed verbatim, a lone CR
+ * lets stored content overwrite the line above it and an ESC sequence can
+ * recolour or reposition the terminal. `--json` remains byte-faithful;
+ * `JSON.stringify` escapes these rather than executing them.
+ */
+function stripControlCharacters(value: string): string {
+  return value.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '');
+}
+
+/** Quote a value for the copy-pasteable next-page command. */
+function shellQuote(value: string): string {
+  return /^[A-Za-z0-9,._:@/+-]+$/.test(value) ? value : JSON.stringify(value);
 }
 
 function describeListFilters(filter: MemoryListPage['filter']): string {
@@ -126,25 +177,59 @@ function describeListFilters(filter: MemoryListPage['filter']): string {
 }
 
 function renderMemoryListPage(page: MemoryListPage): string {
-  const start = page.total === 0 ? 0 : page.offset + 1;
-  const end = page.offset + page.items.length;
+  // An empty page has no range. Deriving `start` from the offset alone printed
+  // inverted nonsense (`memory items 101-100 of 3`) for a caller paging past
+  // the end, which is routine once rows are GC'd between pages.
+  const empty = page.items.length === 0;
+  const start = empty ? 0 : page.offset + 1;
+  const end = empty ? 0 : page.offset + page.items.length;
   const lines = [
     `memory items ${start}-${end} of ${page.total} · ${page.order} · filters: ${describeListFilters(page.filter)}`,
   ];
 
+  if (empty) {
+    lines.push(
+      page.total === 0
+        ? 'no items match these filters.'
+        : `offset ${page.offset} is past the end; ${page.total} item(s) match.`,
+    );
+    return lines.join('\n');
+  }
+
+  // Widths come from the page, not from guesses. Fixed `padEnd(8)`/`padEnd(12)`
+  // are no-ops at exactly their width — and `archived` is exactly 8, so the
+  // columns ran together precisely for the state this listing exists to reveal.
+  const idWidth = Math.max(...page.items.map(item => item.id.length));
+  const stateWidth = Math.max(...page.items.map(item => item.state.length));
+  const kindWidth = Math.max(
+    ...page.items.map(item => humanizeMemoryKind(item.kind).length),
+  );
+
   for (const item of page.items) {
     const timestamp = formatMemoryTimestamp(item.created_at) ?? item.created_at;
-    const subject = item.subject ? `[${item.subject}] ` : '';
+    // `subject` reaches this line raw — `insertNote` only trims it — so an
+    // embedded newline would split one item into two rows, the second wholly
+    // author-controlled. `renderMemorySnippet` already collapses the text.
+    const subject = item.subject ? `[${collapseToLine(item.subject)}] ` : '';
     lines.push(
-      `${item.id}  ${item.state.padEnd(8)}${humanizeMemoryKind(item.kind).padEnd(12)}${timestamp}  ${subject}${renderMemorySnippet(item.text, 1, 80)}`,
+      [
+        item.id.padEnd(idWidth),
+        item.state.padEnd(stateWidth),
+        humanizeMemoryKind(item.kind).padEnd(kindWidth),
+        timestamp,
+        `${subject}${renderMemorySnippet(item.text, 1, 80)}`,
+      ].join('  '),
     );
   }
 
   if (end < page.total) {
+    // Values are quoted: scope keys embed the absolute worktree path, and a
+    // path with a space makes the printed command unrunnable — which is the
+    // one thing a "next page" line must not be.
     const filters = [
-      ...(page.filter.scopeKeys ? [`--scope ${page.filter.scopeKeys.join(',')}`] : []),
-      ...(page.filter.kinds ? [`--kind ${page.filter.kinds.join(',')}`] : []),
-      ...(page.filter.states ? [`--state ${page.filter.states.join(',')}`] : []),
+      ...(page.filter.scopeKeys ?? []).map(key => `--scope ${shellQuote(key)}`),
+      ...(page.filter.kinds ? [`--kind ${shellQuote(page.filter.kinds.join(','))}`] : []),
+      ...(page.filter.states ? [`--state ${shellQuote(page.filter.states.join(','))}`] : []),
     ].join(' ');
     lines.push(
       '',
@@ -155,9 +240,46 @@ function renderMemoryListPage(page: MemoryListPage): string {
   return lines.join('\n');
 }
 
+/** Payload cap for the rejected-alternatives line, matching `render.ts`'s. */
+const MAX_INSPECT_ALTERNATIVES_CHARS = 240;
+
+/**
+ * The alternatives line, rendered under the same discipline `renderedAlternatives`
+ * applies on every other surface.
+ *
+ * `notes.alternatives` is the authoritative column, but it is *author-supplied
+ * free text*: joining it raw lets an entry containing a newline emit extra
+ * lines inside the conflict block, which read as further conflict metadata —
+ * a note whose `conflict` column is `false` could otherwise print
+ * `contested with <fabricated id>`. `buildNoteMemoryText` collapses whitespace
+ * for exactly this reason before projecting; reading from the column instead
+ * of the projection must not discard the guard along with the indirection.
+ */
+function renderAlternativesLine(alternatives: string[]): string | null {
+  const collapsed = alternatives.map(collapseToLine).filter(entry => entry.length > 0);
+  if (collapsed.length === 0) {
+    return null;
+  }
+
+  const joined = collapsed.join(', ');
+  const capped =
+    joined.length <= MAX_INSPECT_ALTERNATIVES_CHARS
+      ? joined
+      : `${joined.slice(0, MAX_INSPECT_ALTERNATIVES_CHARS - 1).trimEnd()}…`;
+  return `  already rejected: ${capped}`;
+}
+
 function renderConflictSection(conflict: MemoryInspection['conflict']): string[] {
   if (conflict.conflict === null) {
-    return ['conflict:   n/a (no note behind this item)'];
+    // `diverged` here means the item claims a note that no longer exists — its
+    // projection still drives decay and channel exclusion with no column left
+    // to correct it. That is not the same as never having been note-backed.
+    return conflict.diverged
+      ? [
+          'conflict:   unknown — this item claims a note that no longer exists',
+          `  ⚠ orphaned projection: text reads contested=${conflict.projected_contested}, superseded=${conflict.projected_superseded}`,
+        ]
+      : ['conflict:   n/a (no note behind this item)'];
   }
 
   const lines = [
@@ -175,7 +297,10 @@ function renderConflictSection(conflict: MemoryInspection['conflict']): string[]
   }
 
   if (conflict.alternatives && conflict.alternatives.length > 0) {
-    lines.push(`  already rejected: ${conflict.alternatives.join(', ')}`);
+    const rejected = renderAlternativesLine(conflict.alternatives);
+    if (rejected) {
+      lines.push(rejected);
+    }
   }
 
   // Every other surface reads the projected text; only this one can see the
@@ -194,8 +319,11 @@ function renderMemoryInspection(inspection: MemoryInspection): string {
   const lines = [
     `id:         ${item.id}`,
     `kind:       ${humanizeMemoryKind(item.kind)} (${item.kind})`,
-    ...(item.subject ? [`subject:    ${item.subject}`] : []),
-    `scope:      ${item.scope_type}:${item.scope_key}`,
+    ...(item.subject ? [`subject:    ${collapseToLine(item.subject)}`] : []),
+    // Scope keys already lead with their type (`branch:…`, `project:…`), so
+    // prefixing `scope_type` produced `branch:branch:…` — a value that cannot
+    // be pasted back into `--scope`.
+    `scope:      ${item.scope_key}`,
     ...(item.session_id ? [`session:    ${item.session_id}`] : []),
     `created:    ${formatMemoryTimestamp(item.created_at) ?? item.created_at}`,
     `state:      ${item.state} (importance ${item.importance.toFixed(2)})`,
@@ -230,18 +358,19 @@ function renderMemoryInspection(inspection: MemoryInspection): string {
   } else {
     for (const retrieval of access.retrievals) {
       lines.push(
-        `  ${formatMemoryTimestamp(retrieval.created_at) ?? retrieval.created_at}  ${retrieval.topic}`,
+        `  ${formatMemoryTimestamp(retrieval.created_at) ?? retrieval.created_at}  ${collapseToLine(retrieval.topic)}`,
       );
     }
   }
 
-  // The two halves have different durability, and a reader comparing them
-  // deserves to know why they can disagree.
+  // Two separate reasons this list can be shorter than the access count, and
+  // the caveat named only one of them — an item retrieved 30 times showed 10
+  // rows under a note blaming gc, when the immediate cause is the cap.
   lines.push(
-    '  (cortex gc prunes the retrieval log; the access count is the durable figure)',
+    `  (showing at most ${ACCESS_HISTORY_LIMIT}; cortex gc also prunes the retrieval log — the access count is the durable figure)`,
     '',
     'text:',
-    inspection.text,
+    stripControlCharacters(inspection.text),
   );
 
   return lines.join('\n');
@@ -786,25 +915,48 @@ export function createProgram(): Command {
   program
     .command('list-memory')
     .description('List stored memory items by scope, kind and state (paginated)')
-    .option('--scope <keys>', 'Comma-separated scope keys')
+    // Repeatable rather than comma-separated: scope keys embed the worktree
+    // path and the branch ref, and git allows commas in branch names, so
+    // splitting would shatter a legitimate key into filters that match nothing.
+    .option(
+      '--scope <key>',
+      'Scope key (repeat the flag for more than one)',
+      (value: string, previous: string[]) => [...previous, value],
+      [] as string[],
+    )
     .option('--kind <kinds>', 'Comma-separated memory item kinds (e.g. note:decision)')
-    .option('--state <states>', 'Comma-separated states: pinned, hot, warm, cold, archived')
+    .option('--state <states>', `Comma-separated states: ${[...KNOWN_MEMORY_STATES].join(', ')}`)
     .option('--limit <n>', `Items per page (default ${DEFAULT_PAGE_LIMIT}, max ${MAX_PAGE_LIMIT})`)
     .option('--offset <n>', 'Items to skip', '0')
     .option('--json', 'Emit the page as JSON')
     .action((opts: {
-      scope?: string;
+      scope: string[];
       kind?: string;
       state?: string;
       limit?: string;
       offset?: string;
       json?: boolean;
     }) => {
+      const states = opts.state === undefined ? undefined : parseList(opts.state);
+      const unknownStates = (states ?? []).filter(state => !KNOWN_MEMORY_STATES.has(state));
+      if (unknownStates.length > 0) {
+        // Without this, a typo is byte-identical to an empty store — which is
+        // the one question this command exists to answer.
+        process.stderr.write(
+          `Unknown --state value(s): ${unknownStates.join(', ')}. Valid states: ${[...KNOWN_MEMORY_STATES].join(', ')}.\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+
       const { store } = openCortexDb(process.cwd());
       const page = listMemory(store, {
-        ...(opts.scope ? { scopeKeys: parseList(opts.scope) } : {}),
-        ...(opts.kind ? { kinds: parseList(opts.kind) } : {}),
-        ...(opts.state ? { states: parseList(opts.state) } : {}),
+        // `!== undefined`, not truthiness: `--kind ""` is a filter the user
+        // typed, and treating it as "no filter" widens the listing to the whole
+        // store — precisely what the store layer refuses to do for an empty array.
+        ...(opts.scope.length > 0 ? { scopeKeys: opts.scope } : {}),
+        ...(opts.kind !== undefined ? { kinds: parseList(opts.kind) } : {}),
+        ...(states !== undefined ? { states } : {}),
         ...(parseCount(opts.limit) !== undefined ? { limit: parseCount(opts.limit)! } : {}),
         ...(parseCount(opts.offset) !== undefined ? { offset: parseCount(opts.offset)! } : {}),
       });
@@ -834,6 +986,11 @@ export function createProgram(): Command {
         process.stderr.write(
           `No memory item found for id "${id}". List ids with: cortex list-memory\n`,
         );
+        // A caller piping --json gets a parseable error rather than zero bytes;
+        // the exit code is non-zero either way, which is what the AC binds.
+        if (opts.json) {
+          process.stdout.write(`${JSON.stringify({ error: 'not_found', id }, null, 2)}\n`);
+        }
         process.exitCode = 1;
         return;
       }
@@ -860,5 +1017,14 @@ export function createProgram(): Command {
 const self = process.argv[1] ?? '';
 if (self.endsWith('cli.js') || self.endsWith('cli.ts')) {
   const program = createProgram();
-  program.parse(process.argv);
+  try {
+    program.parse(process.argv);
+  } catch (err) {
+    // A store-level failure (unreadable database, a driver rejection) would
+    // otherwise surface as a Node stack trace naming dist/ internals. One
+    // diagnostic line and a non-zero exit, matching the deliberate handling
+    // the commands already apply to a missing id.
+    process.stderr.write(`cortex: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exitCode = 1;
+  }
 }
