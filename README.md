@@ -262,6 +262,11 @@ cortex evaluate
 cortex evaluate --suite eval/suites/stemming.json --compare eval/baselines/stemming.json
 cortex suggest-notes
 cortex validate-memory --topic "Activity notes portal"
+cortex list-memory
+cortex list-memory --kind note:decision --state hot,warm --limit 50
+cortex list-memory --scope "proj:cortex@main" --offset 20 --json
+cortex inspect-memory <id>
+cortex inspect-memory <id> --json
 cortex note-resolve --subject "auth transport" --status superseded
 cortex flush-spool
 cortex gc            # dry-run report
@@ -362,6 +367,47 @@ This appears in `cortex_recall` and `cortex_brief` — the two surfaces where an
 Two things that follow, and are easy to misread from the output alone. Results are still trimmed from the bottom for their own length, so you can see a decision trimmed *while* a higher-ranked decision shows its alternatives — the trim was not paid for by that line, and dropping it would not have bought the missing decision back. And because extra budget buys another decision line before it buys alternatives, raising the budget can replace an alternatives line you already had with a further result.
 
 Written as `cortex_note(kind='decision', alternatives=['…'])`. Rationale you put in the strings travels with the rejection; internal whitespace is collapsed to keep each list on one line, and a list long enough to crowd out every other result is truncated.
+
+## Inspecting what Cortex holds
+
+Retrieval decides what you see. `list-memory` and `inspect-memory` show you everything else.
+
+```text
+$ cortex list-memory
+memory items 1-3 of 3 · newest first (created_at DESC) · filters: none
+notes:81f51bbe…  warm    Insight     2026-07-28 03:37Z  insight: the porter tokenizer stems queries too
+notes:1ee6685d…  warm    Decision    2026-07-28 03:37Z  [auth strategy] decision: do not use OIDC …
+notes:5fbea824…  warm    Decision    2026-07-28 03:37Z  [auth strategy] decision: use OIDC with …
+```
+
+Filter with `--scope`, `--kind` and `--state`, each taking a comma-separated list. Two defaults are deliberate and differ from every other surface: **no state filter is applied, so `archived` items are listed too**, and **no scope filter is applied, so other branches' memory is visible**. A listing that quietly omits rows cannot answer "what does Cortex actually hold".
+
+Pages are capped: 20 items by default, 200 at most, however large a `--limit` you pass. When more remain, the footer prints the exact command for the next page. The ordering criterion is printed in the header rather than left implicit.
+
+`inspect-memory <id>` takes a memory-item id or the id of the note behind it — including the counterpart ids that the conflict section prints — and shows the full stored text untruncated, alongside the four things retrieval only ever summarises:
+
+```text
+trust:      refs OK
+
+conflict:   contested — an unresolved contradiction on this subject
+status:     active
+  contested with 1ee6685d-c281-4a0c-a468-efe535be4c83 (decision, 2026-07-28 03:37Z)
+  already rejected: session cookies (no SSO path), JWT-in-localStorage (XSS surface)
+
+references:
+  exists   src/transports/cli.ts
+
+access history:
+  count 0, last never
+  2026-07-28 03:37Z  auth strategy
+  (cortex gc prunes the retrieval log; the access count is the durable figure)
+```
+
+The trust label is the same one `cortex_recall` prints in its lead line. The two halves of access history have different durability, which is why the caveat is printed: `access_count` survives, the per-retrieval list is trimmed by `cortex gc`.
+
+**Inspect is the only surface that reads `notes.conflict` directly.** Every other renderer recovers the flag from the projected memory text, because `memory_items` has no conflict column. Inspect has the id, so it joins to the note itself — and when the column and the projection disagree, it says so rather than silently preferring one. That disagreement is invisible everywhere else.
+
+Both commands are read-only in the sense that matters: neither creates a session, and neither touches access counts, so inspecting memory cannot change the ranking it exists to reveal. `--json` on either emits the same data as a structure, and a missing id exits non-zero in both modes.
 
 ## Reliability Evaluation
 

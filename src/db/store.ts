@@ -458,6 +458,18 @@ export interface UpsertMemoryItemOpts {
   createdAt?: string;
 }
 
+/** Column filters for the memory-item listing (FR-21). Absent = unfiltered. */
+export interface MemoryItemFilter {
+  scopeKeys?: string[];
+  kinds?: string[];
+  states?: string[];
+}
+
+export interface ListMemoryItemsOpts extends MemoryItemFilter {
+  limit?: number;
+  offset?: number;
+}
+
 export interface UpsertMemoryItemSemanticOpts {
   memoryItemId: string;
   summary: string;
@@ -724,6 +736,41 @@ function cosineSimilarity(left: number[], right: number[]): number {
   }
 
   return dot / (Math.sqrt(leftMagnitude) * Math.sqrt(rightMagnitude));
+}
+
+/**
+ * Shared WHERE builder for the filtered listing and its count, so the count
+ * can never describe a different set than the page it labels.
+ *
+ * `undefined` means "no filter on this column"; an explicitly empty array
+ * means "match nothing". The CLI never produces the latter, but the library
+ * API can, and reinterpreting an empty selection as "everything" is how a
+ * filter starts lying about what it filtered.
+ */
+function buildMemoryItemFilterClause(
+  filter: MemoryItemFilter,
+): { sql: string; params: string[] } {
+  const columns: Array<[string, string[] | undefined]> = [
+    ['scope_key', filter.scopeKeys],
+    ['kind', filter.kinds],
+    ['state', filter.states],
+  ];
+
+  const clauses: string[] = [];
+  const params: string[] = [];
+
+  for (const [column, values] of columns) {
+    if (values === undefined) {
+      continue;
+    }
+    if (values.length === 0) {
+      return { sql: 'WHERE 1 = 0', params: [] };
+    }
+    clauses.push(`${column} IN (${values.map(() => '?').join(', ')})`);
+    params.push(...values);
+  }
+
+  return { sql: clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '', params };
 }
 
 // ── Store ─────────────────────────────────────────────────────────────
@@ -2365,6 +2412,66 @@ export class CortexStore {
       )
       .all(...scopeKeys, limit) as MemoryItemRow[];
     return rows.map(parseMemoryItemRow);
+  }
+
+  /**
+   * Memory items matching every supplied filter, newest first (FR-21).
+   *
+   * Deliberately unlike `listMemoryItemsByScopes`, which hard-excludes
+   * `archived`: this is the inspection path, and a listing that hides rows
+   * cannot answer "what does Cortex actually hold". Callers narrow explicitly.
+   *
+   * `rowid DESC` is not decoration. Seeding and same-transaction projection
+   * produce items sharing `created_at` to the millisecond, and `LIMIT`/`OFFSET`
+   * over a non-total order silently repeats some rows and skips others.
+   */
+  listMemoryItemsFiltered(opts: ListMemoryItemsOpts = {}): ParsedMemoryItem[] {
+    const { sql, params } = buildMemoryItemFilterClause(opts);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_items
+         ${sql}
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT ? OFFSET ?`,
+      )
+      // LIMIT -1 is SQLite's "no limit", so an absent limit still supports OFFSET.
+      .all(...params, opts.limit ?? -1, opts.offset ?? 0) as MemoryItemRow[];
+    return rows.map(parseMemoryItemRow);
+  }
+
+  /** How many items the same filter matches, ignoring limit/offset. */
+  countMemoryItemsFiltered(filter: MemoryItemFilter = {}): number {
+    const { sql, params } = buildMemoryItemFilterClause(filter);
+    const row = this.db
+      .prepare(`SELECT COUNT(*) as count FROM memory_items ${sql}`)
+      .get(...params) as { count: number };
+    return row.count;
+  }
+
+  /**
+   * Retrievals that returned this memory item, newest first (FR-21).
+   *
+   * `result_ids_json` is a JSON array, so the match goes through `json_each`
+   * rather than `LIKE '%id%'` — a substring scan matches any id that merely
+   * *contains* this one, and every id here is caller-supplied. `json_valid`
+   * is load-bearing, not defensive noise: `json_each` over a malformed or
+   * NULL value raises, and the raise takes the whole query with it rather
+   * than skipping the row.
+   */
+  getRetrievalLogsForItem(memoryItemId: string, limit: number): ParsedRetrievalLog[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM retrieval_log
+         WHERE json_valid(result_ids_json)
+           AND EXISTS (
+             SELECT 1 FROM json_each(retrieval_log.result_ids_json)
+              WHERE json_each.value = ?
+           )
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT ?`,
+      )
+      .all(memoryItemId, limit) as RetrievalLogRow[];
+    return rows.map(parseRetrievalLogRow);
   }
 
   searchMemoryItems(queryText: string, limit: number): SearchMemoryItemResult[] {

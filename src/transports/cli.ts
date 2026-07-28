@@ -44,6 +44,19 @@ import { ensureScopedSession, syncBranchSnapshotForSession } from '../scope/runt
 import { refreshCurrentAppGraph } from '../scope/app-graph.js';
 import { suggestNotes } from '../query/suggest-notes.js';
 import { validateMemory } from '../query/validate-memory.js';
+import {
+  listMemory,
+  inspectMemory,
+  DEFAULT_PAGE_LIMIT,
+  MAX_PAGE_LIMIT,
+  type MemoryInspection,
+  type MemoryListPage,
+} from '../query/inspect.js';
+import {
+  formatMemoryTimestamp,
+  humanizeMemoryKind,
+  renderMemorySnippet,
+} from '../query/render.js';
 
 function findDbPath(startDir: string): string {
   return path.join(startDir, '.cortex.db');
@@ -78,6 +91,160 @@ function parseTopics(raw?: string): string[] {
     .split(',')
     .map(topic => topic.trim())
     .filter(topic => topic.length > 0);
+}
+
+/** Comma-separated option values, trimmed, empties dropped. */
+function parseList(raw: string): string[] {
+  return raw
+    .split(',')
+    .map(value => value.trim())
+    .filter(value => value.length > 0);
+}
+
+/**
+ * Commander yields option values as raw strings, so a non-numeric `--limit`
+ * arrives as `NaN` rather than an error. Passing it through unchanged lets
+ * `resolvePageLimit` apply the single documented fallback instead of two
+ * different ones in two places.
+ */
+function parseCount(raw: string | undefined): number | undefined {
+  return raw === undefined ? undefined : Number.parseInt(raw, 10);
+}
+
+function describeListFilters(filter: MemoryListPage['filter']): string {
+  const parts: string[] = [];
+  if (filter.scopeKeys) {
+    parts.push(`scope=${filter.scopeKeys.join(',')}`);
+  }
+  if (filter.kinds) {
+    parts.push(`kind=${filter.kinds.join(',')}`);
+  }
+  if (filter.states) {
+    parts.push(`state=${filter.states.join(',')}`);
+  }
+  return parts.length > 0 ? parts.join(' ') : 'none';
+}
+
+function renderMemoryListPage(page: MemoryListPage): string {
+  const start = page.total === 0 ? 0 : page.offset + 1;
+  const end = page.offset + page.items.length;
+  const lines = [
+    `memory items ${start}-${end} of ${page.total} · ${page.order} · filters: ${describeListFilters(page.filter)}`,
+  ];
+
+  for (const item of page.items) {
+    const timestamp = formatMemoryTimestamp(item.created_at) ?? item.created_at;
+    const subject = item.subject ? `[${item.subject}] ` : '';
+    lines.push(
+      `${item.id}  ${item.state.padEnd(8)}${humanizeMemoryKind(item.kind).padEnd(12)}${timestamp}  ${subject}${renderMemorySnippet(item.text, 1, 80)}`,
+    );
+  }
+
+  if (end < page.total) {
+    const filters = [
+      ...(page.filter.scopeKeys ? [`--scope ${page.filter.scopeKeys.join(',')}`] : []),
+      ...(page.filter.kinds ? [`--kind ${page.filter.kinds.join(',')}`] : []),
+      ...(page.filter.states ? [`--state ${page.filter.states.join(',')}`] : []),
+    ].join(' ');
+    lines.push(
+      '',
+      `next page: cortex list-memory ${filters}${filters ? ' ' : ''}--limit ${page.limit} --offset ${end}`.trim(),
+    );
+  }
+
+  return lines.join('\n');
+}
+
+function renderConflictSection(conflict: MemoryInspection['conflict']): string[] {
+  if (conflict.conflict === null) {
+    return ['conflict:   n/a (no note behind this item)'];
+  }
+
+  const lines = [
+    `conflict:   ${conflict.conflict ? 'contested — an unresolved contradiction on this subject' : 'none'}`,
+    `status:     ${conflict.note_status}`,
+  ];
+
+  for (const counterpart of conflict.counterparts) {
+    const when = formatMemoryTimestamp(counterpart.timestamp) ?? counterpart.timestamp;
+    lines.push(`  contested with ${counterpart.id} (${counterpart.kind}, ${when})`);
+  }
+
+  if (conflict.conflict && conflict.counterparts.length === 0) {
+    lines.push('  no counterpart found in this scope — the contest may be stale');
+  }
+
+  if (conflict.alternatives && conflict.alternatives.length > 0) {
+    lines.push(`  already rejected: ${conflict.alternatives.join(', ')}`);
+  }
+
+  // Every other surface reads the projected text; only this one can see the
+  // column too. A disagreement is invisible everywhere else, so it is named.
+  if (conflict.diverged) {
+    lines.push(
+      `  ⚠ projection disagrees with the stored note: text reads contested=${conflict.projected_contested}, superseded=${conflict.projected_superseded}`,
+    );
+  }
+
+  return lines;
+}
+
+function renderMemoryInspection(inspection: MemoryInspection): string {
+  const { item, conflict, access } = inspection;
+  const lines = [
+    `id:         ${item.id}`,
+    `kind:       ${humanizeMemoryKind(item.kind)} (${item.kind})`,
+    ...(item.subject ? [`subject:    ${item.subject}`] : []),
+    `scope:      ${item.scope_type}:${item.scope_key}`,
+    ...(item.session_id ? [`session:    ${item.session_id}`] : []),
+    `created:    ${formatMemoryTimestamp(item.created_at) ?? item.created_at}`,
+    `state:      ${item.state} (importance ${item.importance.toFixed(2)})`,
+    `trust:      ${inspection.trust}`,
+    '',
+    ...renderConflictSection(conflict),
+    '',
+    'references:',
+  ];
+
+  if (inspection.references.length === 0) {
+    lines.push('  none');
+  } else {
+    for (const reference of inspection.references) {
+      const moved = reference.moved_to ? ` → ${reference.moved_to}` : '';
+      lines.push(`  ${reference.status.padEnd(9)}${reference.normalized_path}${moved}`);
+    }
+  }
+
+  lines.push(
+    '',
+    'access history:',
+    `  count ${access.access_count}, last ${
+      access.last_accessed_at
+        ? (formatMemoryTimestamp(access.last_accessed_at) ?? access.last_accessed_at)
+        : 'never'
+    }`,
+  );
+
+  if (access.retrievals.length === 0) {
+    lines.push('  no recorded retrievals');
+  } else {
+    for (const retrieval of access.retrievals) {
+      lines.push(
+        `  ${formatMemoryTimestamp(retrieval.created_at) ?? retrieval.created_at}  ${retrieval.topic}`,
+      );
+    }
+  }
+
+  // The two halves have different durability, and a reader comparing them
+  // deserves to know why they can disagree.
+  lines.push(
+    '  (cortex gc prunes the retrieval log; the access count is the durable figure)',
+    '',
+    'text:',
+    inspection.text,
+  );
+
+  return lines.join('\n');
 }
 
 function readJsonFile(filePath: string): unknown {
@@ -614,6 +781,69 @@ export function createProgram(): Command {
       refreshCurrentGraphQuietly(store, process.cwd());
       const report = validateMemory(store, opts.topic);
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    });
+
+  program
+    .command('list-memory')
+    .description('List stored memory items by scope, kind and state (paginated)')
+    .option('--scope <keys>', 'Comma-separated scope keys')
+    .option('--kind <kinds>', 'Comma-separated memory item kinds (e.g. note:decision)')
+    .option('--state <states>', 'Comma-separated states: pinned, hot, warm, cold, archived')
+    .option('--limit <n>', `Items per page (default ${DEFAULT_PAGE_LIMIT}, max ${MAX_PAGE_LIMIT})`)
+    .option('--offset <n>', 'Items to skip', '0')
+    .option('--json', 'Emit the page as JSON')
+    .action((opts: {
+      scope?: string;
+      kind?: string;
+      state?: string;
+      limit?: string;
+      offset?: string;
+      json?: boolean;
+    }) => {
+      const { store } = openCortexDb(process.cwd());
+      const page = listMemory(store, {
+        ...(opts.scope ? { scopeKeys: parseList(opts.scope) } : {}),
+        ...(opts.kind ? { kinds: parseList(opts.kind) } : {}),
+        ...(opts.state ? { states: parseList(opts.state) } : {}),
+        ...(parseCount(opts.limit) !== undefined ? { limit: parseCount(opts.limit)! } : {}),
+        ...(parseCount(opts.offset) !== undefined ? { offset: parseCount(opts.offset)! } : {}),
+      });
+
+      if (opts.json) {
+        process.stdout.write(`${JSON.stringify(page, null, 2)}\n`);
+        return;
+      }
+
+      process.stdout.write(`${renderMemoryListPage(page)}\n`);
+    });
+
+  program
+    .command('inspect-memory')
+    .description('Show one memory item in full: text, references, trust, conflict, access history')
+    .argument('<id>', 'Memory item id, or the id of the note behind it')
+    .option('--json', 'Emit the inspection as JSON')
+    .action((id: string, opts: { json?: boolean }) => {
+      const { store } = openCortexDb(process.cwd());
+      // Refresh current truth first so reference statuses describe the
+      // checkout as it is now, not as it was at the last retrieval. This
+      // creates no session — reading memory must not manufacture history.
+      refreshCurrentGraphQuietly(store, process.cwd());
+
+      const inspection = inspectMemory(store, id);
+      if (!inspection) {
+        process.stderr.write(
+          `No memory item found for id "${id}". List ids with: cortex list-memory\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      if (opts.json) {
+        process.stdout.write(`${JSON.stringify(inspection, null, 2)}\n`);
+        return;
+      }
+
+      process.stdout.write(`${renderMemoryInspection(inspection)}\n`);
     });
 
   program

@@ -2131,3 +2131,228 @@ describe('CortexStore — auto-demotion on supersede', () => {
     expect(itemFor(blocker.id).state).toBe('hot');
   });
 });
+
+// ── Memory item listing and inspection queries (FR-21) ────────────────
+
+describe('CortexStore — filtered memory item listing', () => {
+  let db: Database.Database;
+  let store: CortexStore;
+
+  beforeEach(() => {
+    db = createTestDb();
+    store = new CortexStore(db);
+  });
+
+  function seed(opts: {
+    id: string;
+    scopeKey?: string;
+    kind?: string;
+    state?: 'pinned' | 'hot' | 'warm' | 'cold' | 'archived';
+    createdAt?: string;
+  }): void {
+    store.upsertMemoryItem({
+      id: opts.id,
+      scopeType: 'project',
+      scopeKey: opts.scopeKey ?? 'scope-a',
+      kind: opts.kind ?? 'note:decision',
+      text: `text for ${opts.id}`,
+      state: opts.state ?? 'warm',
+      createdAt: opts.createdAt ?? '2026-07-01T00:00:00.000Z',
+    });
+  }
+
+  it('with no filters returns every item, including archived ones', () => {
+    seed({ id: 'i-warm' });
+    seed({ id: 'i-archived', state: 'archived' });
+    seed({ id: 'i-cold', state: 'cold' });
+
+    const ids = store.listMemoryItemsFiltered({}).map(item => item.id);
+
+    expect(ids).toHaveLength(3);
+    expect(ids).toContain('i-archived');
+    // The default deliberately differs from listMemoryItemsByScopes, which
+    // hard-excludes archived: an inspection surface must not hide rows.
+    expect(store.listMemoryItemsByScopes(['scope-a'], 100).map(i => i.id)).not.toContain(
+      'i-archived',
+    );
+  });
+
+  it('filters by scope, kind and state independently and in combination', () => {
+    seed({ id: 'a-decision-hot', scopeKey: 'scope-a', kind: 'note:decision', state: 'hot' });
+    seed({ id: 'a-insight-warm', scopeKey: 'scope-a', kind: 'note:insight', state: 'warm' });
+    seed({ id: 'b-decision-warm', scopeKey: 'scope-b', kind: 'note:decision', state: 'warm' });
+
+    // Pre-assert the unfiltered set genuinely contains what each filter must
+    // exclude, so a filter that silently matched everything would fail here.
+    expect(store.listMemoryItemsFiltered({}).map(i => i.id).sort()).toEqual([
+      'a-decision-hot',
+      'a-insight-warm',
+      'b-decision-warm',
+    ]);
+
+    expect(store.listMemoryItemsFiltered({ scopeKeys: ['scope-a'] }).map(i => i.id).sort()).toEqual(
+      ['a-decision-hot', 'a-insight-warm'],
+    );
+    expect(
+      store.listMemoryItemsFiltered({ kinds: ['note:decision'] }).map(i => i.id).sort(),
+    ).toEqual(['a-decision-hot', 'b-decision-warm']);
+    expect(store.listMemoryItemsFiltered({ states: ['warm'] }).map(i => i.id).sort()).toEqual([
+      'a-insight-warm',
+      'b-decision-warm',
+    ]);
+    expect(
+      store
+        .listMemoryItemsFiltered({ scopeKeys: ['scope-a'], kinds: ['note:decision'], states: ['hot'] })
+        .map(i => i.id),
+    ).toEqual(['a-decision-hot']);
+  });
+
+  it('accepts multiple values per filter', () => {
+    seed({ id: 'k1', kind: 'note:decision' });
+    seed({ id: 'k2', kind: 'note:insight' });
+    seed({ id: 'k3', kind: 'command_run' });
+
+    expect(
+      store
+        .listMemoryItemsFiltered({ kinds: ['note:decision', 'command_run'] })
+        .map(i => i.id)
+        .sort(),
+    ).toEqual(['k1', 'k3']);
+  });
+
+  it('treats an empty filter array as "match nothing", not as "no filter"', () => {
+    seed({ id: 'only' });
+
+    expect(store.listMemoryItemsFiltered({ kinds: [] })).toEqual([]);
+    expect(store.countMemoryItemsFiltered({ kinds: [] })).toBe(0);
+    expect(store.listMemoryItemsFiltered({ scopeKeys: [] })).toEqual([]);
+    expect(store.listMemoryItemsFiltered({ states: [] })).toEqual([]);
+    // undefined means "no filter" — the opposite reading.
+    expect(store.listMemoryItemsFiltered({ kinds: undefined }).map(i => i.id)).toEqual(['only']);
+  });
+
+  it('counts the same set the page is drawn from', () => {
+    for (let i = 0; i < 7; i += 1) {
+      seed({ id: `c${i}`, kind: i < 4 ? 'note:decision' : 'note:insight' });
+    }
+
+    expect(store.countMemoryItemsFiltered({})).toBe(7);
+    expect(store.countMemoryItemsFiltered({ kinds: ['note:decision'] })).toBe(4);
+    // Count must describe the filtered set, not the page.
+    expect(store.listMemoryItemsFiltered({ kinds: ['note:decision'], limit: 2 })).toHaveLength(2);
+    expect(store.countMemoryItemsFiltered({ kinds: ['note:decision'] })).toBe(4);
+  });
+
+  it('paginates identical timestamps without overlap or omission', () => {
+    // Every item shares created_at to the millisecond — exactly what seeding and
+    // same-transaction projection produce. Without a total order, LIMIT/OFFSET
+    // silently repeats some rows and skips others.
+    const sameInstant = '2026-07-01T12:00:00.000Z';
+    for (let i = 0; i < 10; i += 1) {
+      seed({ id: `p${i}`, createdAt: sameInstant });
+    }
+    expect(new Set(store.listMemoryItemsFiltered({}).map(i => i.created_at)).size).toBe(1);
+
+    const first = store.listMemoryItemsFiltered({ limit: 4, offset: 0 }).map(i => i.id);
+    const second = store.listMemoryItemsFiltered({ limit: 4, offset: 4 }).map(i => i.id);
+    const third = store.listMemoryItemsFiltered({ limit: 4, offset: 8 }).map(i => i.id);
+
+    expect(first).toHaveLength(4);
+    expect(second).toHaveLength(4);
+    expect(third).toHaveLength(2);
+
+    const walked = [...first, ...second, ...third];
+    expect(new Set(walked).size).toBe(10);
+    expect(walked.sort()).toEqual(
+      Array.from({ length: 10 }, (_, i) => `p${i}`).sort(),
+    );
+
+    // Set-equality alone is not enough: it holds for any *stable* order, and
+    // SQLite happens to be stable here even without a tiebreaker. Assert the
+    // order itself — dropping `rowid DESC` flips these to ascending.
+    expect(first).toEqual(['p9', 'p8', 'p7', 'p6']);
+    expect(second).toEqual(['p5', 'p4', 'p3', 'p2']);
+    expect(third).toEqual(['p1', 'p0']);
+  });
+
+  it('orders newest first', () => {
+    seed({ id: 'old', createdAt: '2026-07-01T00:00:00.000Z' });
+    seed({ id: 'new', createdAt: '2026-07-05T00:00:00.000Z' });
+    seed({ id: 'mid', createdAt: '2026-07-03T00:00:00.000Z' });
+
+    expect(store.listMemoryItemsFiltered({}).map(i => i.id)).toEqual(['new', 'mid', 'old']);
+  });
+});
+
+describe('CortexStore — retrieval log lookup by memory item', () => {
+  let db: Database.Database;
+  let store: CortexStore;
+  let sessionId: string;
+
+  beforeEach(() => {
+    db = createTestDb();
+    store = new CortexStore(db);
+    sessionId = store.createSession().id;
+  });
+
+  it('matches an id exactly and never as a substring of another id', () => {
+    // 'item-1' is a strict prefix of 'item-10'. A LIKE '%id%' scan over the
+    // JSON array returns both; json_each compares element values, so it does not.
+    store.insertRetrievalLog({
+      sessionId,
+      topic: 'exact hit',
+      resultIds: ['item-1'],
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    store.insertRetrievalLog({
+      sessionId,
+      topic: 'superstring only',
+      resultIds: ['item-10'],
+      createdAt: '2026-07-02T00:00:00.000Z',
+    });
+
+    const topics = store.getRetrievalLogsForItem('item-1', 10).map(log => log.topic);
+    expect(topics).toEqual(['exact hit']);
+  });
+
+  it('returns the newest entries first, bounded by the limit', () => {
+    for (let i = 0; i < 5; i += 1) {
+      store.insertRetrievalLog({
+        sessionId,
+        topic: `topic-${i}`,
+        resultIds: ['target', 'other'],
+        createdAt: `2026-07-0${i + 1}T00:00:00.000Z`,
+      });
+    }
+
+    const logs = store.getRetrievalLogsForItem('target', 3);
+    expect(logs.map(log => log.topic)).toEqual(['topic-4', 'topic-3', 'topic-2']);
+  });
+
+  it('returns nothing for an item that was never retrieved', () => {
+    store.insertRetrievalLog({ sessionId, topic: 'unrelated', resultIds: ['other'] });
+    expect(store.getRetrievalLogsForItem('never-seen', 10)).toEqual([]);
+  });
+
+  it('survives a row whose result_ids_json is malformed or null', () => {
+    // json_each raises on a malformed value, and the raise aborts the whole
+    // query rather than skipping the row — so one bad row would otherwise make
+    // access history unreadable for every item in the store.
+    store.insertRetrievalLog({
+      sessionId,
+      topic: 'good',
+      resultIds: ['target'],
+      createdAt: '2026-07-02T00:00:00.000Z',
+    });
+    db.prepare(
+      `INSERT INTO retrieval_log (id, session_id, topic, result_ids_json, created_at)
+       VALUES ('bad', ?, 'malformed', 'not json', '2026-07-03T00:00:00.000Z')`,
+    ).run(sessionId);
+    db.prepare(
+      `INSERT INTO retrieval_log (id, session_id, topic, result_ids_json, created_at)
+       VALUES ('nulled', ?, 'null ids', NULL, '2026-07-04T00:00:00.000Z')`,
+    ).run(sessionId);
+
+    expect(store.getRetrievalLogsForItem('target', 10).map(log => log.topic)).toEqual(['good']);
+  });
+});
