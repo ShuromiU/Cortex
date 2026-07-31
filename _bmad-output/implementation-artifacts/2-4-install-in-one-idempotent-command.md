@@ -4,7 +4,7 @@ baseline_commit: 918dd1a
 
 # Story 2.4: Install in one idempotent command
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 

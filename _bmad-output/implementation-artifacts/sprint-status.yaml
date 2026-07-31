@@ -88,7 +88,7 @@ development_status:
   2-1-list-and-inspect-memory: done
   2-2-correct-and-delete-memory: done
   2-3-diagnose-the-installation: done
-  2-4-install-in-one-idempotent-command: backlog
+  2-4-install-in-one-idempotent-command: done
   2-5-relocate-the-store-out-of-the-project-root: backlog
   2-6-bound-the-write-ahead-log: backlog
   2-7-reposition-the-docs: backlog # added 2026-07-28 (replan); docs-only, no dependencies
