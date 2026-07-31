@@ -15,7 +15,7 @@ import {
 } from './doctor.js';
 
 /**
- * One-command installation (FR-24).
+ * One-command installation (FR-26).
  *
  * The command `doctor` diagnoses. Everything here is written so that the two
  * agree by construction rather than by coincidence: the wiring `install` writes
