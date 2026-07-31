@@ -2,7 +2,7 @@
 // Public API re-exports
 
 // Database
-export { openDatabase, applySchema, initializeMeta, getSchemaVersion, ensureCortexSchema, SCHEMA_VERSION } from './db/schema.js';
+export { openDatabase, openDatabaseReadOnly, applySchema, initializeMeta, getSchemaVersion, ensureCortexSchema, SCHEMA_VERSION } from './db/schema.js';
 export { DELETABLE_SOURCE_TABLES, CortexStore, parseCommandRunRow, parseEpisodeRow, parseMemoryItemRow, parseMemoryItemSemanticRow, parseCurrentAppGraphRow, parseMemoryReferenceRow, parseRetrievalLogRow, type SessionRow, type EventRow, type ParsedEvent, type NoteRow, type ParsedNote, type NoteConflict, type InsertedNote, type StateRow, type LedgerRow, type BranchSnapshotRow, type CommandRunRow, type ParsedCommandRun, type EpisodeRow, type ParsedEpisode, type ProjectSnapshotRow, type MemoryItemRow, type ParsedMemoryItem, type MemoryItemSemanticRow, type ParsedMemoryItemSemantic, type CurrentAppGraphRow, type ParsedCurrentAppGraph, type MemoryReferenceStatus, type MemoryReferenceRow, type ParsedMemoryReference, type SemanticMemoryItemResult, type SearchMemoryItemResult, type RetrievalLogRow, type ParsedRetrievalLog, type CreateSessionOpts, type InsertEventOpts, type InsertNoteOpts, type InsertStateOpts, type InsertLedgerOpts, type InsertCommandRunOpts, type InsertEpisodeOpts, type UpsertBranchSnapshotOpts, type UpsertProjectSnapshotOpts, type UpsertMemoryItemOpts, type UpsertMemoryItemSemanticOpts, type UpsertCurrentAppGraphOpts, type UpsertMemoryReferenceOpts, type InsertRetrievalLogOpts, type UpdateMemoryItemStateOpts, type MemoryItemFilter, type ListMemoryItemsOpts, type ParsedMemoryCorrection, type RecordMemoryCorrectionOpts, type TableCounts } from './db/store.js';
 // Capture
 export { handleReadEvent, handleEditEvent, handleWriteEvent, handleCmdEvent, handleAgentEvent } from './capture/hooks.js';
@@ -28,6 +28,7 @@ export { validateMemoryReferences, referenceValidationScore, ReferenceValidator,
 export { validateMemory, type MemoryValidationReport, type MemoryValidationReportItem } from './query/validate-memory.js';
 export { listMemory, inspectMemory, resolvePageLimit, resolvePageOffset, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, MEMORY_LIST_ORDER, ACCESS_HISTORY_LIMIT, type MemoryListOptions, type MemoryListPage, type MemoryInspection, type MemoryConflictStatus, type MemoryConflictCounterpart, type MemoryReferenceDetail, type MemoryAccessHistory, type MemoryAccessRetrieval, type MemoryCorrectionEntry } from './query/inspect.js';
 export { editMemory, deleteMemory, previewMemoryDeletion, type EditMemoryResult, type MemoryDeletionPreview, type MemoryDeletionResult, type DeletionCounterpart } from './query/correct.js';
+export { runDoctor, hookTemplateDigest, readTemplateStamp, expandHookPath, tokenizeCommand, resolveExecutable, extractBakedPaths, collectHookCommands, commandSatisfiesWiring, HOOK_SCRIPTS, TEMPLATE_ID_PLACEHOLDER, SPOOL_THRESHOLD_BYTES, SPOOL_STALE_MS, type CheckStatus, type DoctorCheck, type DoctorReport, type DoctorOptions } from './query/doctor.js';
 export { suggestNotes, type SuggestedNote, type SuggestedNoteKind } from './query/suggest-notes.js';
 export { buildSessionSummary } from './query/summarize.js';
 export { buildSessionBrief, type SessionBriefOptions } from './query/session-brief.js';

@@ -256,4 +256,43 @@ Four items in `deferred-work.md`: Codex wiring is not diagnosed; `install-hooks`
 
 ## Senior Developer Review (AI)
 
-_(populated during code-review)_
+Three parallel layers against `bc1bab7..bba4399`. All three completed; **~22 distinct findings after dedup, 25 patched, 1 dismissed.** Every layer independently ran the full verification suite and reproduced the story's numbers, so nothing below is caught by build, lint, tests or gate.
+
+Two findings arrived from more than one layer independently — the WAL sidecars and the wiring/presence gap. Those two are also the most consequential.
+
+### The three that mattered
+
+**1. The central non-mutation claim was false.** `openDatabaseReadOnly` uses `readonly: true`, which prevents *content* writes — not sidecar creation. Reading a WAL database materialises `-shm` and `-wal`, measured `['.cortex.db']` → `['.cortex.db', '.cortex.db-shm', '.cortex.db-wal']`. README, CLAUDE.md and the module docstring all asserted otherwise.
+
+The test hole is the story's own trap, repeated: the non-mutation test ran only against a project with **no store**, so the single code path that writes was the one path it never executed. Same shape as FR-4's "test against the refresh, not the write", which this story file quotes.
+
+Fixed by telling the truth rather than by hiding it. Opening `immutable=1` would avoid the sidecars and read past the WAL — risking a stale `schema_version`, a wrong answer instead of a tidy one. The docs now state the exception and why; the test asserts the real sidecar set against a real WAL store, and a second test pins that the store's contents are unchanged.
+
+**2. Wiring and presence never met on the same path.** Wiring matches a command by the script's **basename**; presence was checked only inside the directory derived from the *first* wired command. A hook wired to `/nonexistent/dir/cortex-end-of-turn.sh` reported `hook-wiring: PASS`, `hook-scripts: PASS`, `ok: true` — a green report for a hook that cannot run, contradicting this story's own severity table. Presence is now checked at every wired path.
+
+**3. Three hooks gutted to `exit 0` passed everything that inspects them.** Only the stamp line is read from an installed script, so currency structurally cannot catch it, and `node` was graded `warn` when no path was baked at all — inverted, since no path is strictly worse than a missing one. Now: `extractBakedPaths` returning nothing for a script whose template contains `__CORTEX_NODE__` is the gutted-hook detector, and the no-path case is `fail`.
+
+### AC #3 held; "specific" is weaker than "correct"
+
+The Edge Case Hunter swept every reachable status combination and found **no non-passing check without a `fix`**. But four fixes were *present and wrong*, which the AC as written does not forbid:
+
+- a store from a **newer** build was told to "run any `cortex` command to apply pending migrations" — the one action that rewrites `schema_version` **down**, destroying the evidence just reported;
+- a corrupt store was blamed on file permissions;
+- a template shipping without the stamp placeholder named a fix that is a no-op;
+- a malformed `.mcp.json` was swallowed entirely, so a user whose registration sits inside the broken file was told to add one.
+
+All four now name the correct action. Recorded as a gap in the AC, not a violation of it.
+
+### Also fixed
+
+`.cortex.state` as a directory threw `EISDIR` out of `runDoctor` and took the whole report with it · `hook-currency`/`hook-substitution` asserted positive facts about files that were never opened (two of AC #1's nine) · the `PostToolUse` matcher was never inspected, so a matcher missing `Agent` — the pre-0.2 value — reported "all 5 events wired", meaning the fix `doctor` prints could convert a detectable failure into an undetectable one · the SessionStart wiring's own Node and CLI paths were excluded, the exact case the README advertises · quoted `PATH` entries and an empty `PATHEXT` both resolved installed binaries to null · `~/.claude.json`'s project key was matched by exact string · `$CLAUDE_PROJECT_DIR` was not expanded · a spool mtime in the future produced a negative age · a directory at the spool path read as empty · `CORTEX_SPOOL_DIR` silently disabled the whole check · a wiring token with no directory reported `.` as the hooks directory · **every new public symbol was missing from `src/index.ts`**, which 2.1 and 2.2 both remembered.
+
+### Dismissed (1)
+
+`get_diagnostics_for_file` reports `Property 'replaceAll' does not exist` in both test files. `tsconfig.json` excludes `tests/`, so the language server falls back to a default `lib`; `target`/`lib` are `ES2022`, where `replaceAll` is valid, and it works at runtime. Not a defect — but worth knowing that this is the shape a *real* test-only type error would also take, since neither `npm run lint` nor vitest would report one.
+
+### Verification after repair
+
+**960 tests / 31 files green** (879 → 932 → 960). Lint clean. Gate: 8 suites, exact zero delta. Live run still reports the local install out of date and exits 1.
+
+**Mutation campaigns: 45 mutations, 45 killed, 0 unapplied** (25 original + 20 over the repairs). Both repair-round survivors were real coverage gaps rather than equivalent mutants — the no-baked-path branch was reachable through the wiring the README documents but untested, and the `CORTEX_SPOOL_DIR` divergence warning I added had no test at all. Both closed, both mutations re-run and killed.

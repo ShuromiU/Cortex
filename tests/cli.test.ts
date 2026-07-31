@@ -1724,9 +1724,44 @@ function seedSandboxHome(hooksDir: string): string {
 }
 
 describe('cortex doctor', () => {
+  /**
+   * Sandbox `HOME`/`USERPROFILE`/`PATH` for the duration of a call.
+   *
+   * Without it these tests read the developer's real `~/.claude/settings.json`
+   * and real hooks directory, so what they exercise depends on the machine —
+   * the assertions happen to hold either way, which is exactly what makes it a
+   * latent portability fault rather than a visible one.
+   */
+  async function withSandbox<T>(
+    homeDir: string,
+    binDir: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const original = {
+      PATH: process.env['PATH'],
+      HOME: process.env['HOME'],
+      USERPROFILE: process.env['USERPROFILE'],
+    };
+    try {
+      process.env['PATH'] = `${binDir}${path.delimiter}${original.PATH ?? ''}`;
+      // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
+      process.env['HOME'] = homeDir;
+      process.env['USERPROFILE'] = homeDir;
+      return await run();
+    } finally {
+      for (const [key, value] of Object.entries(original)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+
   it('exits non-zero on a broken installation and names a fix for each failure', async () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-doctor-cli-'));
-    const run = await runCommand(cwd, ['doctor']);
+    const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-home-'));
+    const run = await withSandbox(emptyHome, seedFakeBinDir(), () =>
+      runCommand(cwd, ['doctor']),
+    );
 
     // A bare directory has neither engagement state nor a store.
     expect(run.exitCode).toBe(1);
@@ -1739,7 +1774,10 @@ describe('cortex doctor', () => {
 
   it('--json carries the same verdict as the table', async () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-doctor-cli-'));
-    const run = await runCommand(cwd, ['doctor', '--json']);
+    const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-home-'));
+    const run = await withSandbox(emptyHome, seedFakeBinDir(), () =>
+      runCommand(cwd, ['doctor', '--json']),
+    );
     const parsed = JSON.parse(run.stdout) as {
       ok: boolean;
       failures: number;
@@ -1794,37 +1832,20 @@ describe('cortex doctor', () => {
     const cwd = seedTempProject(() => {});
     fs.writeFileSync(deriveEngagementPath(cwd), 'enabled=true\n');
 
-    const originalPath = process.env['PATH'];
-    const originalHome = process.env['HOME'];
-    const originalUserProfile = process.env['USERPROFILE'];
-    try {
-      process.env['PATH'] = `${binDir}${path.delimiter}${originalPath ?? ''}`;
-      // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
-      process.env['HOME'] = homeDir;
-      process.env['USERPROFILE'] = homeDir;
+    const run = await withSandbox(homeDir, binDir, () => runCommand(cwd, ['doctor', '--json']));
+    const parsed = JSON.parse(run.stdout) as {
+      ok: boolean;
+      checks: Array<{ id: string; status: string; detail: string }>;
+    };
+    const currency = parsed.checks.find(check => check.id === 'hook-currency');
+    expect(`${currency?.status}: ${currency?.detail}`).toBe(
+      'pass: installed scripts match the templates shipped by this build',
+    );
 
-      const run = await runCommand(cwd, ['doctor', '--json']);
-      const parsed = JSON.parse(run.stdout) as {
-        ok: boolean;
-        checks: Array<{ id: string; status: string; detail: string }>;
-      };
-      const currency = parsed.checks.find(check => check.id === 'hook-currency');
-      expect(`${currency?.status}: ${currency?.detail}`).toBe(
-        'pass: installed scripts match the templates shipped by this build',
-      );
-
-      const failing = parsed.checks.filter(check => check.status !== 'pass');
-      expect(failing.map(check => `${check.id}: ${check.detail}`)).toEqual([]);
-      expect(parsed.ok).toBe(true);
-      expect(run.exitCode).toBeUndefined();
-    } finally {
-      if (originalPath === undefined) delete process.env['PATH'];
-      else process.env['PATH'] = originalPath;
-      if (originalHome === undefined) delete process.env['HOME'];
-      else process.env['HOME'] = originalHome;
-      if (originalUserProfile === undefined) delete process.env['USERPROFILE'];
-      else process.env['USERPROFILE'] = originalUserProfile;
-    }
+    const failing = parsed.checks.filter(check => check.status !== 'pass');
+    expect(failing.map(check => `${check.id}: ${check.detail}`)).toEqual([]);
+    expect(parsed.ok).toBe(true);
+    expect(run.exitCode).toBeUndefined();
   });
 });
 

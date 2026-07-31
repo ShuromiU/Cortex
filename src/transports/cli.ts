@@ -227,7 +227,7 @@ const CHECK_BADGE: Record<DoctorCheck['status'], string> = {
 export function renderDoctorReport(report: DoctorReport): string {
   const lines: string[] = [
     `Cortex doctor — ${collapseToLine(report.project)}`,
-    `Hooks directory: ${collapseToLine(report.hooks_dir ?? '(none configured)')}`,
+    `Hooks directory: ${collapseToLine(report.hooks_dir)}`,
     '',
   ];
 
@@ -1094,7 +1094,10 @@ export function createProgram(): Command {
     // flushes the spool: a diagnostic that repairs what it is checking cannot
     // report on it.
     .option('--json', 'Emit the raw report instead of the table')
-    .option('--hooks-dir <path>', 'Diagnose hooks in this directory instead of the configured one')
+    .option(
+      '--hooks-dir <path>',
+      'Diagnose hook scripts in this directory instead of the one the wiring names',
+    )
     .action((opts: { json?: boolean; hooksDir?: string }) => {
       const report = runDoctor({
         projectDir: process.cwd(),

@@ -12,7 +12,8 @@ import {
   SPOOL_THRESHOLD_BYTES,
   TEMPLATE_ID_PLACEHOLDER,
   collectHookCommands,
-  expandHome,
+  commandSatisfiesWiring,
+  expandHookPath,
   extractBakedPaths,
   hookTemplateDigest,
   readTemplateStamp,
@@ -121,6 +122,9 @@ function buildFixture(): Fixture {
   writeFile(path.join(projectDir, '.cortex.state'), 'enabled=true\n');
 
   const db = new Database(path.join(projectDir, '.cortex.db'));
+  // WAL, matching `openDatabase` — the mode every real store is in, and the
+  // reason a read-only open has anything to create.
+  db.pragma('journal_mode = WAL');
   applySchema(db);
   initializeMeta(db, projectDir);
   db.close();
@@ -179,6 +183,7 @@ describe('runDoctor on a healthy installation', () => {
     const report = doctor(buildFixture());
     expect(report.checks.map(check => check.id).sort()).toEqual(
       [
+        'capture-matcher',
         'database',
         'engagement',
         'hook-currency',
@@ -381,11 +386,21 @@ describe('interpreter resolution (AC #5, N-6)', () => {
   });
 
   it('expands ~ the way the shell does', () => {
-    expect(expandHome('~/x/y', '/home/me')).toBe(path.join('/home/me', 'x/y'));
-    expect(expandHome('~', '/home/me')).toBe('/home/me');
+    expect(expandHookPath('~/x/y', '/home/me', '/proj')).toBe(path.join('/home/me', 'x/y'));
+    expect(expandHookPath('~', '/home/me', '/proj')).toBe('/home/me');
     // Not a home reference: leave it alone.
-    expect(expandHome('~user/x', '/home/me')).toBe('~user/x');
-    expect(expandHome('/abs/x', '/home/me')).toBe('/abs/x');
+    expect(expandHookPath('~user/x', '/home/me', '/proj')).toBe('~user/x');
+    expect(expandHookPath('/abs/x', '/home/me', '/proj')).toBe('/abs/x');
+  });
+
+  it('expands $CLAUDE_PROJECT_DIR, both spellings', () => {
+    // Claude Code's documented form for a project-relative hook path. Left
+    // unexpanded it produced three false FAILs and printed the literal
+    // variable back at the user as the hooks directory.
+    expect(expandHookPath('$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh', '/home/me', '/proj')).toBe(
+      '/proj/.claude/hooks/x.sh',
+    );
+    expect(expandHookPath('${CLAUDE_PROJECT_DIR}/x.sh', '/home/me', '/proj')).toBe('/proj/x.sh');
   });
 
   it('tokenizes commands the way a shell would', () => {
@@ -624,9 +639,9 @@ describe('settings discovery', () => {
         },
       }),
     ).toEqual([
-      { event: 'Stop', command: 'a' },
-      { event: 'Stop', command: 'b' },
-      { event: 'PreToolUse', command: 'c' },
+      { event: 'Stop', command: 'a', matcher: null },
+      { event: 'Stop', command: 'b', matcher: null },
+      { event: 'PreToolUse', command: 'c', matcher: 'Edit' },
     ]);
     expect(collectHookCommands({})).toEqual([]);
     expect(collectHookCommands({ hooks: null })).toEqual([]);
@@ -754,10 +769,442 @@ describe('database reachability', () => {
     expect(detailOf(report, 'database')).toContain(`schema_version ${SCHEMA_VERSION}`);
   });
 
-  it('fails a file that is not a database', () => {
+  it('fails a file that is not a database, and does not blame permissions', () => {
     const fixture = buildFixture();
     fs.writeFileSync(path.join(fixture.projectDir, '.cortex.db'), 'not a database at all');
     const report = doctor(fixture);
     expect(statusOf(report, 'database')).toBe('fail');
+
+    // A corrupt store and an unreadable one need different answers. Naming
+    // permissions for a file SQLite rejected as "not a database" sends the
+    // user after the wrong thing — AC #3 asks for the *specific* fix.
+    const fix = report.checks.find(check => check.id === 'database')?.fix ?? '';
+    expect(fix).not.toMatch(/permission/i);
+    expect(fix).toContain('Move it aside');
+  });
+
+  it('names upgrading, not migrating, for a store written by a newer build', () => {
+    const fixture = buildFixture();
+    const dbPath = path.join(fixture.projectDir, '.cortex.db');
+    const seed = new Database(dbPath);
+    seed.prepare('UPDATE meta SET value = ? WHERE key = ?').run(String(SCHEMA_VERSION + 4), 'schema_version');
+    seed.close();
+
+    const report = doctor(fixture);
+    expect(statusOf(report, 'database')).toBe('fail');
+    // Migrations are additive only, and the "run any cortex command" path
+    // rewrites schema_version *down* — the one action that destroys the
+    // evidence this check just reported.
+    const fix = report.checks.find(check => check.id === 'database')?.fix ?? '';
+    expect(fix).not.toContain('apply pending migrations');
+    expect(fix).toContain('Upgrade the package');
+  });
+});
+
+// ── The non-mutation claim, checked against a real store ──────────────
+
+describe('what a doctor run actually writes', () => {
+  it('creates the WAL sidecars a read-only open requires, and nothing else', () => {
+    // The original non-mutation test ran only against a project with NO store,
+    // so the single code path that writes was the one path it never executed.
+    // Reading a WAL database materialises its -shm; `readonly: true` prevents
+    // content writes, not sidecar creation. Pinned so the documented claim and
+    // the behaviour cannot drift apart again.
+    const fixture = buildFixture();
+    const dbPath = path.join(fixture.projectDir, '.cortex.db');
+    for (const sidecar of ['-shm', '-wal']) {
+      fs.rmSync(`${dbPath}${sidecar}`, { force: true });
+    }
+
+    const before = fs.readdirSync(fixture.projectDir).sort();
+    expect(before).toEqual(['.cortex.db', '.cortex.state']);
+
+    doctor(fixture);
+
+    const after = fs.readdirSync(fixture.projectDir).sort();
+    expect(after).toEqual(['.cortex.db', '.cortex.db-shm', '.cortex.db-wal', '.cortex.state']);
+  });
+
+  it('does not alter the store contents it reads', () => {
+    const fixture = buildFixture();
+    const dbPath = path.join(fixture.projectDir, '.cortex.db');
+    // Closed explicitly: an open handle blocks the temp-dir cleanup on Windows.
+    const readMeta = (): unknown[] => {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        return db.prepare('SELECT key, value FROM meta ORDER BY key').all();
+      } finally {
+        db.close();
+      }
+    };
+
+    const before = readMeta();
+    doctor(fixture);
+    expect(readMeta()).toEqual(before);
+  });
+});
+
+// ── Repairs from the story 2.3 review ─────────────────────────────────
+
+describe('a hook wired to a script that does not exist', () => {
+  it('fails, rather than passing because another hook found its directory', () => {
+    // Wiring matches a command by the script's basename; presence used to be
+    // checked only inside the directory derived from the FIRST wired command.
+    // The two never met on the same path, so a hook pointing at a directory
+    // that does not exist reported fully healthy.
+    const fixture = buildFixture();
+    expect(doctor(fixture).ok).toBe(true);
+
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as Record<string, unknown>;
+    (settings['hooks'] as Record<string, unknown>)['Stop'] = [
+      { hooks: [{ type: 'command', command: 'bash /nonexistent/dir/cortex-end-of-turn.sh' }] },
+    ];
+    fs.writeFileSync(settingsPath, JSON.stringify(settings));
+
+    const report = doctor(fixture);
+    expect(statusOf(report, 'hook-wiring')).toBe('pass');
+    expect(statusOf(report, 'hook-scripts')).toBe('fail');
+    expect(detailOf(report, 'hook-scripts')).toContain('cortex-end-of-turn.sh');
+    expect(report.ok).toBe(false);
+  });
+});
+
+describe('hooks gutted to a stub', () => {
+  it('does not produce a green report', () => {
+    // Three scripts replaced with `exit 0`, each carrying a valid stamp.
+    // Capture, reflex and end-of-turn are all dead. Only the stamp line is
+    // read from an installed script, so currency cannot catch this — the
+    // Node-resolution check is what must.
+    const fixture = buildFixture();
+    expect(doctor(fixture).ok).toBe(true);
+
+    for (const script of HOOK_SCRIPTS) {
+      const template = fs.readFileSync(path.join(fixture.templateDir, script), 'utf8');
+      fs.writeFileSync(
+        path.join(fixture.hooksDir, script),
+        `#!/bin/bash\n# cortex-hook-template: ${hookTemplateDigest(template)}\nexit 0\n`,
+      );
+    }
+
+    const report = doctor(fixture);
+    expect(statusOf(report, 'hook-currency')).toBe('pass');
+    expect(statusOf(report, 'node')).toBe('fail');
+    expect(report.ok).toBe(false);
+  });
+});
+
+describe('checks that must not speak about files they never opened', () => {
+  it('reports currency and substitution as not checked when no script exists', () => {
+    const fixture = buildFixture();
+    for (const script of HOOK_SCRIPTS) {
+      fs.rmSync(path.join(fixture.hooksDir, script));
+    }
+
+    const report = doctor(fixture);
+    expect(statusOf(report, 'hook-scripts')).toBe('fail');
+    // Previously both fell through to their pass branches and asserted
+    // positive facts about files that do not exist — two of the nine things
+    // AC #1 names, reported as verified when nothing was verified.
+    expect(statusOf(report, 'hook-substitution')).toBe('fail');
+    expect(detailOf(report, 'hook-substitution')).toContain('not checked');
+    expect(statusOf(report, 'hook-currency')).toBe('fail');
+    expect(detailOf(report, 'hook-currency')).toContain('not checked');
+  });
+
+  it('fails Node resolution when nothing in the wiring names a Node path at all', () => {
+    // Reachable with the wiring the README documents: `cortex inject-header
+    // --quiet` invokes the installed bin rather than an absolute node path, so
+    // with the scripts also missing there is no baked path anywhere. Nothing
+    // in the wiring can reach Cortex — strictly worse than a path that is
+    // merely missing, so it must not be graded `warn`.
+    const fixture = buildFixture();
+    for (const script of HOOK_SCRIPTS) {
+      fs.rmSync(path.join(fixture.hooksDir, script));
+    }
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as Record<string, unknown>;
+    (settings['hooks'] as Record<string, unknown>)['SessionStart'] = [
+      { hooks: [{ type: 'command', command: 'cortex inject-header --quiet' }] },
+    ];
+    fs.writeFileSync(settingsPath, JSON.stringify(settings));
+
+    const report = doctor(fixture);
+    expect(statusOf(report, 'node')).toBe('fail');
+    expect(detailOf(report, 'node')).toContain('no Node or CLI path');
+    expect(report.ok).toBe(false);
+  });
+
+  it('fails a template that ships without the stamp placeholder, and says re-installing will not help', () => {
+    const fixture = buildFixture();
+    const templatePath = path.join(fixture.templateDir, 'cortex-capture.sh');
+    fs.writeFileSync(
+      templatePath,
+      fs
+        .readFileSync(templatePath, 'utf8')
+        .split('\n')
+        .filter(line => !line.includes(TEMPLATE_ID_PLACEHOLDER))
+        .join('\n'),
+    );
+
+    const report = doctor(fixture);
+    expect(statusOf(report, 'hook-currency')).toBe('fail');
+    // Naming the install command here would be a fix that cannot work: the
+    // installer has nothing to substitute, so the failure is permanent.
+    const fix = report.checks.find(check => check.id === 'hook-currency')?.fix ?? '';
+    expect(fix).toContain('Reinstall the cortex-memory package');
+    expect(fix).toContain('cannot fix this');
+  });
+});
+
+describe('engagement state that is not a readable file', () => {
+  it('reports it instead of losing the whole report', () => {
+    const fixture = buildFixture();
+    const statePath = deriveEngagementPath(fixture.projectDir);
+    fs.rmSync(statePath);
+    fs.mkdirSync(statePath);
+
+    // The unguarded read threw EISDIR out of runDoctor: one malformed path
+    // took down every other check with it.
+    const report = doctor(fixture);
+    expect(statusOf(report, 'engagement')).toBe('fail');
+    expect(detailOf(report, 'engagement')).toContain('could not be read');
+    expect(report.checks.length).toBeGreaterThan(10);
+  });
+});
+
+describe('malformed registration files', () => {
+  it('reports a .mcp.json that does not parse instead of calling it absent', () => {
+    const fixture = buildFixture();
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as Record<string, unknown>;
+    delete settings['mcpServers'];
+    fs.writeFileSync(settingsPath, JSON.stringify(settings));
+    writeFile(path.join(fixture.projectDir, '.mcp.json'), '{ "mcpServers": { "cortex":');
+
+    const report = doctor(fixture);
+    expect(statusOf(report, 'mcp')).toBe('fail');
+    // The old message told a user to add a registration that may already be
+    // sitting in the file that does not parse.
+    expect(detailOf(report, 'mcp')).toContain('does not parse');
+    expect(report.checks.find(check => check.id === 'mcp')?.fix).toContain('JSON syntax');
+  });
+
+  it('matches the ~/.claude.json project key across separator and case', () => {
+    const fixture = buildFixture();
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as Record<string, unknown>;
+    delete settings['mcpServers'];
+    fs.writeFileSync(settingsPath, JSON.stringify(settings));
+
+    const otherSpelling = fixture.projectDir.replace(/\\/g, '/').toUpperCase();
+    writeFile(
+      path.join(fixture.homeDir, '.claude.json'),
+      JSON.stringify({
+        projects: { [otherSpelling]: { mcpServers: { cortex: { command: 'cortex' } } } },
+      }),
+    );
+
+    expect(statusOf(doctor(fixture), 'mcp')).toBe('pass');
+  });
+});
+
+describe('PATH parsing', () => {
+  it('resolves through a quoted PATH entry, which cmd.exe accepts', () => {
+    const fixture = buildFixture();
+    const quoted = { ...fixture.env, PATH: `"${fixture.binDir}"` };
+    expect(resolveExecutable('jq', quoted, 'win32', fixture.homeDir)).toBe(
+      path.join(fixture.binDir, 'jq.exe'),
+    );
+  });
+
+  it('falls back when PATHEXT is present but empty', () => {
+    const fixture = buildFixture();
+    // `??` alone keeps the empty string and probes no extension at all, so
+    // every .exe on the machine resolves to null.
+    const empty = { PATH: fixture.binDir, PATHEXT: '' };
+    expect(resolveExecutable('jq', empty, 'win32', fixture.homeDir)).toBe(
+      path.join(fixture.binDir, 'jq.exe'),
+    );
+  });
+
+  it('ignores a trailing separator without treating it as a directory', () => {
+    const fixture = buildFixture();
+    const trailing = { ...fixture.env, PATH: `${fixture.binDir};;` };
+    expect(resolveExecutable('jq', trailing, 'win32', fixture.homeDir)).toBe(
+      path.join(fixture.binDir, 'jq.exe'),
+    );
+  });
+});
+
+describe('spool boundaries', () => {
+  const spoolName = '.cortex.spool.jsonl';
+
+  it('does not report a negative age when the mtime is in the future', () => {
+    const fixture = buildFixture();
+    const spoolPath = path.join(fixture.projectDir, spoolName);
+    fs.writeFileSync(spoolPath, '{"v":1}\n');
+    // Clock skew, a restored backup, or a network filesystem.
+    const past = new Date(fs.statSync(spoolPath).mtime.getTime() - 3 * 60 * 60 * 1000);
+
+    const report = doctor(fixture, { now: past });
+    expect(statusOf(report, 'spool')).toBe('pass');
+    expect(detailOf(report, 'spool')).toContain('0s ago');
+    expect(detailOf(report, 'spool')).not.toContain('-');
+  });
+
+  it('warns when CORTEX_SPOOL_DIR points the Node side away from what the hook writes', () => {
+    // `cortex-capture.sh` hard-codes `$CWD/.cortex.spool.jsonl`, while
+    // `deriveSpoolPath` honours the override — so with it set, the flush reads
+    // one path while the hook appends to another and the backlog is never
+    // collected. Reading through `deriveSpoolPath` here reported "nothing
+    // pending" over exactly that backlog.
+    const fixture = buildFixture();
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-spool-'));
+    const original = process.env['CORTEX_SPOOL_DIR'];
+    try {
+      process.env['CORTEX_SPOOL_DIR'] = elsewhere;
+      fs.writeFileSync(path.join(fixture.projectDir, spoolName), '{"v":1}\n');
+
+      const report = doctor(fixture);
+      expect(statusOf(report, 'spool')).toBe('warn');
+      expect(detailOf(report, 'spool')).toContain('CORTEX_SPOOL_DIR');
+      expect(detailOf(report, 'spool')).toContain('disagree');
+    } finally {
+      if (original === undefined) delete process.env['CORTEX_SPOOL_DIR'];
+      else process.env['CORTEX_SPOOL_DIR'] = original;
+    }
+  });
+
+  it('fails a directory sitting at the spool path', () => {
+    const fixture = buildFixture();
+    fs.mkdirSync(path.join(fixture.projectDir, spoolName));
+    const report = doctor(fixture);
+    expect(statusOf(report, 'spool')).toBe('fail');
+    expect(detailOf(report, 'spool')).toContain('not a file');
+  });
+
+  it('pins the flush threshold to the value the capture hook uses', () => {
+    // Duplicated constant: `doctor.ts` and `cortex-capture.sh` each carry the
+    // literal. CLAUDE.md requires this class of duplication to be pinned by
+    // test rather than by comment.
+    const script = fs.readFileSync('hooks/claude/cortex-capture.sh', 'utf8');
+    const match = /-ge\s+(\d+)/.exec(script);
+    expect(match, 'no threshold comparison found in cortex-capture.sh').toBeTruthy();
+    expect(Number(match![1])).toBe(SPOOL_THRESHOLD_BYTES);
+  });
+});
+
+describe('capture matcher', () => {
+  it('warns when the matcher has lost Agent, and names what that costs', () => {
+    // The pre-Story-0.2 value. Without this check, a user who re-copies the
+    // scripts after a currency failure but never re-merges the printed JSON
+    // gets a green currency row and dead subagent capture.
+    const fixture = buildFixture();
+    expect(statusOf(doctor(fixture), 'capture-matcher')).toBe('pass');
+
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    fs.writeFileSync(
+      settingsPath,
+      fs.readFileSync(settingsPath, 'utf8').replace('Read|Edit|Write|Bash|Agent', 'Read|Edit|Write|Bash'),
+    );
+
+    const report = doctor(fixture);
+    expect(statusOf(report, 'capture-matcher')).toBe('warn');
+    expect(detailOf(report, 'capture-matcher')).toContain('Agent');
+    expect(detailOf(report, 'capture-matcher')).toContain('primary session');
+    // A narrowed matcher can be deliberate, so it must not break CI.
+    expect(report.ok).toBe(true);
+  });
+
+  it('accepts an absent matcher, which fires on every tool', () => {
+    const fixture = buildFixture();
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as Record<string, unknown>;
+    const post = (settings['hooks'] as Record<string, Array<Record<string, unknown>>>)['PostToolUse']!;
+    delete post[0]!['matcher'];
+    fs.writeFileSync(settingsPath, JSON.stringify(settings));
+
+    expect(statusOf(doctor(fixture), 'capture-matcher')).toBe('pass');
+  });
+});
+
+describe('the SessionStart wiring names its own Node and CLI', () => {
+  it('fails when that Node path no longer exists', () => {
+    // Excluded before, because only `.sh` commands were inspected — so the one
+    // case the README advertises ("a Node that moved") went undetected
+    // whenever the settings path differed from the pair baked into the scripts.
+    const fixture = buildFixture();
+    expect(statusOf(doctor(fixture), 'node')).toBe('pass');
+
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as Record<string, unknown>;
+    (settings['hooks'] as Record<string, unknown>)['SessionStart'] = [
+      { hooks: [{ type: 'command', command: '"C:/gone/node.exe" "C:/gone/cli.js" inject-header --quiet' }] },
+    ];
+    fs.writeFileSync(settingsPath, JSON.stringify(settings));
+
+    const report = doctor(fixture);
+    expect(statusOf(report, 'node')).toBe('fail');
+    expect(detailOf(report, 'node')).toContain('node.exe');
+  });
+});
+
+describe('commandSatisfiesWiring', () => {
+  const wiring = {
+    reflectPre: { event: 'PreToolUse', label: '', script: 'cortex-reflect.sh', action: 'reflect-pre' },
+    prompt: {
+      event: 'UserPromptSubmit',
+      label: '',
+      script: 'cortex-reflect.sh',
+      action: 'reflect-prompt',
+      actionOptionalUnless: 'reflect-pre',
+    },
+    session: { event: 'SessionStart', label: '', token: 'inject-header' },
+  };
+
+  it('matches quoted and unquoted, ~ and absolute', () => {
+    expect(commandSatisfiesWiring('bash ~/.claude/hooks/cortex-reflect.sh reflect-pre', wiring.reflectPre)).toBe(true);
+    expect(commandSatisfiesWiring('bash "C:/h/cortex-reflect.sh" reflect-pre', wiring.reflectPre)).toBe(true);
+    expect(commandSatisfiesWiring('bash C:\\h\\cortex-reflect.sh reflect-pre', wiring.reflectPre)).toBe(true);
+  });
+
+  it('rejects a path that merely ends with the letters', () => {
+    expect(commandSatisfiesWiring('bash ~/h/not-cortex-reflect.sh reflect-pre', wiring.reflectPre)).toBe(false);
+  });
+
+  it('applies the default-action rule only when no explicit action contradicts it', () => {
+    expect(commandSatisfiesWiring('bash ~/h/cortex-reflect.sh', wiring.prompt)).toBe(true);
+    expect(commandSatisfiesWiring('bash ~/h/cortex-reflect.sh reflect-prompt', wiring.prompt)).toBe(true);
+    expect(commandSatisfiesWiring('bash ~/h/cortex-reflect.sh reflect-pre', wiring.prompt)).toBe(false);
+  });
+
+  it('requires a plain token when the wiring names one', () => {
+    expect(commandSatisfiesWiring('cortex inject-header --quiet', wiring.session)).toBe(true);
+    expect(commandSatisfiesWiring('cortex status', wiring.session)).toBe(false);
+  });
+});
+
+describe('hooks directory resolution', () => {
+  it('resolves a wiring token with no directory against the project', () => {
+    const fixture = buildFixture();
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    fs.writeFileSync(
+      settingsPath,
+      fs.readFileSync(settingsPath, 'utf8').replaceAll('~/.claude/hooks/', ''),
+    );
+
+    // Previously `path.dirname('cortex-capture.sh')` yielded '.', which was
+    // reported as the hooks directory and probed against process.cwd().
+    const report = doctor(fixture);
+    expect(report.hooks_dir).toBe(path.normalize(fixture.projectDir));
+    expect(report.hooks_dir).not.toBe('.');
+  });
+
+  it('expands ~ in an explicit --hooks-dir', () => {
+    const fixture = buildFixture();
+    const report = doctor(fixture, { hooksDir: '~/.claude/hooks' });
+    expect(report.hooks_dir).toBe(path.normalize(path.join(fixture.homeDir, '.claude', 'hooks')));
+    expect(statusOf(report, 'hook-scripts')).toBe('pass');
   });
 });

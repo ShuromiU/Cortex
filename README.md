@@ -139,7 +139,7 @@ The spool (`.cortex.spool.jsonl`) is flushed at turn end, at a 256 KiB threshold
 
 A session is identified by `(scope_key, agent_id)`. Each spool line carries the `agent_id` and `agent_type` the host reported, so the flush files a subagent's reads, edits and commands under a child session of its own — recording `parent_session_id` and inheriting the parent's scope — instead of merging them into the parent's timeline. A line without an `agent_id`, including every line written by a hook installed before this existed, resolves to the primary session. A subagent's tool call never rotates or ends the session that dispatched it, and ending a session ends its children so they stay reachable by consolidation and GC.
 
-Branch snapshots, scoped session listings and the recent-session tail read primary sessions only; child timelines are reached explicitly. If you upgraded the package but subagent activity still lands on the parent, your installed `cortex-capture.sh` predates the change — re-run `cortex install-hooks --claude`. `cortex doctor` detects exactly that.
+Branch snapshots, scoped session listings and the recent-session tail read primary sessions only; child timelines are reached explicitly. If you upgraded the package but subagent activity still lands on the parent, one of two things is stale: the installed `cortex-capture.sh` predates the change, or the `PostToolUse` matcher in your settings no longer lists `Agent`. `cortex doctor` reports both — the first as a failing hook-currency check, the second as a capture-matcher warning. Re-running `cortex install-hooks --claude` fixes the script; the matcher needs the printed JSON merged into settings, which is why the doctor checks them separately.
 
 ## Diagnosing the installation
 
@@ -149,7 +149,7 @@ cortex doctor
 
 Cortex fails quietly. A hook that never fires, a `jq` that fell off `PATH`, a Node that moved — each of them produces an empty memory rather than an error, and an empty memory is indistinguishable from a project you have not worked in yet. `cortex doctor` is how you tell the difference.
 
-It reports engagement state, hook wiring, hook script presence, placeholder substitution, hook version currency, the configured interpreter, `jq`, the Node and CLI paths baked into the installed hooks, database reachability and schema version, spool size and staleness, and MCP server registration. Every non-passing check names the command that fixes it. `--json` emits the same report for scripting.
+It reports which settings files were readable, engagement state, hook wiring, the `PostToolUse` capture matcher, hook script presence, placeholder substitution, hook version currency, the configured interpreter, `jq`, the Node and CLI paths the wiring will invoke, database reachability and schema version, spool size and staleness, and MCP server registration. Every non-passing check names a specific fix — usually a command to run, sometimes an edit to make (a JSON syntax error, a missing binary). `--json` emits the same report for scripting.
 
 Exit codes: **1 if any check fails, 0 otherwise** — so it can gate CI. Warnings do not fail the run; a project you deliberately disengaged with `cortex_disengage` warns and exits 0.
 
@@ -158,9 +158,12 @@ The check worth knowing about is **hook version currency**. A hook script instal
 Two limits, stated rather than implied:
 
 - `jq` and the hook interpreter are **located on `PATH`, not executed**. A binary that is present but broken resolves and is reported available. This keeps the run under the 3-second budget without spawning a process per check.
+- Hook scripts are read for their template stamp and their Node invocation, **not otherwise validated**. A script whose body was edited but which still carries a current stamp and still invokes Cortex is reported healthy. The currency check answers "does this predate the shipped template", not "has this been modified".
 - The diagnostic reads Claude Code's settings files (`<project>/.claude/settings.json`, `<project>/.claude/settings.local.json`, `~/.claude/settings.json`) and MCP registration from those plus `<project>/.mcp.json` and `~/.claude.json`. Codex wiring is not inspected.
 
-`cortex doctor` creates nothing and changes nothing — no session, no store, no engagement write, no schema migration. Running it against a project with no database reports the missing database rather than creating one.
+`cortex doctor` changes nothing it reports on: no session, no engagement write, no schema migration, no spool flush, and no store created where none exists — running it against a project with no database reports the missing database rather than creating one.
+
+It is not literally write-free, and the one exception is worth stating plainly: reading a **WAL-mode** database creates the `.cortex.db-shm` and `.cortex.db-wal` sidecars when they are absent. That is SQLite's requirement for reading WAL at all rather than a choice Cortex makes — a read-only connection prevents content writes, not sidecar creation. The alternative, opening the store as immutable, would read past the WAL and could report a stale `schema_version`; a wrong answer is worse than a tidy one. On a checkout where those files cannot be created, the database check reports the store as unopenable.
 
 ## Retrieval Quality Gate
 
