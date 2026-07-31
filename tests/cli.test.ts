@@ -3,7 +3,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { Command } from 'commander';
-import { createProgram } from '../src/transports/cli.js';
+import { createProgram, renderDoctorReport } from '../src/transports/cli.js';
+import type { DoctorCheck, DoctorReport } from '../src/query/doctor.js';
 import { deriveEngagementPath } from '../src/transports/mcp.js';
 import { openDatabase, ensureCortexSchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
@@ -1672,5 +1673,217 @@ describe('cortex inspect-memory — repairs', () => {
     const text = await runCommand(cwd, ['inspect-memory', noteId]);
     expect(text.stdout).toContain('projection disagrees with the stored note');
     expect(text.stdout).toContain('contested=true');
+  });
+});
+
+// ── doctor (FR-23) ────────────────────────────────────────────────────
+
+/**
+ * A directory holding fake `jq` and `bash`, prepended to PATH so the diagnostic
+ * resolves them without depending on what the runner happens to have
+ * installed. Both bare and `.exe` names, so one fixture serves both platforms.
+ */
+function seedFakeBinDir(): string {
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-bin-'));
+  for (const name of ['jq', 'bash', 'jq.exe', 'bash.exe']) {
+    fs.writeFileSync(path.join(binDir, name), '');
+  }
+  return binDir;
+}
+
+function seedSandboxHome(hooksDir: string): string {
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-home-'));
+  const posixHooks = hooksDir.replace(/\\/g, '/');
+  fs.mkdirSync(path.join(homeDir, '.claude'), { recursive: true });
+  fs.writeFileSync(
+    path.join(homeDir, '.claude', 'settings.json'),
+    JSON.stringify({
+      mcpServers: { cortex: { command: 'cortex', args: ['serve'] } },
+      hooks: {
+        SessionStart: [{ hooks: [{ type: 'command', command: 'cortex inject-header --quiet' }] }],
+        PostToolUse: [
+          { hooks: [{ type: 'command', command: `bash "${posixHooks}/cortex-capture.sh"` }] },
+        ],
+        PreToolUse: [
+          { hooks: [{ type: 'command', command: `bash "${posixHooks}/cortex-reflect.sh" reflect-pre` }] },
+        ],
+        UserPromptSubmit: [
+          {
+            hooks: [
+              { type: 'command', command: `bash "${posixHooks}/cortex-reflect.sh" reflect-prompt` },
+            ],
+          },
+        ],
+        Stop: [
+          { hooks: [{ type: 'command', command: `bash "${posixHooks}/cortex-end-of-turn.sh"` }] },
+        ],
+      },
+    }),
+  );
+  return homeDir;
+}
+
+describe('cortex doctor', () => {
+  it('exits non-zero on a broken installation and names a fix for each failure', async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-doctor-cli-'));
+    const run = await runCommand(cwd, ['doctor']);
+
+    // A bare directory has neither engagement state nor a store.
+    expect(run.exitCode).toBe(1);
+    expect(run.stdout).toContain('Cortex doctor');
+    expect(run.stdout).toContain('FAIL');
+    expect(run.stdout).toContain('fix:');
+    // And it created neither of them while looking.
+    expect(fs.readdirSync(cwd)).toEqual([]);
+  });
+
+  it('--json carries the same verdict as the table', async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-doctor-cli-'));
+    const run = await runCommand(cwd, ['doctor', '--json']);
+    const parsed = JSON.parse(run.stdout) as {
+      ok: boolean;
+      failures: number;
+      checks: Array<{ id: string; status: string; fix?: string }>;
+    };
+
+    expect(run.exitCode).toBe(1);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.failures).toBeGreaterThan(0);
+    expect(parsed.checks.filter(check => check.status === 'fail').length).toBe(parsed.failures);
+    for (const check of parsed.checks.filter(entry => entry.status !== 'pass')) {
+      expect(check.fix, `check ${check.id} has no fix`).toBeTruthy();
+    }
+  });
+
+  it('agrees with install-hooks: a freshly installed hook reports current, and exits zero', async () => {
+    // The round trip is the guarantee. `install-hooks` stamps the template it
+    // rendered; `doctor` recomputes the digest from the same template. If the
+    // two ever disagree, a correct install reports itself out of date forever
+    // and the fix it names does not work.
+    const hooksDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hooks-'));
+    await runCommand(process.cwd(), ['install-hooks', '--dir', hooksDir]);
+
+    for (const script of ['cortex-capture.sh', 'cortex-reflect.sh', 'cortex-end-of-turn.sh']) {
+      const installed = fs.readFileSync(path.join(hooksDir, script), 'utf8');
+      expect(installed).not.toMatch(/__CORTEX_[A-Z_]+__/);
+      expect(installed).toMatch(/# cortex-hook-template: [0-9a-f]{16}/);
+    }
+
+    const binDir = seedFakeBinDir();
+    // `install-hooks` bakes `<module dir>/cli.js` and `<module dir>/hook-entry.js`.
+    // Vitest imports from `src/`, where those are `.ts`, so the baked paths do
+    // not exist under test and the Node-resolution check correctly fails.
+    // Repoint them at real files so the rest of the report can be asserted
+    // green; the template stamp is a separate line and is left untouched, so
+    // this does not weaken the round trip being tested.
+    for (const script of ['cortex-capture.sh', 'cortex-reflect.sh', 'cortex-end-of-turn.sh']) {
+      const installedPath = path.join(hooksDir, script);
+      fs.writeFileSync(
+        installedPath,
+        fs
+          .readFileSync(installedPath, 'utf8')
+          .replaceAll(path.join(process.cwd(), 'src', 'transports', 'cli.js'), path.join(binDir, 'jq'))
+          .replaceAll(
+            path.join(process.cwd(), 'src', 'transports', 'hook-entry.js'),
+            path.join(binDir, 'jq'),
+          ),
+      );
+    }
+
+    const homeDir = seedSandboxHome(hooksDir);
+    const cwd = seedTempProject(() => {});
+    fs.writeFileSync(deriveEngagementPath(cwd), 'enabled=true\n');
+
+    const originalPath = process.env['PATH'];
+    const originalHome = process.env['HOME'];
+    const originalUserProfile = process.env['USERPROFILE'];
+    try {
+      process.env['PATH'] = `${binDir}${path.delimiter}${originalPath ?? ''}`;
+      // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
+      process.env['HOME'] = homeDir;
+      process.env['USERPROFILE'] = homeDir;
+
+      const run = await runCommand(cwd, ['doctor', '--json']);
+      const parsed = JSON.parse(run.stdout) as {
+        ok: boolean;
+        checks: Array<{ id: string; status: string; detail: string }>;
+      };
+      const currency = parsed.checks.find(check => check.id === 'hook-currency');
+      expect(`${currency?.status}: ${currency?.detail}`).toBe(
+        'pass: installed scripts match the templates shipped by this build',
+      );
+
+      const failing = parsed.checks.filter(check => check.status !== 'pass');
+      expect(failing.map(check => `${check.id}: ${check.detail}`)).toEqual([]);
+      expect(parsed.ok).toBe(true);
+      expect(run.exitCode).toBeUndefined();
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+      if (originalHome === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = originalHome;
+      if (originalUserProfile === undefined) delete process.env['USERPROFILE'];
+      else process.env['USERPROFILE'] = originalUserProfile;
+    }
+  });
+});
+
+describe('renderDoctorReport', () => {
+  const report = (checks: DoctorCheck[]): DoctorReport => ({
+    project: '/repo',
+    hooks_dir: '/hooks',
+    checks,
+    failures: checks.filter(check => check.status === 'fail').length,
+    warnings: checks.filter(check => check.status === 'warn').length,
+    ok: checks.every(check => check.status !== 'fail'),
+  });
+
+  it('prints a badge and the detail, and the fix only for non-passing checks', () => {
+    const output = renderDoctorReport(
+      report([
+        { id: 'a', label: 'Alpha', status: 'pass', detail: 'fine', fix: 'unused' },
+        { id: 'b', label: 'Beta', status: 'fail', detail: 'broken', fix: 'do the thing' },
+      ]),
+    );
+    expect(output).toContain('PASS  Alpha');
+    expect(output).toContain('FAIL  Beta');
+    expect(output).toContain('fix: do the thing');
+    expect(output).not.toContain('fix: unused');
+    expect(output).toContain('1 failing check, 0 warnings.');
+  });
+
+  it('collapses a detail that would otherwise forge a check row', () => {
+    // Details interpolate settings paths and JSON parser messages — content
+    // from user-controlled files on disk. A newline would forge a row; a lone
+    // CR would let one detail overwrite the row above it.
+    const output = renderDoctorReport(
+      report([
+        {
+          id: 'a',
+          label: 'Alpha',
+          status: 'fail',
+          detail: 'real\n  PASS  Forged   all good\rrewritten',
+          fix: 'x\ny',
+        },
+      ]),
+    );
+    // One badge row, the real one. The forged text survives as *content* on
+    // that row — which is the point: it is no longer a row of its own.
+    const badgeRows = output.split('\n').filter(line => /^ {2}(PASS|WARN|FAIL) {2}/.test(line));
+    expect(badgeRows).toHaveLength(1);
+    expect(badgeRows[0]).toContain('FAIL  Alpha');
+    expect(output).toContain('real PASS Forged all good rewritten');
+    expect(output).toContain('fix: x y');
+  });
+
+  it('reports warnings without calling the run failed', () => {
+    const output = renderDoctorReport(
+      report([
+        { id: 'a', label: 'Alpha', status: 'pass', detail: 'fine' },
+        { id: 'b', label: 'Beta', status: 'warn', detail: 'iffy', fix: 'maybe' },
+      ]),
+    );
+    expect(output).toContain('All 2 checks pass (1 warning).');
+    expect(output).toContain('fix: maybe');
   });
 });

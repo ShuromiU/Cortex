@@ -1,4 +1,5 @@
 #!/bin/bash
+# cortex-hook-template: __CORTEX_TEMPLATE_ID__
 # cortex-capture.sh — PostToolUse hook: spool tool events for Cortex.
 # Appends one JSON line per event; no Node process is spawned per tool call.
 # A detached flush runs only when the spool crosses the size threshold.

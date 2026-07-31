@@ -14,7 +14,7 @@
   "bin": {
     "cortex": "dist/transports/cli.js"
   },
-  "files": ["dist", "LICENSE", "README.md"],
+  "files": ["dist", "hooks", "LICENSE", "README.md"],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",

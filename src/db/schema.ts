@@ -369,6 +369,26 @@ export function openDatabase(dbPath: string): Database.Database {
 }
 
 /**
+ * Open an existing database read-only, for callers that must observe the store
+ * without changing it.
+ *
+ * Deliberately not `openDatabase`: that one creates the file when it is missing
+ * and sets `journal_mode = WAL`, which is itself a write and throws on a
+ * read-only connection. A diagnostic that opened the store the normal way would
+ * create an empty database for a user who has none, and — via
+ * `ensureCortexSchema` — migrate the schema it was asked to report on, so a
+ * version mismatch could never be observed.
+ *
+ * Throws when the file does not exist (`fileMustExist`), so absence is a
+ * distinguishable outcome rather than a silently fresh database.
+ */
+export function openDatabaseReadOnly(dbPath: string): Database.Database {
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  db.pragma('busy_timeout = 5000');
+  return db;
+}
+
+/**
  * Apply latest tables and indexes. Idempotent (IF NOT EXISTS).
  * For existing databases, use ensureCortexSchema() to run migrations as well.
  */

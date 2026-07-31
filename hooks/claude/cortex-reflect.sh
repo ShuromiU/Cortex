@@ -1,4 +1,5 @@
 #!/bin/bash
+# cortex-hook-template: __CORTEX_TEMPLATE_ID__
 # cortex-reflect.sh — UserPromptSubmit / PreToolUse reflex bridge.
 # Spawns Node only when Cortex is engaged for this project.
 

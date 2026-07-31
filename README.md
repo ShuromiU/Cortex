@@ -139,7 +139,28 @@ The spool (`.cortex.spool.jsonl`) is flushed at turn end, at a 256 KiB threshold
 
 A session is identified by `(scope_key, agent_id)`. Each spool line carries the `agent_id` and `agent_type` the host reported, so the flush files a subagent's reads, edits and commands under a child session of its own — recording `parent_session_id` and inheriting the parent's scope — instead of merging them into the parent's timeline. A line without an `agent_id`, including every line written by a hook installed before this existed, resolves to the primary session. A subagent's tool call never rotates or ends the session that dispatched it, and ending a session ends its children so they stay reachable by consolidation and GC.
 
-Branch snapshots, scoped session listings and the recent-session tail read primary sessions only; child timelines are reached explicitly. If you upgraded the package but subagent activity still lands on the parent, your installed `cortex-capture.sh` predates the change — re-run `cortex install-hooks --claude`.
+Branch snapshots, scoped session listings and the recent-session tail read primary sessions only; child timelines are reached explicitly. If you upgraded the package but subagent activity still lands on the parent, your installed `cortex-capture.sh` predates the change — re-run `cortex install-hooks --claude`. `cortex doctor` detects exactly that.
+
+## Diagnosing the installation
+
+```bash
+cortex doctor
+```
+
+Cortex fails quietly. A hook that never fires, a `jq` that fell off `PATH`, a Node that moved — each of them produces an empty memory rather than an error, and an empty memory is indistinguishable from a project you have not worked in yet. `cortex doctor` is how you tell the difference.
+
+It reports engagement state, hook wiring, hook script presence, placeholder substitution, hook version currency, the configured interpreter, `jq`, the Node and CLI paths baked into the installed hooks, database reachability and schema version, spool size and staleness, and MCP server registration. Every non-passing check names the command that fixes it. `--json` emits the same report for scripting.
+
+Exit codes: **1 if any check fails, 0 otherwise** — so it can gate CI. Warnings do not fail the run; a project you deliberately disengaged with `cortex_disengage` warns and exits 0.
+
+The check worth knowing about is **hook version currency**. A hook script installed by an older version stays syntactically valid, correctly substituted, and wired — it simply no longer does what the current build expects. Nothing about it looks broken. `install-hooks` therefore stamps each installed script with a digest of the template it rendered, and `doctor` recompares that against the template the running build ships. A script with an older stamp, or with no stamp at all, is reported out of date with `cortex install-hooks --claude` as the fix, and fails the run.
+
+Two limits, stated rather than implied:
+
+- `jq` and the hook interpreter are **located on `PATH`, not executed**. A binary that is present but broken resolves and is reported available. This keeps the run under the 3-second budget without spawning a process per check.
+- The diagnostic reads Claude Code's settings files (`<project>/.claude/settings.json`, `<project>/.claude/settings.local.json`, `~/.claude/settings.json`) and MCP registration from those plus `<project>/.mcp.json` and `~/.claude.json`. Codex wiring is not inspected.
+
+`cortex doctor` creates nothing and changes nothing — no session, no store, no engagement write, no schema migration. Running it against a project with no database reports the missing database rather than creating one.
 
 ## Retrieval Quality Gate
 
@@ -275,6 +296,8 @@ cortex note-resolve --subject "auth transport" --status superseded
 cortex flush-spool
 cortex gc            # dry-run report
 cortex gc --apply    # actually prune (+ VACUUM when fragmented)
+cortex doctor
+cortex doctor --json
 cortex install-hooks --claude
 cortex serve
 cortex log read

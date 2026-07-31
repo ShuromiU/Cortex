@@ -1,4 +1,5 @@
 #!/bin/bash
+# cortex-hook-template: __CORTEX_TEMPLATE_ID__
 # cortex-end-of-turn.sh — Stop hook: flush the capture spool and, only when a
 # subagent ran this turn AND high-confidence note suggestions exist, emit a
 # decision:block nudge with the concrete suggestions embedded.

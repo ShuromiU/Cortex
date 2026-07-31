@@ -43,6 +43,14 @@ import {
 import { ensureScopedSession, syncBranchSnapshotForSession } from '../scope/runtime.js';
 import { refreshCurrentAppGraph } from '../scope/app-graph.js';
 import { suggestNotes } from '../query/suggest-notes.js';
+import {
+  HOOK_SCRIPTS,
+  TEMPLATE_ID_PLACEHOLDER,
+  hookTemplateDigest,
+  runDoctor,
+  type DoctorCheck,
+  type DoctorReport,
+} from '../query/doctor.js';
 import { validateMemory } from '../query/validate-memory.js';
 import {
   listMemory,
@@ -198,6 +206,49 @@ function spoofedTrailerLine(text: string): string | null {
 /** Quote a value for the copy-pasteable next-page command. */
 function shellQuote(value: string): string {
   return /^[A-Za-z0-9,._:@/+-]+$/.test(value) ? value : JSON.stringify(value);
+}
+
+const CHECK_BADGE: Record<DoctorCheck['status'], string> = {
+  pass: 'PASS',
+  warn: 'WARN',
+  fail: 'FAIL',
+};
+
+/**
+ * Render the diagnostic report.
+ *
+ * Details and fixes are collapsed onto one line: they interpolate settings-file
+ * paths, script names and JSON parser messages, all of which come from
+ * user-controlled files on disk. An embedded newline would otherwise forge a
+ * check row, and a lone CR would let one check's detail overwrite the row above
+ * it — the same discipline `list-memory` applies to stored strings. `--json`
+ * stays byte-faithful.
+ */
+export function renderDoctorReport(report: DoctorReport): string {
+  const lines: string[] = [
+    `Cortex doctor — ${collapseToLine(report.project)}`,
+    `Hooks directory: ${collapseToLine(report.hooks_dir ?? '(none configured)')}`,
+    '',
+  ];
+
+  const width = Math.max(...report.checks.map(check => check.label.length));
+  for (const check of report.checks) {
+    lines.push(
+      `  ${CHECK_BADGE[check.status]}  ${check.label.padEnd(width)}  ${collapseToLine(check.detail)}`,
+    );
+    if (check.status !== 'pass' && check.fix) {
+      // Aligns under the detail column: 2 indent + 4 badge + 2 + label + 2.
+      lines.push(`${' '.repeat(width + 10)}fix: ${collapseToLine(check.fix)}`);
+    }
+  }
+
+  lines.push('');
+  lines.push(
+    report.ok
+      ? `All ${report.checks.length} checks pass${report.warnings > 0 ? ` (${report.warnings} warning${report.warnings === 1 ? '' : 's'})` : ''}.`
+      : `${report.failures} failing check${report.failures === 1 ? '' : 's'}, ${report.warnings} warning${report.warnings === 1 ? '' : 's'}.`,
+  );
+  return `${lines.join('\n')}\n`;
 }
 
 function describeListFilters(filter: MemoryListPage['filter']): string {
@@ -981,10 +1032,14 @@ export function createProgram(): Command {
           : path.join(os.homedir(), '.claude', 'hooks'));
       fs.mkdirSync(targetDir, { recursive: true });
 
-      const scripts = ['cortex-capture.sh', 'cortex-reflect.sh', 'cortex-end-of-turn.sh'];
-      for (const script of scripts) {
+      for (const script of HOOK_SCRIPTS) {
         const template = fs.readFileSync(path.join(templateDir, script), 'utf8');
+        // Stamp the template's identity into the installed copy so `cortex
+        // doctor` can tell a current hook from one that merely looks fine. The
+        // digest is of the template as shipped — placeholders intact — which is
+        // exactly what the doctor recomputes.
         const rendered = template
+          .replaceAll(TEMPLATE_ID_PLACEHOLDER, hookTemplateDigest(template))
           .replaceAll('__CORTEX_NODE__', nodePath)
           .replaceAll('__CORTEX_CLI__', cliEntry)
           .replaceAll('__CORTEX_HOOK_ENTRY__', hookEntry);
@@ -1030,6 +1085,27 @@ export function createProgram(): Command {
       process.stdout.write(
         '\nNotes: capture is spooled (no Node per tool call); reflex runs only on Edit|Write and prompts; the Stop nudge fires only with high-confidence suggestions. Remove any old cortex-hook.sh / cortex-mark-agent-used.sh wiring.\n',
       );
+    });
+
+  program
+    .command('doctor')
+    .description('Diagnose the Cortex installation: hooks, wiring, store, spool, MCP registration')
+    // Nothing here opens a session, engages Cortex, migrates the store or
+    // flushes the spool: a diagnostic that repairs what it is checking cannot
+    // report on it.
+    .option('--json', 'Emit the raw report instead of the table')
+    .option('--hooks-dir <path>', 'Diagnose hooks in this directory instead of the configured one')
+    .action((opts: { json?: boolean; hooksDir?: string }) => {
+      const report = runDoctor({
+        projectDir: process.cwd(),
+        ...(opts.hooksDir ? { hooksDir: opts.hooksDir } : {}),
+      });
+      process.stdout.write(
+        opts.json ? `${JSON.stringify(report, null, 2)}\n` : renderDoctorReport(report),
+      );
+      if (!report.ok) {
+        process.exitCode = 1;
+      }
     });
 
   program
