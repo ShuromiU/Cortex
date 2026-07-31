@@ -8,6 +8,7 @@ import {
   HOOK_SCRIPTS,
   REQUIRED_WIRING,
   TEMPLATE_ID_PLACEHOLDER,
+  collectHookCommands,
   commandSatisfiesWiring,
   hookTemplateDigest,
   readTemplateStamp,
@@ -93,7 +94,15 @@ export interface BakedPaths {
  * whether one on disk is still what we would have written.
  */
 export function renderHookScript(templateText: string, paths: BakedPaths): string {
+  // Line endings normalised to LF, not preserved from the template. There is
+  // no `.gitattributes`, so on a Windows checkout the templates are CRLF on
+  // disk — and a CRLF script was written and then reported fully current,
+  // because every validator (`hookTemplateDigest`, `installedMatchesTemplate`,
+  // `extractBakedPaths`) normalises first and so cannot see it. Git Bash
+  // tolerates CRLF; bash on Linux, macOS and WSL does not, and `package.json`
+  // ships `hooks/`, so `npm pack` from a Windows checkout published it.
   return templateText
+    .replace(/\r\n/g, '\n')
     .replaceAll(TEMPLATE_ID_PLACEHOLDER, hookTemplateDigest(templateText))
     .replaceAll('__CORTEX_NODE__', paths.nodePath)
     .replaceAll('__CORTEX_CLI__', paths.cliEntry)
@@ -121,21 +130,56 @@ export function installedMatchesTemplate(templateText: string, installedText: st
   const groups = new Map<string, number>();
   let groupIndex = 0;
 
+  // One pattern, used both to split and to recognise a fragment as a
+  // placeholder. Two regexes that must agree is how a fragment matching some
+  // *other* `__CORTEX_X__` token became an unconstrained wildcard.
   const pattern = template
-    .split(/(__CORTEX_(?:NODE|CLI|HOOK_ENTRY|TEMPLATE_ID)__)/)
+    .split(PLACEHOLDER_SPLIT)
     .map(part => {
-      if (!/^__CORTEX_[A-Z_]+__$/.test(part)) {
+      if (!PLACEHOLDER_EXACT.test(part)) {
         return part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       }
       const seen = groups.get(part);
       if (seen !== undefined) return `\\${seen}`;
       groupIndex += 1;
       groups.set(part, groupIndex);
-      return '([^\\n]+?)';
+      // Excludes `"` deliberately, not only `\n`. Every path placeholder sits
+      // inside a double-quoted string in the shipped templates, so a legitimate
+      // substitution can never contain one — while an unconstrained capture
+      // accepts any edit that leaves the surrounding literal text intact.
+      // Closing the quote, adding a command and reopening it read as
+      // `unmodified`, so the script was overwritten with no refusal and no
+      // backup: the exact case AC #3 exists to prevent. Exposure was uneven
+      // and therefore hard to reason about — `cortex-reflect.sh` happens to be
+      // safe because it uses `__CORTEX_NODE__` twice and the backreference
+      // forces the two to agree.
+      return '([^\\n"]+?)';
     })
     .join('');
 
   return new RegExp(`^${pattern}$`).test(installed);
+}
+
+const PLACEHOLDER_SPLIT = /(__CORTEX_(?:NODE|CLI|HOOK_ENTRY|TEMPLATE_ID)__)/;
+const PLACEHOLDER_EXACT = /^__CORTEX_(?:NODE|CLI|HOOK_ENTRY|TEMPLATE_ID)__$/;
+
+/**
+ * Characters a shell expands inside a double-quoted string.
+ *
+ * A wiring command embeds the hooks directory into `bash "<dir>/<script>"`.
+ * Double quotes do not protect `$`, a backtick or a backslash, so a path
+ * containing one produces a command that silently resolves somewhere else —
+ * and `doctor` reports it healthy, because it reads the literal string and
+ * finds the file at the literal path. `$(...)` would be executed on every
+ * hook fire. Rather than guess which shell the host uses (`bash` on POSIX,
+ * possibly `cmd.exe` on Windows) and escape for it, this refuses and says so.
+ */
+const SHELL_UNSAFE = /[$`\\]/;
+
+export function hooksDirIsShellSafe(hooksDir: string): boolean {
+  // Backslashes are normalised to `/` before interpolation, so only the
+  // remaining expanders matter.
+  return !SHELL_UNSAFE.test(hooksDir.replace(/\\/g, '/'));
 }
 
 export type ScriptState = 'absent' | 'unmodified' | 'modified' | 'unknown';
@@ -173,7 +217,20 @@ export interface MergeResult {
  * who re-quoted the path or moved the hooks directory already has a working
  * wiring, and appending a second entry would double every hook invocation.
  */
-export function mergeHookWiring(settings: Json, hooksDir: string, paths: BakedPaths): MergeResult {
+export function mergeHookWiring(
+  settings: Json,
+  hooksDir: string,
+  paths: BakedPaths,
+  /**
+   * Wirings already present in the *other* settings files Claude Code merges.
+   * Claude Code reads the union of `<project>/.claude/settings.json`,
+   * `settings.local.json` and `~/.claude/settings.json`, so an entry written
+   * here while an equivalent one lives in another file does not replace it —
+   * both fire. That doubled every spool line, every reflex and every flush,
+   * and neither `install` nor `doctor` could see it.
+   */
+  wiredElsewhere: ReadonlySet<string> = new Set(),
+): MergeResult {
   const existing = settings['hooks'];
   const hooks: Json =
     existing !== null && typeof existing === 'object' && !Array.isArray(existing)
@@ -190,17 +247,56 @@ export function mergeHookWiring(settings: Json, hooksDir: string, paths: BakedPa
     const current = hooks[required.event];
     const entries = Array.isArray(current) ? [...current] : [];
 
-    const alreadyWired = entries.some(entry => {
-      if (entry === null || typeof entry !== 'object') return false;
-      const inner = (entry as Json)['hooks'];
-      if (!Array.isArray(inner)) return false;
-      return inner.some(hook => {
+    // Repair, not merely detect. `commandSatisfiesWiring` answers "is
+    // something here", never "is what is here correct" — so a matcher that
+    // lost `Agent`, or a SessionStart command naming a Node that moved, was
+    // left exactly as it was while the run reported success. `doctor` then
+    // named this command as the fix for a condition it could not fix.
+    let repaired = false;
+    const updated = entries.map(entry => {
+      if (entry === null || typeof entry !== 'object') return entry;
+      const record = { ...(entry as Json) };
+      const inner = record['hooks'];
+      if (!Array.isArray(inner)) return entry;
+
+      const index = inner.findIndex(hook => {
         if (hook === null || typeof hook !== 'object') return false;
         const value = (hook as Json)['command'];
         return typeof value === 'string' && commandSatisfiesWiring(value, required);
       });
+      if (index < 0) return entry;
+
+      let entryChanged = false;
+      const hook = { ...(inner[index] as Json) };
+      if (hook['command'] !== command) {
+        hook['command'] = command;
+        entryChanged = true;
+      }
+      if (required.matcher !== undefined && record['matcher'] !== required.matcher) {
+        record['matcher'] = required.matcher;
+        entryChanged = true;
+      }
+      if (!entryChanged) {
+        repaired = true;
+        return entry;
+      }
+
+      const nextInner = [...inner];
+      nextInner[index] = hook;
+      record['hooks'] = nextInner;
+      repaired = true;
+      changed = true;
+      return record;
     });
-    if (alreadyWired) continue;
+
+    if (repaired) {
+      hooks[required.event] = updated;
+      continue;
+    }
+
+    // Nothing in this file wires it. If another settings file already does,
+    // adding one here would double the invocation rather than fix anything.
+    if (wiredElsewhere.has(required.event)) continue;
 
     entries.push({
       ...(required.matcher === undefined ? {} : { matcher: required.matcher }),
@@ -236,6 +332,16 @@ function wiringCommand(
   return null;
 }
 
+/** How many of the required wirings a settings object already satisfies. */
+function countSatisfiedWirings(settings: Json): number {
+  const commands = collectHookCommands(settings);
+  return REQUIRED_WIRING.filter(required =>
+    commands.some(
+      entry => entry.event === required.event && commandSatisfiesWiring(entry.command, required),
+    ),
+  ).length;
+}
+
 export function mergeMcpServer(settings: Json, entry: Json): MergeResult {
   const existing = settings['mcpServers'];
   const servers: Json =
@@ -263,9 +369,11 @@ export function mergeIgnoreEntries(
   if (missing.length === 0) return { text: current, added: [] };
 
   const needsNewline = current.length > 0 && !current.endsWith('\n');
-  const header = current.length === 0 ? '' : `${needsNewline ? '\n' : ''}`;
+  // A blank separator line only when there is something to separate from —
+  // a file created from nothing otherwise begins with one.
+  const separator = current.length === 0 ? '' : `${needsNewline ? '\n' : ''}\n`;
   return {
-    text: `${current}${header}\n# Cortex runtime artifacts\n${missing.join('\n')}\n`,
+    text: `${current}${separator}# Cortex runtime artifacts\n${missing.join('\n')}\n`,
     added: missing,
   };
 }
@@ -312,6 +420,20 @@ function defaultTemplateDir(moduleUrl: string): string {
   return path.resolve(path.dirname(fileURLToPath(moduleUrl)), '..', '..', 'hooks', 'claude');
 }
 
+/** `dist/query/install.js` → `dist/transports/<name>`. */
+function defaultEntry(moduleUrl: string, name: string): string {
+  return path.resolve(path.dirname(fileURLToPath(moduleUrl)), '..', 'transports', name);
+}
+
+/** Expand a leading `~`, which the shell does and Node does not. */
+function expandHome(target: string, homeDir: string): string {
+  if (target === '~') return homeDir;
+  if (target.startsWith('~/') || target.startsWith('~\\')) {
+    return path.join(homeDir, target.slice(2));
+  }
+  return target;
+}
+
 // ── The command ───────────────────────────────────────────────────────
 
 export function runInstall(options: InstallOptions): InstallResult {
@@ -320,10 +442,19 @@ export function runInstall(options: InstallOptions): InstallResult {
   const scope = options.scope ?? 'user';
   const dryRun = options.dryRun ?? false;
   const templateDir = options.templateDir ?? defaultTemplateDir(import.meta.url);
-  const hooksDir = options.hooksDir ?? path.join(homeDir, '.claude', 'hooks');
+  const hooksDir = path.normalize(
+    expandHome(options.hooksDir ?? path.join(homeDir, '.claude', 'hooks'), homeDir),
+  );
   const nodePath = options.nodePath ?? process.execPath;
-  const cliEntry = options.cliEntry ?? '';
-  const hookEntry = options.hookEntry ?? '';
+  // Real defaults, resolved the same way `defaultTemplateDir` resolves its own.
+  // Defaulting these to `''` produced a hook invoking `"<node>" "" flush-spool`,
+  // an MCP entry with an empty argument, a SessionStart wiring silently skipped
+  // (`wiringCommand` returns null for an empty CLI path) — and a *second* run
+  // that refused all three scripts as user-edited, because an empty
+  // substitution cannot match the capture. The installer accusing the user of
+  // editing a file it wrote itself is the worst outcome available here.
+  const cliEntry = options.cliEntry ?? defaultEntry(import.meta.url, 'cli.js');
+  const hookEntry = options.hookEntry ?? defaultEntry(import.meta.url, 'hook-entry.js');
   const paths: BakedPaths = { nodePath, cliEntry, hookEntry };
 
   const settingsPath =
@@ -336,6 +467,52 @@ export function runInstall(options: InstallOptions): InstallResult {
   const add = (action: InstallAction): void => {
     actions.push(action);
   };
+
+  /**
+   * Every filesystem step runs through this. `readJson` was guarded and
+   * nothing else was, so a `.gitignore` that is a directory threw `EISDIR`
+   * out of `runInstall` *after* three hook scripts and the settings file had
+   * been written — the caller printed a bare errno with no path and no action
+   * list, under a summary claiming nothing was left half-done. This is the
+   * rule Story 2.3 already established for `runDoctor`.
+   */
+  const guarded = (id: string, target: string, fix: string, step: () => void): boolean => {
+    try {
+      step();
+      return true;
+    } catch (error) {
+      add({
+        id,
+        target,
+        outcome: 'refused',
+        detail: `${target}: ${error instanceof Error ? error.message : String(error)}`,
+        fix,
+      });
+      return false;
+    }
+  };
+
+  if (!hooksDirIsShellSafe(hooksDir)) {
+    add({
+      id: 'hooks-dir',
+      target: hooksDir,
+      outcome: 'refused',
+      detail:
+        'the hooks directory contains a character the shell expands inside double quotes ($, backtick or backslash), so the wiring written from it would resolve somewhere else',
+      fix: 'Install the hooks somewhere without those characters: `cortex install --dir <path>`.',
+    });
+    return {
+      actions,
+      unchanged: false,
+      refusals: 1,
+      dry_run: dryRun,
+      hooks_dir: hooksDir,
+      settings_path:
+        scope === 'project'
+          ? path.join(projectDir, '.claude', 'settings.json')
+          : path.join(homeDir, '.claude', 'settings.json'),
+    };
+  }
 
   // ── Hook scripts ────────────────────────────────────────────────────
   for (const script of HOOK_SCRIPTS) {
@@ -353,10 +530,18 @@ export function runInstall(options: InstallOptions): InstallResult {
       continue;
     }
 
-    const templateText = fs.readFileSync(templatePath, 'utf8');
+    const SCRIPT_FIX = `Check that \`${target}\` is a writable file, then re-run.`;
+    let templateText = '';
+    let installedText: string | null = null;
+    let exists = false;
+    const read = guarded(`hook:${script}`, target, SCRIPT_FIX, () => {
+      templateText = fs.readFileSync(templatePath, 'utf8');
+      exists = fs.existsSync(target);
+      installedText = exists ? fs.readFileSync(target, 'utf8') : null;
+    });
+    if (!read) continue;
+
     const rendered = renderHookScript(templateText, paths);
-    const exists = fs.existsSync(target);
-    const installedText = exists ? fs.readFileSync(target, 'utf8') : null;
     const state: ScriptState =
       installedText === null ? 'absent' : classifyInstalledScript(templateText, installedText);
 
@@ -380,8 +565,14 @@ export function runInstall(options: InstallOptions): InstallResult {
     // tells users to fix by running this command — refusing there would break
     // the documented repair path, and overwriting without a backup would lose
     // any customisation it happens to carry.
-    const backup = state === 'unknown' || (state === 'modified' && options.force === true);
-    if (!dryRun) {
+    // Any overwrite of existing content keeps a copy, not only the `unknown`
+    // and `--force` paths. The one case that previously got no backup was
+    // `unmodified` with differing bytes — which the story names as the
+    // *expected* case (a user whose Node moved), and which was also the case
+    // the unconstrained capture let an edited script fall into.
+    const backup = installedText !== null;
+    const wrote = guarded(`hook:${script}`, target, SCRIPT_FIX, () => {
+      if (dryRun) return;
       if (backup && installedText !== null) {
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(`${target}.bak`, installedText);
@@ -392,21 +583,51 @@ export function runInstall(options: InstallOptions): InstallResult {
       } catch {
         // chmod is a no-op on Windows.
       }
-    }
+    });
+    if (!wrote) continue;
 
+    const provenance =
+      state === 'unknown'
+        ? 'not written by this build'
+        : state === 'modified'
+          ? 'edited, overwritten with --force'
+          : state === 'absent'
+            ? 'installed'
+            : 'refreshed';
     add({
       id: `hook:${script}`,
       target,
       outcome: exists ? 'updated' : 'created',
+      // Past tense only for a write that happened: a dry run reported a `.bak`
+      // it had not made, under a header saying nothing was written.
       detail: backup
-        ? `${state === 'unknown' ? 'not written by this build' : 'edited, overwritten with --force'}; previous copy saved to ${path.basename(target)}.bak`
-        : state === 'absent'
-          ? 'installed'
-          : 'refreshed',
+        ? `${provenance}; previous copy ${dryRun ? 'would be saved' : 'saved'} to ${path.basename(target)}.bak`
+        : provenance,
     });
   }
 
   // ── Settings: hook wiring ───────────────────────────────────────────
+  //
+  // Which events the *other* files Claude Code merges already wire. Adding a
+  // second entry for one of those does not replace it — both fire.
+  const wiredElsewhere = new Set<string>();
+  for (const other of [
+    path.join(projectDir, '.claude', 'settings.json'),
+    path.join(projectDir, '.claude', 'settings.local.json'),
+    path.join(homeDir, '.claude', 'settings.json'),
+  ]) {
+    if (path.resolve(other) === path.resolve(settingsPath)) continue;
+    const file = readJson(other);
+    if (!file.existed || file.value === null) continue;
+    for (const entry of collectHookCommands(file.value)) {
+      for (const required of REQUIRED_WIRING) {
+        if (entry.event === required.event && commandSatisfiesWiring(entry.command, required)) {
+          wiredElsewhere.add(required.event);
+        }
+      }
+    }
+  }
+
   const settings = readJson(settingsPath);
   if (settings.value === null) {
     add({
@@ -417,7 +638,9 @@ export function runInstall(options: InstallOptions): InstallResult {
       fix: 'Fix the JSON syntax in that file, then re-run. Cortex will not overwrite a settings file it cannot read.',
     });
   } else {
-    const merged = mergeHookWiring(settings.value, hooksDir, paths);
+    const before = countSatisfiedWirings(settings.value);
+    const merged = mergeHookWiring(settings.value, hooksDir, paths, wiredElsewhere);
+    const after = countSatisfiedWirings(merged.value);
     // MCP goes into the same document when the scope shares a file, so both
     // merges are applied before a single write.
     const sameFile = path.resolve(mcpPath) === path.resolve(settingsPath);
@@ -431,13 +654,20 @@ export function runInstall(options: InstallOptions): InstallResult {
         }
         writeFileAtomic(settingsPath, `${JSON.stringify(withMcp.value, null, 2)}\n`);
       }
+      // What actually happened, not `REQUIRED_WIRING.length`. The constant was
+      // printed unconditionally, so a file already carrying four of five
+      // wirings still reported "wired 5 events" — and so did a run that wired
+      // none at all.
+      const added = after - before;
+      const parts: string[] = [];
+      if (added > 0) parts.push(`wired ${added} event${added === 1 ? '' : 's'}`);
+      if (merged.changed && added === 0) parts.push('repaired an existing wiring');
+      if (withMcp.changed) parts.push('registered the MCP server');
       add({
         id: 'settings',
         target: settingsPath,
         outcome: settings.existed ? 'updated' : 'created',
-        detail: merged.changed
-          ? `wired ${REQUIRED_WIRING.length} events${withMcp.changed ? ' and registered the MCP server' : ''}`
-          : 'registered the MCP server',
+        detail: parts.join(' and '),
       });
     } else {
       add({
@@ -490,17 +720,32 @@ export function runInstall(options: InstallOptions): InstallResult {
   const ignorePath = path.join(projectDir, '.gitignore');
   // Captured *before* the write: reading it afterwards reports `updated` for a
   // file this run created, and makes a dry run disagree with the real one.
-  const ignoreExisted = fs.existsSync(ignorePath);
-  const existingIgnore = ignoreExisted ? fs.readFileSync(ignorePath, 'utf8') : '';
-  const ignore = mergeIgnoreEntries(existingIgnore, IGNORE_ENTRIES);
-  if (ignore.added.length > 0) {
-    if (!dryRun) writeFileAtomic(ignorePath, ignore.text);
-    add({
-      id: 'ignore',
-      target: ignorePath,
-      outcome: ignoreExisted ? 'updated' : 'created',
-      detail: `added ${ignore.added.length} entr${ignore.added.length === 1 ? 'y' : 'ies'}: ${ignore.added.join(', ')}`,
+  const IGNORE_FIX = `Check that \`${ignorePath}\` is a writable file, then re-run.`;
+  let ignoreExisted = false;
+  let existingIgnore = '';
+  const readIgnore = guarded('ignore', ignorePath, IGNORE_FIX, () => {
+    ignoreExisted = fs.existsSync(ignorePath);
+    existingIgnore = ignoreExisted ? fs.readFileSync(ignorePath, 'utf8') : '';
+  });
+
+  const ignore = readIgnore
+    ? mergeIgnoreEntries(existingIgnore, IGNORE_ENTRIES)
+    : { text: '', added: [] as string[] };
+
+  if (!readIgnore) {
+    // Already reported by the guard.
+  } else if (ignore.added.length > 0) {
+    const wroteIgnore = guarded('ignore', ignorePath, IGNORE_FIX, () => {
+      if (!dryRun) writeFileAtomic(ignorePath, ignore.text);
     });
+    if (wroteIgnore) {
+      add({
+        id: 'ignore',
+        target: ignorePath,
+        outcome: ignoreExisted ? 'updated' : 'created',
+        detail: `added ${ignore.added.length} entr${ignore.added.length === 1 ? 'y' : 'ies'}: ${ignore.added.join(', ')}`,
+      });
+    }
   } else {
     add({
       id: 'ignore',

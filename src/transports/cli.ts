@@ -218,6 +218,21 @@ const INSTALL_BADGE: Record<InstallAction['outcome'], string> = {
  * parser messages from user-controlled files, so each is collapsed onto one
  * line — the discipline `renderDoctorReport` already applies.
  */
+/**
+ * True when the only failing checks are the two `install` deliberately does
+ * not address: a project that has never run Cortex has no engagement state and
+ * no store. AC #1 enumerates four actions and neither is among them, so a
+ * successful install on a fresh project legitimately fails the diagnostic —
+ * and a bare red report there reads as a broken install.
+ */
+export function onlyUnusedProject(report: DoctorReport): boolean {
+  const failing = report.checks.filter(check => check.status === 'fail');
+  return (
+    failing.length > 0 &&
+    failing.every(check => check.id === 'engagement' || check.id === 'database')
+  );
+}
+
 export function renderInstallResult(result: InstallResult): string {
   const lines: string[] = [
     result.dry_run ? 'Cortex install (dry run — nothing written)' : 'Cortex install',
@@ -229,15 +244,25 @@ export function renderInstallResult(result: InstallResult): string {
     lines.push(
       `  ${INSTALL_BADGE[action.outcome].padEnd(5)} ${action.id.padEnd(width)}  ${collapseToLine(action.detail)}`,
     );
-    lines.push(`${' '.repeat(width + 9)}${collapseToLine(action.target)}`);
+    // width + 10 aligns under the detail column: 2 indent + 5 badge + 1 + label + 2.
+    lines.push(`${' '.repeat(width + 10)}${collapseToLine(action.target)}`);
     if (action.outcome === 'refused' && action.fix) {
-      lines.push(`${' '.repeat(width + 9)}fix: ${collapseToLine(action.fix)}`);
+      lines.push(`${' '.repeat(width + 10)}fix: ${collapseToLine(action.fix)}`);
     }
   }
 
   lines.push('');
   if (result.refusals > 0) {
-    lines.push(`${result.refusals} action${result.refusals === 1 ? '' : 's'} refused; nothing else was left half-done.`);
+    // Deliberately not "nothing else was left half-done" — that was false.
+    // Actions are applied in order and a refusal stops only its own action, so
+    // a refusal partway through leaves the earlier ones written. The list above
+    // says which, and every action reports its own outcome.
+    const applied = result.actions.filter(
+      action => action.outcome === 'created' || action.outcome === 'updated',
+    ).length;
+    lines.push(
+      `${result.refusals} action${result.refusals === 1 ? '' : 's'} refused; ${applied === 0 ? 'nothing was written' : `${applied} other action${applied === 1 ? '' : 's'} already applied (listed above)`}.`,
+    );
   } else if (result.unchanged) {
     lines.push('Nothing changed — this installation is already current.');
   } else {
@@ -1078,9 +1103,34 @@ export function createProgram(): Command {
         codex?: boolean;
       }) => {
         const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+
+        // Validated against the closed set, the convention `list-memory`
+        // established: a typo silently falling back to `user` writes the
+        // home-directory settings file for someone who asked for project
+        // scope — a failure in the destructive direction.
+        if (opts.scope !== undefined && opts.scope !== 'user' && opts.scope !== 'project') {
+          process.stderr.write(
+            `cortex install: unknown --scope ${JSON.stringify(opts.scope)}. Use \`user\` or \`project\`.\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
         const scope = opts.scope === 'project' ? 'project' : 'user';
-        const hooksDir =
-          opts.dir ?? (opts.codex ? path.join(os.homedir(), '.codex', 'hooks') : undefined);
+
+        // `--codex` used to redirect only the hooks directory, which now means
+        // writing *Claude Code's* settings with commands pointing into
+        // `~/.codex/hooks` — configuring the wrong harness. Installing Codex
+        // is not something this command can do, so it says so rather than
+        // producing a broken Claude installation.
+        if (opts.codex) {
+          process.stderr.write(
+            'cortex install: --codex is no longer supported. This command writes Claude Code settings; installing hook scripts for Codex has no settings step here. Use `--dir <path>` to place the scripts and wire them yourself.\n',
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        const hooksDir = opts.dir;
 
         const result = runInstall({
           projectDir: process.cwd(),
@@ -1093,8 +1143,21 @@ export function createProgram(): Command {
           hookEntry: path.resolve(moduleDir, 'hook-entry.js'),
         });
 
+        // AC #1: the install runs the diagnostic. A dry run does not — it has
+        // written nothing, so the diagnostic would report the old state and
+        // read as the outcome of an install that never happened.
+        const report = opts.dryRun
+          ? null
+          : runDoctor({ projectDir: process.cwd(), hooksDir: result.hooks_dir });
+
         if (opts.json) {
-          process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+          // The diagnostic goes into the payload, not just the table. `--json`
+          // exists for scripting, and the scripted caller is the one that
+          // cannot read the text report — it was exiting 1 on a payload
+          // showing `refusals: 0` with nothing anywhere explaining why.
+          process.stdout.write(
+            `${JSON.stringify({ ...result, diagnostic: report }, null, 2)}\n`,
+          );
         } else {
           process.stdout.write(renderInstallResult(result));
         }
@@ -1103,13 +1166,8 @@ export function createProgram(): Command {
           process.exitCode = 1;
           return;
         }
+        if (report === null) return;
 
-        // AC #1: the install runs the diagnostic. A dry run does not — it has
-        // written nothing, so the diagnostic would report the old state and
-        // read as the outcome of an install that never happened.
-        if (opts.dryRun) return;
-
-        const report = runDoctor({ projectDir: process.cwd(), hooksDir: result.hooks_dir });
         if (!opts.json) {
           process.stdout.write(`\n${renderDoctorReport(report)}`);
 
@@ -1118,11 +1176,7 @@ export function createProgram(): Command {
           // command does not do them. On a project that has never run Cortex
           // that leaves exactly two checks failing, and a bare red report after
           // a successful install reads as a broken install. Say what it is.
-          const outstanding = report.checks.filter(check => check.status === 'fail');
-          const onlyUnused =
-            outstanding.length > 0 &&
-            outstanding.every(check => check.id === 'engagement' || check.id === 'database');
-          if (onlyUnused) {
+          if (onlyUnusedProject(report)) {
             process.stdout.write(
               '\nThe installation itself is complete. The remaining failures are just this project not having run Cortex yet — they clear on the first session, or now with `cortex inject-header --quiet`.\n',
             );

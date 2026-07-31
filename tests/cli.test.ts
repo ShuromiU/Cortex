@@ -3,8 +3,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { Command } from 'commander';
-import { createProgram, renderDoctorReport } from '../src/transports/cli.js';
+import { createProgram, onlyUnusedProject, renderDoctorReport, renderInstallResult } from '../src/transports/cli.js';
 import type { DoctorCheck, DoctorReport } from '../src/query/doctor.js';
+import { tokenizeCommand } from '../src/query/doctor.js';
+import type { InstallAction, InstallResult } from '../src/query/install.js';
 import { deriveEngagementPath } from '../src/transports/mcp.js';
 import { openDatabase, ensureCortexSchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
@@ -1723,39 +1725,34 @@ function seedSandboxHome(hooksDir: string): string {
   return homeDir;
 }
 
-describe('cortex doctor', () => {
-  /**
-   * Sandbox `HOME`/`USERPROFILE`/`PATH` for the duration of a call.
-   *
-   * Without it these tests read the developer's real `~/.claude/settings.json`
-   * and real hooks directory, so what they exercise depends on the machine —
-   * the assertions happen to hold either way, which is exactly what makes it a
-   * latent portability fault rather than a visible one.
-   */
-  async function withSandbox<T>(
-    homeDir: string,
-    binDir: string,
-    run: () => Promise<T>,
-  ): Promise<T> {
-    const original = {
-      PATH: process.env['PATH'],
-      HOME: process.env['HOME'],
-      USERPROFILE: process.env['USERPROFILE'],
-    };
-    try {
-      process.env['PATH'] = `${binDir}${path.delimiter}${original.PATH ?? ''}`;
-      // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
-      process.env['HOME'] = homeDir;
-      process.env['USERPROFILE'] = homeDir;
-      return await run();
-    } finally {
-      for (const [key, value] of Object.entries(original)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
+/**
+ * Sandbox `HOME`/`USERPROFILE`/`PATH` for the duration of a call.
+ *
+ * Without it these tests read the developer's real `~/.claude/settings.json`
+ * and real hooks directory — and for `install`, *write* them. Module-scoped so
+ * every test that reaches an environment-sensitive command can use it.
+ */
+async function withSandbox<T>(homeDir: string, binDir: string, run: () => Promise<T>): Promise<T> {
+  const original = {
+    PATH: process.env['PATH'],
+    HOME: process.env['HOME'],
+    USERPROFILE: process.env['USERPROFILE'],
+  };
+  try {
+    process.env['PATH'] = `${binDir}${path.delimiter}${original.PATH ?? ''}`;
+    // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
+    process.env['HOME'] = homeDir;
+    process.env['USERPROFILE'] = homeDir;
+    return await run();
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   }
+}
 
+describe('cortex doctor', () => {
   it('exits non-zero on a broken installation and names a fix for each failure', async () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-doctor-cli-'));
     const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-home-'));
@@ -1854,6 +1851,191 @@ describe('cortex doctor', () => {
     expect(failing.map(check => `${check.id}: ${check.detail}`)).toEqual([]);
     expect(parsed.ok).toBe(true);
     expect(run.exitCode).toBeUndefined();
+  });
+});
+
+describe('cortex install (CLI layer)', () => {
+  /** A sandboxed home + project + fake PATH, ready for an install run. */
+  function seedInstallSandbox(): { home: string; project: string; bin: string } {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-ihome-'));
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-iproj-'));
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    return { home, project, bin: seedFakeBinDir() };
+  }
+
+  it('exits non-zero when the diagnostic fails, even though every action succeeded', async () => {
+    // The story's §6 contract: "the install's exit code is the diagnostic's".
+    // A fresh project has no store and no engagement, so install succeeds and
+    // doctor fails — and the exit code must follow doctor.
+    const { home, project, bin } = seedInstallSandbox();
+    const run = await withSandbox(home, bin, () => runCommand(project, ['install']));
+
+    expect(run.stdout).toContain('Install complete.');
+    expect(run.stdout).toContain('Cortex doctor');
+    expect(run.exitCode).toBe(1);
+  });
+
+  it('takes its exit code from the diagnostic, not from its own outcome', async () => {
+    // The story's §6 contract. A second run changes nothing — every action is
+    // `unchanged` and `refusals` is 0 — and it must still exit non-zero while
+    // the diagnostic is failing.
+    const { home, project, bin } = seedInstallSandbox();
+    await withSandbox(home, bin, () => runCommand(project, ['install']));
+
+    const second = await withSandbox(home, bin, () => runCommand(project, ['install']));
+    expect(second.stdout).toContain('Nothing changed');
+    expect(second.exitCode).toBe(1);
+  });
+
+  it('--json carries the diagnostic, so a scripted caller can see why it failed', async () => {
+    const { home, project, bin } = seedInstallSandbox();
+    const run = await withSandbox(home, bin, () => runCommand(project, ['install', '--json']));
+
+    const parsed = JSON.parse(run.stdout) as {
+      refusals: number;
+      diagnostic: { ok: boolean; checks: Array<{ id: string; status: string; fix?: string }> } | null;
+    };
+    expect(run.exitCode).toBe(1);
+    expect(parsed.refusals).toBe(0);
+    // Exiting 1 with `refusals: 0` and nothing else is an unreadable answer
+    // for the one consumer that cannot read the text report.
+    expect(parsed.diagnostic).not.toBeNull();
+    expect(parsed.diagnostic?.ok).toBe(false);
+    for (const check of parsed.diagnostic!.checks.filter(c => c.status === 'fail')) {
+      expect(check.fix, `${check.id} has no fix`).toBeTruthy();
+    }
+  });
+
+  it('--dry-run writes nothing and does not run the diagnostic', async () => {
+    const { home, project, bin } = seedInstallSandbox();
+    const run = await withSandbox(home, bin, () => runCommand(project, ['install', '--dry-run']));
+
+    expect(run.stdout).toContain('dry run — nothing written');
+    expect(run.stdout).not.toContain('Cortex doctor');
+    expect(run.exitCode).toBeUndefined();
+    expect(fs.readdirSync(project)).toEqual([]);
+    expect(fs.existsSync(path.join(home, '.claude', 'hooks'))).toBe(false);
+  });
+
+  it('rejects an unknown --scope instead of silently writing user scope', async () => {
+    const { home, project, bin } = seedInstallSandbox();
+    const run = await withSandbox(home, bin, () => runCommand(project, ['install', '--scope', 'porject']));
+
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr).toContain('unknown --scope');
+    expect(fs.existsSync(path.join(home, '.claude', 'settings.json'))).toBe(false);
+  });
+
+  it('refuses --codex rather than pointing Claude Code at the Codex hooks directory', async () => {
+    const { home, project, bin } = seedInstallSandbox();
+    const run = await withSandbox(home, bin, () => runCommand(project, ['install-hooks', '--codex']));
+
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr).toContain('--codex is no longer supported');
+    expect(fs.existsSync(path.join(home, '.claude', 'settings.json'))).toBe(false);
+  });
+
+  it('writes wiring that survives a home directory containing a space', async () => {
+    // `C:\Users\John Smith`. Unquoted, the shell splits the path and all three
+    // .sh wirings silently never fire.
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-sp-'));
+    const home = path.join(parent, 'John Smith');
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-iproj-'));
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+
+    await withSandbox(home, seedFakeBinDir(), () => runCommand(project, ['install']));
+
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8'),
+    ) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
+
+    for (const event of ['PostToolUse', 'PreToolUse', 'Stop', 'UserPromptSubmit']) {
+      const command = settings.hooks[event]![0]!.hooks[0]!.command;
+      const scriptToken = tokenizeCommand(command).find(token => token.endsWith('.sh'));
+      expect(scriptToken, `${event} lost its script path to tokenization`).toContain('John Smith');
+      expect(fs.existsSync(scriptToken!.replace(/\//g, path.sep))).toBe(true);
+    }
+  });
+});
+
+describe('onlyUnusedProject', () => {
+  const report = (checks: DoctorCheck[]): DoctorReport => ({
+    project: '/p',
+    hooks_dir: '/h',
+    checks,
+    failures: checks.filter(c => c.status === 'fail').length,
+    warnings: checks.filter(c => c.status === 'warn').length,
+    ok: checks.every(c => c.status !== 'fail'),
+  });
+  const fail = (id: string): DoctorCheck => ({ id, label: id, status: 'fail', detail: '', fix: 'x' });
+  const pass = (id: string): DoctorCheck => ({ id, label: id, status: 'pass', detail: '' });
+
+  it('is true when only engagement and database fail', () => {
+    expect(onlyUnusedProject(report([fail('engagement'), fail('database'), pass('jq')]))).toBe(true);
+    expect(onlyUnusedProject(report([fail('database')]))).toBe(true);
+  });
+
+  it('is false when anything else fails alongside them', () => {
+    // The reassurance must not appear over a genuinely broken installation.
+    expect(onlyUnusedProject(report([fail('engagement'), fail('jq')]))).toBe(false);
+    expect(onlyUnusedProject(report([fail('hook-currency')]))).toBe(false);
+  });
+
+  it('is false when nothing fails, so it never appears on a clean run', () => {
+    expect(onlyUnusedProject(report([pass('jq'), pass('database')]))).toBe(false);
+  });
+});
+
+describe('renderInstallResult', () => {
+  const result = (actions: InstallAction[]): InstallResult => ({
+    actions,
+    unchanged: actions.every(a => a.outcome === 'unchanged'),
+    refusals: actions.filter(a => a.outcome === 'refused').length,
+    dry_run: false,
+    hooks_dir: '/hooks',
+    settings_path: '/settings.json',
+  });
+
+  it('distinguishes the outcomes rather than printing one badge', () => {
+    const output = renderInstallResult(
+      result([
+        { id: 'a', target: '/a', outcome: 'created', detail: 'installed' },
+        { id: 'b', target: '/b', outcome: 'unchanged', detail: 'already current' },
+        { id: 'c', target: '/c', outcome: 'refused', detail: 'nope', fix: 'do the thing' },
+      ]),
+    );
+    expect(output).toContain('NEW ');
+    expect(output).toContain('SAME');
+    expect(output).toContain('STOP');
+    expect(output).toContain('fix: do the thing');
+  });
+
+  it('does not claim nothing was left half-done when actions were applied', () => {
+    const output = renderInstallResult(
+      result([
+        { id: 'a', target: '/a', outcome: 'created', detail: 'installed' },
+        { id: 'b', target: '/b', outcome: 'refused', detail: 'nope', fix: 'x' },
+      ]),
+    );
+    expect(output).not.toContain('nothing else was left half-done');
+    expect(output).toContain('1 other action already applied');
+  });
+
+  it('says nothing was written when the first action refused', () => {
+    const output = renderInstallResult(
+      result([{ id: 'a', target: '/a', outcome: 'refused', detail: 'nope', fix: 'x' }]),
+    );
+    expect(output).toContain('nothing was written');
+  });
+
+  it('collapses a detail that would otherwise forge a row', () => {
+    const output = renderInstallResult(
+      result([
+        { id: 'a', target: '/a\n  NEW   forged', outcome: 'refused', detail: 'x\ny', fix: 'p\nq' },
+      ]),
+    );
+    expect(output.split('\n').filter(line => /^ {2}(NEW|WROTE|SAME|STOP)/.test(line))).toHaveLength(1);
+    expect(output).toContain('fix: p q');
   });
 });
 

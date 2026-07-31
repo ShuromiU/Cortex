@@ -42,6 +42,11 @@ interface Fixture {
   hookEntry: string;
 }
 
+function writeFile(target: string, content: string): void {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, content);
+}
+
 function buildFixture(): Fixture {
   const projectDir = path.join(root, 'project');
   const homeDir = path.join(root, 'home');
@@ -557,6 +562,27 @@ describe('installedMatchesTemplate', () => {
     expect(installedMatchesTemplate(template, rendered.replace(/\n/g, '\r\n'))).toBe(true);
   });
 
+  it('treats an unrecognised __CORTEX_*__ token as literal text, not a wildcard', () => {
+    // The split pattern lists four placeholders; a second, broader test for
+    // "is this a placeholder" would turn any other `__CORTEX_X__` token into an
+    // unconstrained capture that matches anything. No shipped template has one
+    // — this pins that the two patterns cannot drift apart.
+    // Adjacency is what makes it reachable: splitting on the four known
+    // placeholders leaves an unknown one as a fragment of its own only when
+    // nothing separates it from a known token.
+    const template = '#!/bin/bash\n"__CORTEX_NODE____CORTEX_SPOOL____CORTEX_CLI__"\n';
+    const rendered = renderHookScript(template, {
+      nodePath: '/n/node',
+      cliEntry: '/c/cli.js',
+      hookEntry: '/h',
+    });
+    expect(rendered).toContain('__CORTEX_SPOOL__');
+    expect(installedMatchesTemplate(template, rendered)).toBe(true);
+    expect(
+      installedMatchesTemplate(template, rendered.replace('__CORTEX_SPOOL__', 'ANYTHING-AT-ALL')),
+    ).toBe(false);
+  });
+
   it('is not fooled by regex metacharacters in the template', () => {
     const tricky = '#!/bin/bash\ncase "$X" in\n  a|b) echo "(.+?)" ;;\nesac\n"__CORTEX_NODE__"\n';
     const rendered = renderHookScript(tricky, {
@@ -630,6 +656,349 @@ describe('writeFileAtomic', () => {
     writeFileAtomic(target, 'one');
     writeFileAtomic(target, 'two');
     expect(fs.readFileSync(target, 'utf8')).toBe('two');
+  });
+});
+
+// ── Repairs from the story 2.4 review ─────────────────────────────────
+
+describe('repairing an existing wiring, not just detecting one', () => {
+  it('rewrites a PostToolUse matcher that has lost Agent', () => {
+    // `doctor` warns about this and its fix says "or run `cortex install`,
+    // which writes it". Presence was decided by the command alone, so the
+    // matcher was never touched and the fix was a no-op — the exact loop
+    // doctor.ts says must never exist.
+    const fixture = buildFixture();
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    const posixHooks = fixture.hooksDir.split(path.sep).join('/');
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: 'Read|Edit|Write|Bash',
+              hooks: [{ type: 'command', command: `bash "${posixHooks}/cortex-capture.sh"` }],
+            },
+          ],
+        },
+      }),
+    );
+
+    install(fixture);
+
+    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as {
+      hooks: Record<string, Array<{ matcher?: string; hooks: unknown[] }>>;
+    };
+    expect(after.hooks['PostToolUse']).toHaveLength(1);
+    expect(after.hooks['PostToolUse']![0]!.matcher).toBe('Read|Edit|Write|Bash|Agent');
+  });
+
+  it('rewrites a SessionStart command whose Node moved', () => {
+    const fixture = buildFixture();
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        hooks: {
+          SessionStart: [
+            { hooks: [{ type: 'command', command: '"/gone/node.exe" "/gone/cli.js" inject-header --quiet' }] },
+          ],
+        },
+      }),
+    );
+
+    install(fixture);
+
+    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    };
+    expect(after.hooks['SessionStart']).toHaveLength(1);
+    const tokens = tokenizeCommand(after.hooks['SessionStart']![0]!.hooks[0]!.command);
+    expect(tokens[0]).toBe(fixture.nodePath);
+    expect(tokens[1]).toBe(fixture.cliEntry);
+  });
+
+  it('converges: a second run after a repair reports unchanged', () => {
+    const fixture = buildFixture();
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    const posixHooks = fixture.hooksDir.split(path.sep).join('/');
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: 'Read|Edit|Write|Bash',
+              hooks: [{ type: 'command', command: `bash "${posixHooks}/cortex-capture.sh"` }],
+            },
+          ],
+        },
+      }),
+    );
+    install(fixture);
+    expect(install(fixture).unchanged).toBe(true);
+  });
+
+  it('reports the number of events it actually wired', () => {
+    const fixture = buildFixture();
+    install(fixture);
+
+    // Remove one wiring, leaving four.
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as {
+      hooks: Record<string, unknown>;
+    };
+    delete settings.hooks['Stop'];
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+
+    const result = install(fixture);
+    const detail = result.actions.find(action => action.id === 'settings')?.detail ?? '';
+    expect(detail).toContain('wired 1 event');
+    expect(detail).not.toContain('5 events');
+  });
+});
+
+describe('settings files Claude Code merges', () => {
+  it('does not add a second entry for an event another file already wires', () => {
+    // Claude Code reads the union of the project and user settings files, so a
+    // second entry does not replace the first — both fire, doubling every
+    // spool line, reflex and flush, and neither install nor doctor can see it.
+    const fixture = buildFixture();
+    const posixHooks = fixture.hooksDir.split(path.sep).join('/');
+    writeFile(
+      path.join(fixture.projectDir, '.claude', 'settings.local.json'),
+      JSON.stringify({
+        hooks: {
+          Stop: [{ hooks: [{ type: 'command', command: `bash "${posixHooks}/cortex-end-of-turn.sh"` }] }],
+        },
+      }),
+    );
+
+    install(fixture);
+
+    const userSettings = JSON.parse(
+      fs.readFileSync(path.join(fixture.homeDir, '.claude', 'settings.json'), 'utf8'),
+    ) as { hooks: Record<string, unknown[] | undefined> };
+    expect(userSettings.hooks['Stop']).toBeUndefined();
+    // The events that file does not wire are still written here.
+    expect(userSettings.hooks['PostToolUse']).toHaveLength(1);
+  });
+});
+
+describe('an edit confined to a placeholder slot (AC #3)', () => {
+  it('is detected as modified, not silently overwritten', () => {
+    // The capture was `[^\n]+?`, so any edit leaving the surrounding literal
+    // text intact read as `unmodified` — and `unmodified` overwrote with no
+    // backup. Verified against every shipped script, not only the one that
+    // happens to repeat a placeholder.
+    const fixture = buildFixture();
+    install(fixture);
+
+    for (const script of HOOK_SCRIPTS) {
+      const template = fs.readFileSync(path.join(fixture.templateDir, script), 'utf8');
+      const target = path.join(fixture.hooksDir, script);
+      const clean = fs.readFileSync(target, 'utf8');
+      expect(classifyInstalledScript(template, clean)).toBe('unmodified');
+
+      // Close the quote, add a command, reopen it. Nothing outside the slot moves.
+      const injected = clean.replace(
+        `"${fixture.nodePath}"`,
+        `"${fixture.nodePath}" ; echo edited ; "${fixture.nodePath}"`,
+      );
+      expect(injected, `${script} has no node placeholder to edit`).not.toBe(clean);
+      expect(classifyInstalledScript(template, injected), script).toBe('modified');
+    }
+  });
+
+  it('refuses such a script and leaves it on disk', () => {
+    const fixture = buildFixture();
+    install(fixture);
+    const target = path.join(fixture.hooksDir, 'cortex-capture.sh');
+    const injected = fs
+      .readFileSync(target, 'utf8')
+      .replace(`"${fixture.nodePath}"`, `"${fixture.nodePath}" ; echo edited ; "${fixture.nodePath}"`);
+    fs.writeFileSync(target, injected);
+
+    const result = install(fixture);
+    expect(outcomeOf(result, 'hook:cortex-capture.sh')).toBe('refused');
+    expect(fs.readFileSync(target, 'utf8')).toBe(injected);
+  });
+
+  it('keeps a backup on every overwrite of existing content', () => {
+    // Including the `unmodified` path, which previously got none — and which
+    // is where an edited script landed.
+    const fixture = buildFixture();
+    install(fixture);
+    const target = path.join(fixture.hooksDir, 'cortex-capture.sh');
+    const original = fs.readFileSync(target, 'utf8');
+
+    const moved = path.join(root, 'moved-node.exe');
+    fs.writeFileSync(moved, '');
+    install(fixture, { nodePath: moved });
+
+    expect(fs.readFileSync(`${target}.bak`, 'utf8')).toBe(original);
+  });
+});
+
+describe('paths the shell would mangle', () => {
+  it('refuses a hooks directory containing a shell expander', () => {
+    // Double quotes do not protect `$` or a backtick, so the written wiring
+    // would resolve somewhere else — and `doctor` would report it healthy,
+    // because it reads the literal string and finds the file at the literal
+    // path. `$(...)` would be executed on every hook fire.
+    const fixture = buildFixture();
+    const unsafe = path.join(root, 'ho$me', 'hooks');
+    const result = install(fixture, { hooksDir: unsafe });
+
+    expect(outcomeOf(result, 'hooks-dir')).toBe('refused');
+    expect(result.refusals).toBe(1);
+    expect(result.actions.find(a => a.id === 'hooks-dir')?.fix).toContain('--dir');
+    expect(fs.existsSync(unsafe)).toBe(false);
+  });
+
+  it('accepts an ordinary path with spaces', () => {
+    const fixture = buildFixture();
+    const spaced = path.join(root, 'Program Files', 'hooks');
+    const result = install(fixture, { hooksDir: spaced });
+    expect(result.refusals).toBe(0);
+    expect(fs.existsSync(path.join(spaced, 'cortex-capture.sh'))).toBe(true);
+  });
+
+  it('expands ~ in an explicit hooks directory', () => {
+    const fixture = buildFixture();
+    const result = install(fixture, { hooksDir: '~/elsewhere' });
+    expect(result.hooks_dir).toBe(path.normalize(path.join(fixture.homeDir, 'elsewhere')));
+    expect(fs.existsSync(path.join(fixture.homeDir, 'elsewhere', 'cortex-capture.sh'))).toBe(true);
+  });
+});
+
+describe('filesystem errors', () => {
+  it('reports a .gitignore that is a directory instead of throwing', () => {
+    const fixture = buildFixture();
+    fs.mkdirSync(path.join(fixture.projectDir, '.gitignore'));
+
+    // Previously this threw EISDIR out of runInstall, after three hook scripts
+    // and the settings file had already been written.
+    const result = install(fixture);
+    expect(outcomeOf(result, 'ignore')).toBe('refused');
+    expect(result.actions.find(a => a.id === 'ignore')?.fix).toBeTruthy();
+    // And the actions that did succeed are still reported.
+    expect(outcomeOf(result, 'hook:cortex-capture.sh')).toBe('created');
+  });
+
+  it('reports a hook script path that is a directory instead of throwing', () => {
+    const fixture = buildFixture();
+    fs.mkdirSync(path.join(fixture.hooksDir, 'cortex-capture.sh'), { recursive: true });
+
+    const result = install(fixture);
+    expect(outcomeOf(result, 'hook:cortex-capture.sh')).toBe('refused');
+    expect(outcomeOf(result, 'hook:cortex-reflect.sh')).toBe('created');
+  });
+});
+
+describe('defaults', () => {
+  it('resolves real CLI and hook-entry paths rather than empty strings', () => {
+    // Defaulting these to '' wrote `"<node>" "" flush-spool`, skipped
+    // SessionStart silently, and made the next run refuse all three scripts as
+    // user-edited — the installer accusing the user of editing its own output.
+    const fixture = buildFixture();
+    const result = runInstall({
+      projectDir: fixture.projectDir,
+      homeDir: fixture.homeDir,
+      hooksDir: fixture.hooksDir,
+      templateDir: fixture.templateDir,
+      nodePath: fixture.nodePath,
+    });
+    expect(result.refusals).toBe(0);
+
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(fixture.homeDir, '.claude', 'settings.json'), 'utf8'),
+    ) as { hooks: Record<string, unknown[]>; mcpServers: Record<string, { args: string[] }> };
+    expect(settings.hooks['SessionStart']).toHaveLength(1);
+    expect(settings.mcpServers['cortex']?.args[0]).not.toBe('');
+    // The invocation line must name a real CLI path, not an empty argument.
+    // (`LINE=""` appears legitimately in the template, so a bare `""` search
+    // would be a false positive.)
+    const capture = fs.readFileSync(path.join(fixture.hooksDir, 'cortex-capture.sh'), 'utf8');
+    expect(capture).not.toMatch(/"[^"\n]*node[^"\n]*"\s+""/);
+    expect(capture).toContain('cli.js');
+
+    // And it converges rather than refusing its own output.
+    const second = runInstall({
+      projectDir: fixture.projectDir,
+      homeDir: fixture.homeDir,
+      hooksDir: fixture.hooksDir,
+      templateDir: fixture.templateDir,
+      nodePath: fixture.nodePath,
+    });
+    expect(second.refusals).toBe(0);
+    expect(second.unchanged).toBe(true);
+  });
+});
+
+describe('line endings', () => {
+  it('writes LF scripts even from a CRLF template', () => {
+    // No .gitattributes, so a Windows checkout has CRLF templates. Every
+    // validator normalises before comparing, so a CRLF script was written and
+    // reported fully current — while bash on Linux, macOS and WSL rejects it,
+    // and `npm pack` from Windows shipped it.
+    const fixture = buildFixture();
+    const crlfDir = path.join(root, 'crlf-templates');
+    fs.mkdirSync(crlfDir, { recursive: true });
+    for (const script of HOOK_SCRIPTS) {
+      const text = fs.readFileSync(path.join(fixture.templateDir, script), 'utf8');
+      fs.writeFileSync(path.join(crlfDir, script), text.replace(/\r?\n/g, '\r\n'));
+    }
+
+    install(fixture, { templateDir: crlfDir });
+
+    for (const script of HOOK_SCRIPTS) {
+      const bytes = fs.readFileSync(path.join(fixture.hooksDir, script));
+      expect(bytes.includes(0x0d), `${script} carries CR bytes`).toBe(false);
+    }
+  });
+});
+
+describe('the ignore list', () => {
+  it('is exactly the seven runtime artifacts, by literal', () => {
+    // Not `for (entry of IGNORE_ENTRIES) expect(text).toContain(entry)` —
+    // that can never fail for a missing entry, because the loop is over the
+    // same constant the code used.
+    expect([...IGNORE_ENTRIES]).toEqual([
+      '.cortex.db',
+      '.cortex.db-wal',
+      '.cortex.db-shm',
+      '.cortex.spool.jsonl',
+      '.cortex.spool.jsonl.processing',
+      '.cortex.state',
+      '.cortex.agent-used',
+    ]);
+  });
+
+  it('does not begin a new .gitignore with a blank line', () => {
+    const fixture = buildFixture();
+    install(fixture);
+    const text = fs.readFileSync(path.join(fixture.projectDir, '.gitignore'), 'utf8');
+    expect(text.startsWith('\n')).toBe(false);
+    expect(text.startsWith('# Cortex runtime artifacts')).toBe(true);
+  });
+});
+
+describe('--dry-run reporting', () => {
+  it('does not claim a backup it did not write', () => {
+    const fixture = buildFixture();
+    const target = path.join(fixture.hooksDir, 'cortex-capture.sh');
+    fs.mkdirSync(fixture.hooksDir, { recursive: true });
+    fs.writeFileSync(target, '#!/bin/bash\n# a pre-stamp install\nexit 0\n');
+
+    const result = install(fixture, { dryRun: true });
+    const detail = result.actions.find(a => a.id === 'hook:cortex-capture.sh')?.detail ?? '';
+    expect(detail).toContain('would be saved');
+    expect(detail).not.toContain('; previous copy saved to');
+    expect(fs.existsSync(`${target}.bak`)).toBe(false);
   });
 });
 

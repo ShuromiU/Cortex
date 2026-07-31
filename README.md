@@ -149,16 +149,20 @@ cortex install
 
 Writes the three hook scripts with your Node and Cortex paths baked in, merges the hook wiring into `~/.claude/settings.json`, registers the MCP server, and adds Cortex's runtime artifacts to `.gitignore` — then runs `cortex doctor` and exits with its verdict. `cortex install-hooks` is the same command under its old name.
 
-`--scope project` writes `<project>/.claude/settings.json` and registers the server in `<project>/.mcp.json` instead. `--dry-run` reports every outcome and writes nothing. `--json` emits the result for scripting.
+`--scope project` writes `<project>/.claude/settings.json` and registers the server in `<project>/.mcp.json` instead; an unrecognised scope is rejected rather than silently treated as `user`. `--dry-run` reports every outcome and writes nothing, and does not run the diagnostic — it has nothing to diagnose. `--json` emits the result for scripting, with the diagnostic embedded, so a scripted caller can see why a run exited non-zero.
 
 **Running it again changes nothing.** Not "rewrites the same content" — an unchanged installation produces byte-identical files, so mtimes, backups and your settings formatting are all left alone, and it says `Nothing changed`.
 
 What it will not do without being told:
 
-- **A hook script you edited is refused, not overwritten.** Cortex can tell the difference because each installed script carries a digest of the template it came from; if the file is not exactly what the installer would have written, it stops and names `--force`. With `--force`, your version is saved to `<script>.bak` first.
-- **A script from an older Cortex is backed up and replaced**, not refused. Those predate the template stamp, and refusing them would break the repair path `cortex doctor` recommends. The previous copy is kept as `<script>.bak`.
+- **A hook script you edited is refused, not overwritten.** Each installed script carries a digest of the template it came from, and Cortex re-matches the whole template against the file: if it is not exactly what the installer would have written — with any paths — it stops and names `--force`. With `--force`, your version is saved to `<script>.bak` first.
+- **A script whose stamp is not this build's is backed up and replaced**, not refused. That covers anything installed before stamping existed, and anything from a different version. Refusing would break the repair path `cortex doctor` recommends. **Any** overwrite of an existing script keeps a `<script>.bak`, including the ordinary case where only the baked-in paths changed.
 - **An existing `cortex` MCP registration is left alone.** It may point at a checkout you prefer.
 - **A settings file that does not parse is refused, never clobbered.** Fix the JSON and re-run.
+- **A wiring another settings file already provides is not duplicated.** Claude Code merges `<project>/.claude/settings.json`, `settings.local.json` and `~/.claude/settings.json`, so a second entry would not replace the first — both would fire.
+- **A hooks directory containing `$`, a backtick or a backslash is refused.** Those are expanded by the shell inside the quoted wiring, so the hook would resolve somewhere else while still looking correct. Spaces are fine.
+
+It does **repair** what it finds: a `PostToolUse` matcher that has lost `Agent`, or a `SessionStart` command naming a Node that moved, are rewritten in place rather than left alone. Detecting that something is wired is not the same as checking that the wiring is right.
 
 Two things it does change that are worth knowing: your settings file is **reformatted** to two-space JSON, because it is parsed and re-serialised (comments do not survive — a `.bak` is written before the first modification), and everything Cortex writes lands via a temp file and a rename, so a half-written `settings.json` is not possible.
 

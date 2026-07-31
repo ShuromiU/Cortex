@@ -184,4 +184,55 @@ The remaining survivor is honest: `writeFileAtomic` replaced with a direct write
 
 ## Senior Developer Review (AI)
 
-_(populated during code-review)_
+Three parallel layers against `918dd1a..3c85a0b`. All three completed and each independently reproduced the verification baseline first — build, lint, 999 tests, 8 suites at the declared token counts — so **nothing below was caught by any verification command**. ~25 distinct findings after dedup; all repaired.
+
+### The story's own purpose was broken in three places
+
+**1. `install` could not repair anything.** `commandSatisfiesWiring` answers "is something here", never "is what is here correct", and the merge only ever *appended* when nothing matched. So a `PostToolUse` matcher that had lost `Agent` — the pre-Story-0.2 value — was left exactly as it was while the run reported `settings: updated`. Two layers found it independently; I reproduced it:
+
+```
+matcher after install: "Read|Edit|Write|Bash"
+doctor's fix:          …or run `cortex install`, which writes it.
+```
+
+That fix string is one I wrote **in this story**, and the README carried the same claim. It is precisely the "a named fix that is wrong is worse than a generic one" rule from 2.3's review, broken one story later in the command the fix names. Same root cause left a `SessionStart` command naming a moved Node unrepaired, producing a permanent exit 1 whose named fix is the command itself.
+
+Now: matcher and command are rewritten in place, and a second run converges to `unchanged`.
+
+**2. Idempotency was per-file; Claude Code merges three.** A wiring already present in `settings.local.json` did not stop install writing another into `~/.claude/settings.json`. Both fire — double spool lines, double reflex, double flush — and `doctor` reports all-pass. The module docstring named this exact hazard and then guarded one file only. The merge now reads all three.
+
+**3. AC #3 had a hole the size of the AC.** Captures were `([^\n]+?)` with no content restriction, so any edit leaving the surrounding literal text intact classified as `unmodified` — and `unmodified` overwrote **with no backup**. Verified by closing the quote inside the placeholder slot, adding a command, and reopening it:
+
+```
+cortex-capture.sh   matches=true  verdict=unmodified  outcome=updated  backup=false
+```
+
+The README said the opposite in as many words. Exposure was uneven and therefore hard to reason about: `cortex-reflect.sh` was safe only because it repeats `__CORTEX_NODE__`, so the backreference forced agreement. Fixed by excluding `"` from the capture — those placeholders always sit inside double-quoted strings — and by keeping a `.bak` on **every** overwrite of existing content, not only the `unknown` and `--force` paths.
+
+### Three more that would have shipped broken installs
+
+- **CRLF hook scripts, structurally invisible.** No `.gitattributes`, so a Windows checkout has CRLF templates; the renderer preserved them while every validator normalises before comparing. Measured: a script written with 70 CR bytes and reported fully current. Git Bash tolerates it, bash on Linux/macOS/WSL does not, and 2.3 added `hooks/` to `package.json` `files`, so `npm pack` from Windows published it. Now written LF.
+- **`--codex` rewrote Claude Code's settings** to run its hooks out of `~/.codex/hooks`, because it redirected only the hooks directory while scope stayed `user`. Now refused with an explanation.
+- **Shell metacharacters were interpolated unescaped.** Double quotes do not protect `$` or a backtick, so a hooks directory containing one produced a wiring that resolves elsewhere — while `doctor` reports it healthy, because it reads the literal string and finds the file at the literal path. `$(...)` would execute on every hook fire. Refused rather than escaped, because escaping correctly requires knowing which shell the host uses.
+
+### And the reporting lied in four ways
+
+An unguarded throw left a half-done install printing a bare errno with no path, under a summary claiming nothing was left half-done · `--dry-run` reported a `.bak` it had not written · the settings detail printed `REQUIRED_WIRING.length` unconditionally, so a run that wired one event said "wired 5 events" and a run that wired none said the same · `--json` exited 1 carrying `refusals: 0` and no diagnostic anywhere, for the one consumer that cannot read the table.
+
+Also fixed: `--scope` typos silently fell back to `user`; `--dir` did not expand `~`; `cliEntry`/`hookEntry` defaulted to `''`, producing an install that skipped `SessionStart` silently and then **refused its own output** on the next run; a `.gitignore` created from nothing began with a blank line; the renderer was misaligned by one column; and three places in `CLAUDE.md` and `doctor.ts` still described the printed JSON snippet this story deleted.
+
+### The test gap that let all of it through
+
+**There was no CLI-level test for `install` at all.** A reviewer found 10 of 11 targeted mutations surviving there — including the story's own §6 contract that the exit code follows the diagnostic. Five findings lived in that gap and three more in the install→doctor composition the story is named for. The `.gitignore` test was also tautological: iterating `IGNORE_ENTRIES` and asserting each is present cannot fail for a missing entry, because it loops over the same constant the code used.
+
+Added: CLI coverage for exit-code composition, `--scope`, `--codex`, `--json`, `--dry-run`, the renderer, and a home directory containing a space; and the ignore list pinned as a literal.
+
+### Verification after repair
+
+**1032 tests / 32 files green** (999 → 1032). Lint clean. Gate: 8 suites, exact zero delta. All four probes that proved the original findings now show the repaired behaviour.
+
+**Repair mutation campaign: 26 mutations, 26 killed, 0 unapplied.** The single round-one survivor was the defensive half of a real fix — two placeholder regexes that must agree — and killing it needed a template with *adjacent* placeholders, which is the only shape where the broader pattern is reachable. My first attempt at that test did not reproduce the shape and the mutation survived again; the second did.
+
+### Claims the reviewers confirmed
+
+AC #2's byte-identity is genuinely proven, not proxied — one layer re-ran it and extended it to project scope, which my tests had not covered. `REQUIRED_WIRING` is a single declaration consumed by both commands, certified. All 16 public symbols reach `src/index.ts`. `renderHookScript` is the only substitution site. The 2.3 test that wrote the real environment is genuinely sandboxed. The `atomic-write-is-direct` survivor was independently judged honest.

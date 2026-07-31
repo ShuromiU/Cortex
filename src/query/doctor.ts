@@ -95,9 +95,9 @@ export const SPOOL_THRESHOLD_BYTES = 262144;
 export const SPOOL_STALE_MS = 60 * 60 * 1000;
 
 /**
- * The wirings `install-hooks` prints, matched against a command's **tokens**.
+ * The wirings `install` writes, matched against a command's **tokens**.
  *
- * Not a raw substring of the command: the snippet `install-hooks` itself prints
+ * Not a raw substring of the command: the wiring `install` writes
  * quotes the script path (`bash "…/cortex-reflect.sh" reflect-pre`), so a
  * needle of `cortex-reflect.sh reflect-pre` never matches the canonical wiring
  * — the diagnostic would report a correct installation as unwired. Matching on
@@ -623,9 +623,9 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
   // pre-Story-0.2 value, and it breaks subagent capture exactly as a stale
   // script does — silently, with every subagent tool call filed under the
   // primary session. Without this check, a user who hits the currency failure,
-  // re-copies the scripts but never re-merges the printed JSON gets a green
-  // currency row and dead subagent capture: the fix `doctor` prints would turn
-  // a detectable failure into an undetectable one.
+  // re-copies the scripts by hand rather than running `cortex install` gets a
+  // green currency row and dead subagent capture: the fix `doctor` prints
+  // would turn a detectable failure into an undetectable one.
   const captureMatchers = commands
     .filter(entry => entry.event === 'PostToolUse' && entry.command.includes('cortex-capture.sh'))
     .map(entry => entry.matcher);
