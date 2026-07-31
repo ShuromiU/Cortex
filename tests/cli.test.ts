@@ -1799,7 +1799,15 @@ describe('cortex doctor', () => {
     // two ever disagree, a correct install reports itself out of date forever
     // and the fix it names does not work.
     const hooksDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-hooks-'));
-    await runCommand(process.cwd(), ['install-hooks', '--dir', hooksDir]);
+    // Fully sandboxed, and the cwd is a temp project. `install-hooks` is now
+    // an alias for the whole install, so running it from the repository root
+    // against the real HOME would write the developer's settings.json and the
+    // repository's own .gitignore. That happened once; it does not again.
+    const installHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-home-'));
+    const installProject = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-proj-'));
+    await withSandbox(installHome, seedFakeBinDir(), () =>
+      runCommand(installProject, ['install-hooks', '--dir', hooksDir]),
+    );
 
     for (const script of ['cortex-capture.sh', 'cortex-reflect.sh', 'cortex-end-of-turn.sh']) {
       const installed = fs.readFileSync(path.join(hooksDir, script), 'utf8');

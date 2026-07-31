@@ -297,7 +297,7 @@ describe('hook version currency (AC #2)', () => {
 
     // AC #2: names re-running the install command as the fix.
     const fix = report.checks.find(check => check.id === 'hook-currency')?.fix ?? '';
-    expect(fix).toContain('cortex install-hooks');
+    expect(fix).toContain('cortex install');
   });
 
   it('fails a script with no stamp at all — every pre-stamping install', () => {

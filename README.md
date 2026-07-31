@@ -124,7 +124,7 @@ Use `cortex inject-header` without `--quiet` only when you explicitly want to pr
 
 ### Capture, Reflex, and Stop Hooks
 
-Run `cortex install-hooks --claude` to install the canonical scripts into `~/.claude/hooks` with your Node and Cortex paths baked in. It prints the exact `hooks` JSON to merge into settings. The wiring:
+`cortex install` writes these for you — see [Installing in one command](#installing-in-one-command). The wiring it produces:
 
 | Event | Matcher | Script | Cost |
 |---|---|---|---|
@@ -139,7 +139,30 @@ The spool (`.cortex.spool.jsonl`) is flushed at turn end, at a 256 KiB threshold
 
 A session is identified by `(scope_key, agent_id)`. Each spool line carries the `agent_id` and `agent_type` the host reported, so the flush files a subagent's reads, edits and commands under a child session of its own — recording `parent_session_id` and inheriting the parent's scope — instead of merging them into the parent's timeline. A line without an `agent_id`, including every line written by a hook installed before this existed, resolves to the primary session. A subagent's tool call never rotates or ends the session that dispatched it, and ending a session ends its children so they stay reachable by consolidation and GC.
 
-Branch snapshots, scoped session listings and the recent-session tail read primary sessions only; child timelines are reached explicitly. If you upgraded the package but subagent activity still lands on the parent, one of two things is stale: the installed `cortex-capture.sh` predates the change, or the `PostToolUse` matcher in your settings no longer lists `Agent`. `cortex doctor` reports both — the first as a failing hook-currency check, the second as a capture-matcher warning. Re-running `cortex install-hooks --claude` fixes the script; the matcher needs the printed JSON merged into settings, which is why the doctor checks them separately.
+Branch snapshots, scoped session listings and the recent-session tail read primary sessions only; child timelines are reached explicitly. If you upgraded the package but subagent activity still lands on the parent, one of two things is stale: the installed `cortex-capture.sh` predates the change, or the `PostToolUse` matcher in your settings no longer lists `Agent`. `cortex doctor` reports both — the first as a failing hook-currency check, the second as a capture-matcher warning. Running `cortex install` fixes both — it rewrites the script and writes the matcher.
+
+## Installing in one command
+
+```bash
+cortex install
+```
+
+Writes the three hook scripts with your Node and Cortex paths baked in, merges the hook wiring into `~/.claude/settings.json`, registers the MCP server, and adds Cortex's runtime artifacts to `.gitignore` — then runs `cortex doctor` and exits with its verdict. `cortex install-hooks` is the same command under its old name.
+
+`--scope project` writes `<project>/.claude/settings.json` and registers the server in `<project>/.mcp.json` instead. `--dry-run` reports every outcome and writes nothing. `--json` emits the result for scripting.
+
+**Running it again changes nothing.** Not "rewrites the same content" — an unchanged installation produces byte-identical files, so mtimes, backups and your settings formatting are all left alone, and it says `Nothing changed`.
+
+What it will not do without being told:
+
+- **A hook script you edited is refused, not overwritten.** Cortex can tell the difference because each installed script carries a digest of the template it came from; if the file is not exactly what the installer would have written, it stops and names `--force`. With `--force`, your version is saved to `<script>.bak` first.
+- **A script from an older Cortex is backed up and replaced**, not refused. Those predate the template stamp, and refusing them would break the repair path `cortex doctor` recommends. The previous copy is kept as `<script>.bak`.
+- **An existing `cortex` MCP registration is left alone.** It may point at a checkout you prefer.
+- **A settings file that does not parse is refused, never clobbered.** Fix the JSON and re-run.
+
+Two things it does change that are worth knowing: your settings file is **reformatted** to two-space JSON, because it is parsed and re-serialised (comments do not survive — a `.bak` is written before the first modification), and everything Cortex writes lands via a temp file and a rename, so a half-written `settings.json` is not possible.
+
+`cortex install` does not create the memory store or engage Cortex for the project — those happen on your first session, or immediately with `cortex inject-header --quiet`. Until then the diagnostic reports two failures for that reason and says so.
 
 ## Diagnosing the installation
 
@@ -153,7 +176,7 @@ It reports which settings files were readable, engagement state, hook wiring, th
 
 Exit codes: **1 if any check fails, 0 otherwise** — so it can gate CI. Warnings do not fail the run; a project you deliberately disengaged with `cortex_disengage` warns and exits 0.
 
-The check worth knowing about is **hook version currency**. A hook script installed by an older version stays syntactically valid, correctly substituted, and wired — it simply no longer does what the current build expects. Nothing about it looks broken. `install-hooks` therefore stamps each installed script with a digest of the template it rendered, and `doctor` recompares that against the template the running build ships. A script with an older stamp, or with no stamp at all, is reported out of date with `cortex install-hooks --claude` as the fix, and fails the run.
+The check worth knowing about is **hook version currency**. A hook script installed by an older version stays syntactically valid, correctly substituted, and wired — it simply no longer does what the current build expects. Nothing about it looks broken. `cortex install` therefore stamps each installed script with a digest of the template it rendered, and `doctor` recompares that against the template the running build ships. A script with an older stamp, or with no stamp at all, is reported out of date with `cortex install` as the fix, and fails the run.
 
 Two limits, stated rather than implied:
 
@@ -301,7 +324,10 @@ cortex gc            # dry-run report
 cortex gc --apply    # actually prune (+ VACUUM when fragmented)
 cortex doctor
 cortex doctor --json
-cortex install-hooks --claude
+cortex install
+cortex install --dry-run
+cortex install --scope project
+cortex install --force
 cortex serve
 cortex log read
 cortex log edit

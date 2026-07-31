@@ -44,13 +44,11 @@ import { ensureScopedSession, syncBranchSnapshotForSession } from '../scope/runt
 import { refreshCurrentAppGraph } from '../scope/app-graph.js';
 import { suggestNotes } from '../query/suggest-notes.js';
 import {
-  HOOK_SCRIPTS,
-  TEMPLATE_ID_PLACEHOLDER,
-  hookTemplateDigest,
   runDoctor,
   type DoctorCheck,
   type DoctorReport,
 } from '../query/doctor.js';
+import { runInstall, type InstallAction, type InstallResult } from '../query/install.js';
 import { validateMemory } from '../query/validate-memory.js';
 import {
   listMemory,
@@ -206,6 +204,46 @@ function spoofedTrailerLine(text: string): string | null {
 /** Quote a value for the copy-pasteable next-page command. */
 function shellQuote(value: string): string {
   return /^[A-Za-z0-9,._:@/+-]+$/.test(value) ? value : JSON.stringify(value);
+}
+
+const INSTALL_BADGE: Record<InstallAction['outcome'], string> = {
+  created: 'NEW ',
+  updated: 'WROTE',
+  unchanged: 'SAME',
+  refused: 'STOP',
+};
+
+/**
+ * Render the install result. Details and fixes interpolate paths and JSON
+ * parser messages from user-controlled files, so each is collapsed onto one
+ * line — the discipline `renderDoctorReport` already applies.
+ */
+export function renderInstallResult(result: InstallResult): string {
+  const lines: string[] = [
+    result.dry_run ? 'Cortex install (dry run — nothing written)' : 'Cortex install',
+    '',
+  ];
+
+  const width = Math.max(...result.actions.map(action => action.id.length));
+  for (const action of result.actions) {
+    lines.push(
+      `  ${INSTALL_BADGE[action.outcome].padEnd(5)} ${action.id.padEnd(width)}  ${collapseToLine(action.detail)}`,
+    );
+    lines.push(`${' '.repeat(width + 9)}${collapseToLine(action.target)}`);
+    if (action.outcome === 'refused' && action.fix) {
+      lines.push(`${' '.repeat(width + 9)}fix: ${collapseToLine(action.fix)}`);
+    }
+  }
+
+  lines.push('');
+  if (result.refusals > 0) {
+    lines.push(`${result.refusals} action${result.refusals === 1 ? '' : 's'} refused; nothing else was left half-done.`);
+  } else if (result.unchanged) {
+    lines.push('Nothing changed — this installation is already current.');
+  } else {
+    lines.push(result.dry_run ? 'Re-run without --dry-run to apply.' : 'Install complete.');
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 const CHECK_BADGE: Record<DoctorCheck['status'], string> = {
@@ -1013,79 +1051,91 @@ export function createProgram(): Command {
     });
 
   program
-    .command('install-hooks')
-    .description('Install canonical Cortex hook scripts for a harness')
-    .option('--claude', 'Install for Claude Code (~/.claude/hooks)')
-    .option('--codex', 'Install for Codex (~/.codex/hooks)')
+    .command('install')
+    // `install-hooks` is retained, not deprecated away: eight fix strings in
+    // `doctor` and four places in the README name it, and every hook installed
+    // before the template stamp is repaired by running exactly that command.
+    // Renaming without the alias would leave the diagnostic naming a command
+    // that does not exist.
+    .alias('install-hooks')
+    .description('Install Cortex: hook scripts, settings wiring, MCP registration, ignore entries')
+    .option('--scope <scope>', 'user (~/.claude) or project (<project>/.claude)', 'user')
+    .option('--force', 'Overwrite hook scripts this command can prove were edited')
+    .option('--dry-run', 'Report what would change without writing anything')
+    .option('--json', 'Emit the raw result instead of the table')
     .option('--dir <path>', 'Override the hooks directory')
-    .action((opts: { claude?: boolean; codex?: boolean; dir?: string }) => {
-      const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-      const templateDir = path.resolve(moduleDir, '..', '..', 'hooks', 'claude');
-      const nodePath = process.execPath;
-      const cliEntry = path.resolve(moduleDir, 'cli.js');
-      const hookEntry = path.resolve(moduleDir, 'hook-entry.js');
+    // Accepted and ignored so the documented `install-hooks --claude`
+    // invocation keeps parsing.
+    .option('--claude', 'Accepted for compatibility; Claude Code is the default target')
+    .option('--codex', 'Accepted for compatibility; hook scripts are harness-independent')
+    .action(
+      (opts: {
+        scope?: string;
+        force?: boolean;
+        dryRun?: boolean;
+        json?: boolean;
+        dir?: string;
+        codex?: boolean;
+      }) => {
+        const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+        const scope = opts.scope === 'project' ? 'project' : 'user';
+        const hooksDir =
+          opts.dir ?? (opts.codex ? path.join(os.homedir(), '.codex', 'hooks') : undefined);
 
-      const targetDir =
-        opts.dir ??
-        (opts.codex
-          ? path.join(os.homedir(), '.codex', 'hooks')
-          : path.join(os.homedir(), '.claude', 'hooks'));
-      fs.mkdirSync(targetDir, { recursive: true });
+        const result = runInstall({
+          projectDir: process.cwd(),
+          scope,
+          ...(hooksDir ? { hooksDir } : {}),
+          ...(opts.force ? { force: true } : {}),
+          ...(opts.dryRun ? { dryRun: true } : {}),
+          nodePath: process.execPath,
+          cliEntry: path.resolve(moduleDir, 'cli.js'),
+          hookEntry: path.resolve(moduleDir, 'hook-entry.js'),
+        });
 
-      for (const script of HOOK_SCRIPTS) {
-        const template = fs.readFileSync(path.join(templateDir, script), 'utf8');
-        // Stamp the template's identity into the installed copy so `cortex
-        // doctor` can tell a current hook from one that merely looks fine. The
-        // digest is of the template as shipped — placeholders intact — which is
-        // exactly what the doctor recomputes.
-        const rendered = template
-          .replaceAll(TEMPLATE_ID_PLACEHOLDER, hookTemplateDigest(template))
-          .replaceAll('__CORTEX_NODE__', nodePath)
-          .replaceAll('__CORTEX_CLI__', cliEntry)
-          .replaceAll('__CORTEX_HOOK_ENTRY__', hookEntry);
-        const target = path.join(targetDir, script);
-        fs.writeFileSync(target, rendered);
-        try {
-          fs.chmodSync(target, 0o755);
-        } catch {
-          // chmod is a no-op on Windows.
+        if (opts.json) {
+          process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        } else {
+          process.stdout.write(renderInstallResult(result));
         }
-        process.stdout.write(`installed ${target}\n`);
-      }
 
-      const hooksDirForSnippet = targetDir.replace(/\\/g, '/');
-      const snippet = {
-        hooks: {
-          SessionStart: [
-            { hooks: [{ type: 'command', command: `"${nodePath}" "${cliEntry}" inject-header --quiet` }] },
-          ],
-          PostToolUse: [
-            {
-              matcher: 'Read|Edit|Write|Bash|Agent',
-              hooks: [{ type: 'command', command: `bash "${hooksDirForSnippet}/cortex-capture.sh"` }],
-            },
-          ],
-          PreToolUse: [
-            {
-              matcher: 'Edit|Write',
-              hooks: [{ type: 'command', command: `bash "${hooksDirForSnippet}/cortex-reflect.sh" reflect-pre` }],
-            },
-          ],
-          UserPromptSubmit: [
-            { hooks: [{ type: 'command', command: `bash "${hooksDirForSnippet}/cortex-reflect.sh" reflect-prompt` }] },
-          ],
-          Stop: [
-            { hooks: [{ type: 'command', command: `bash "${hooksDirForSnippet}/cortex-end-of-turn.sh"` }] },
-          ],
-        },
-      };
-      process.stdout.write(
-        `\nMerge into ${opts.codex ? 'Codex' : 'Claude'} settings (hooks section):\n${JSON.stringify(snippet, null, 2)}\n`,
-      );
-      process.stdout.write(
-        '\nNotes: capture is spooled (no Node per tool call); reflex runs only on Edit|Write and prompts; the Stop nudge fires only with high-confidence suggestions. Remove any old cortex-hook.sh / cortex-mark-agent-used.sh wiring.\n',
-      );
-    });
+        if (result.refusals > 0) {
+          process.exitCode = 1;
+          return;
+        }
+
+        // AC #1: the install runs the diagnostic. A dry run does not — it has
+        // written nothing, so the diagnostic would report the old state and
+        // read as the outcome of an install that never happened.
+        if (opts.dryRun) return;
+
+        const report = runDoctor({ projectDir: process.cwd(), hooksDir: result.hooks_dir });
+        if (!opts.json) {
+          process.stdout.write(`\n${renderDoctorReport(report)}`);
+
+          // AC #1 stops at "runs the diagnostic": engaging Cortex and creating
+          // the store are not among the four actions it enumerates, so this
+          // command does not do them. On a project that has never run Cortex
+          // that leaves exactly two checks failing, and a bare red report after
+          // a successful install reads as a broken install. Say what it is.
+          const outstanding = report.checks.filter(check => check.status === 'fail');
+          const onlyUnused =
+            outstanding.length > 0 &&
+            outstanding.every(check => check.id === 'engagement' || check.id === 'database');
+          if (onlyUnused) {
+            process.stdout.write(
+              '\nThe installation itself is complete. The remaining failures are just this project not having run Cortex yet — they clear on the first session, or now with `cortex inject-header --quiet`.\n',
+            );
+          }
+        }
+        // The install's exit code is the diagnostic's: every action can succeed
+        // and still leave a broken installation (no jq, a Node that moved), and
+        // reporting success there would undo the point of the diagnostic.
+        if (!report.ok) {
+          process.exitCode = 1;
+        }
+      },
+    );
 
   program
     .command('doctor')

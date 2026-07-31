@@ -104,7 +104,7 @@ export const SPOOL_STALE_MS = 60 * 60 * 1000;
  * the script's basename and, where it matters, a separate action token, holds
  * for quoted and unquoted paths, `~` and absolute alike.
  */
-interface RequiredWiring {
+export interface RequiredWiring {
   event: string;
   label: string;
   script?: string;
@@ -114,16 +114,33 @@ interface RequiredWiring {
   token?: string;
   /** When the action may be omitted because the script defaults to it. */
   actionOptionalUnless?: string;
+  /**
+   * The tool matcher this event needs. Carried here rather than in the
+   * installer so that what `install` writes and what `doctor` checks are the
+   * same declaration.
+   */
+  matcher?: string;
 }
 
-const REQUIRED_WIRING: readonly RequiredWiring[] = [
+/**
+ * Exported so `install` writes exactly what `doctor` checks for. One source of
+ * truth: an installer and a diagnostic that disagree about what "wired" means
+ * is the shape where a correct installation reports itself broken.
+ */
+export const REQUIRED_WIRING: readonly RequiredWiring[] = [
   { event: 'SessionStart', label: 'SessionStart (session brief)', token: 'inject-header' },
-  { event: 'PostToolUse', label: 'PostToolUse (capture)', script: 'cortex-capture.sh' },
+  {
+    event: 'PostToolUse',
+    label: 'PostToolUse (capture)',
+    script: 'cortex-capture.sh',
+    matcher: 'Read|Edit|Write|Bash|Agent',
+  },
   {
     event: 'PreToolUse',
     label: 'PreToolUse (reflex)',
     script: 'cortex-reflect.sh',
     action: 'reflect-pre',
+    matcher: 'Edit|Write',
   },
   {
     event: 'UserPromptSubmit',
@@ -160,7 +177,7 @@ export function commandSatisfiesWiring(command: string, required: RequiredWiring
   return true;
 }
 
-const INSTALL_FIX = 'Run `cortex install-hooks --claude` and merge the printed hooks JSON.';
+const INSTALL_FIX = 'Run `cortex install`.';
 
 // ── Primitives ────────────────────────────────────────────────────────
 
@@ -637,7 +654,7 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
             id: 'capture-matcher',
             label: 'Capture matcher',
             detail: `PostToolUse matcher does not cover ${uncovered.join(', ')} — those tool calls are never captured${uncovered.includes('Agent') ? ', so subagent activity is filed under the primary session' : ''}`,
-            fix: `Set the PostToolUse matcher to \`${CAPTURE_TOOLS.join('|')}\`, or re-run \`cortex install-hooks --claude\` and merge the printed JSON.`,
+            fix: `Set the PostToolUse matcher to \`${CAPTURE_TOOLS.join('|')}\`, or run \`cortex install\`, which writes it.`,
           },
     );
   }
