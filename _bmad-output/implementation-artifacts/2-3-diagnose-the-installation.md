@@ -4,7 +4,7 @@ baseline_commit: bc1bab7
 
 # Story 2.3: Diagnose the installation
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 

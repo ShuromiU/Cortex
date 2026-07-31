@@ -87,7 +87,7 @@ development_status:
   epic-2: in-progress
   2-1-list-and-inspect-memory: done
   2-2-correct-and-delete-memory: done
-  2-3-diagnose-the-installation: review
+  2-3-diagnose-the-installation: done
   2-4-install-in-one-idempotent-command: backlog
   2-5-relocate-the-store-out-of-the-project-root: backlog
   2-6-bound-the-write-ahead-log: backlog
