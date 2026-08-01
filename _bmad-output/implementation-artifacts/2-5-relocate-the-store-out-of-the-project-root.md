@@ -4,7 +4,7 @@ baseline_commit: e01c116
 
 # Story 2.5: Relocate the store out of the project root
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
