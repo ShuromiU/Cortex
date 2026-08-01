@@ -8,7 +8,12 @@ import {
   handleReadEvent,
   handleWriteEvent,
 } from '../capture/hooks.js';
-import { openProjectStore } from '../scope/store-migration.js';
+import {
+  installStoreCloseOnExit,
+  openProjectStore,
+  resolveProjectStore,
+} from '../scope/store-migration.js';
+import { maybeCheckpointWal } from '../db/schema.js';
 import { reflectMemory, type ReflexEvent } from '../query/reflex.js';
 import { suggestNotes } from '../query/suggest-notes.js';
 import { flushSpool } from '../capture/spool.js';
@@ -343,6 +348,16 @@ function endOfTurn(
     // Spool replay is best-effort at turn end; next flush picks it up.
   }
 
+  // The one hook path where a checkpoint is safe (FR-25 AC #2). `PostToolUse`
+  // is pure bash and spawns no Node at all (N-4), and `reflect-pre` sits on the
+  // Edit/Write path where latency is the user's, so end-of-turn — after the
+  // turn's work is done — is where a size-triggered checkpoint belongs.
+  try {
+    maybeCheckpointWal(store.db, resolveProjectStore(cwd).dbPath);
+  } catch {
+    // AD-12: a checkpoint that cannot run degrades to silence.
+  }
+
   if (process.env['CORTEX_STOP_NUDGE'] === 'off') {
     return '';
   }
@@ -505,5 +520,7 @@ async function main(): Promise<void> {
 
 const self = process.argv[1] ?? '';
 if (self.endsWith('hook-entry.js') || self.endsWith('hook-entry.ts')) {
+  // Same rule as the CLI: one hook fire is one process, so exit is the close.
+  installStoreCloseOnExit();
   void main();
 }

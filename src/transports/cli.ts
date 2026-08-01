@@ -5,7 +5,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
-import { openDatabase, ensureCortexSchema } from '../db/schema.js';
+import {
+  openDatabase,
+  ensureCortexSchema,
+  databaseSizeBytes,
+  maybeCheckpointWal,
+  walSizeBytes,
+} from '../db/schema.js';
 import { CortexStore } from '../db/store.js';
 import {
   handleReadEvent,
@@ -45,6 +51,7 @@ import { refreshCurrentAppGraph } from '../scope/app-graph.js';
 import {
   adoptStore,
   findAdoptionCandidates,
+  installStoreCloseOnExit,
   openProjectStore,
   resolveProjectStore,
 } from '../scope/store-migration.js';
@@ -77,6 +84,20 @@ import {
   previewMemoryDeletion,
   type MemoryDeletionPreview,
 } from '../query/correct.js';
+
+/** Byte sizes for a footprint report. Whole units; a store is never sub-KB. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '0 B';
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 function findDbPath(startDir: string): string {
   return resolveProjectStore(startDir).dbPath;
@@ -869,7 +890,7 @@ export function createProgram(): Command {
     .command('stats')
     .description('Token savings dashboard')
     .action(() => {
-      const { store } = openCortexDb(process.cwd());
+      const { store, dbPath } = openCortexDb(process.cwd());
       const recentSessions = store.getRecentSessions(10);
       let focus = 'unfocused';
       for (const session of recentSessions) {
@@ -892,6 +913,12 @@ export function createProgram(): Command {
       process.stdout.write(`Saved:         ${formatTokens(saved)}\n`);
       process.stdout.write(`Net:           ${formatTokens(net)}\n`);
       process.stdout.write(`Efficiency:    ${efficiency}%\n`);
+
+      // AC #3: named separately, because "footprint" that folds them together
+      // hides the thing FR-25 is about — a WAL parked at its high-water mark
+      // next to a database that is not growing.
+      process.stdout.write(`Database:      ${formatBytes(databaseSizeBytes(dbPath))}\n`);
+      process.stdout.write(`WAL:           ${formatBytes(walSizeBytes(dbPath))}\n`);
     });
 
   program
@@ -1003,9 +1030,12 @@ export function createProgram(): Command {
     .command('flush-spool')
     .description('Replay spooled hook capture (.cortex.spool.jsonl) into the store')
     .action(() => {
-      const { store } = openCortexDb(process.cwd());
+      const { store, dbPath } = openCortexDb(process.cwd());
       const session = ensureScopedSession(store, process.cwd());
       const result = flushSpool(store, process.cwd(), session.id);
+      // The batch flush is the other place a Node process is already running
+      // and nothing is waiting on it (FR-25 AC #2).
+      maybeCheckpointWal(store.db, dbPath);
       process.stdout.write(`${JSON.stringify(result)}\n`);
     });
 
@@ -1646,6 +1676,10 @@ export function createProgram(): Command {
 
 const self = process.argv[1] ?? '';
 if (self.endsWith('cli.js') || self.endsWith('cli.ts')) {
+  // A CLI process's lifetime is the command, so exit is where the store closes
+  // and the WAL is checkpointed (FR-25 AC #1). Registered here rather than in
+  // `createProgram` so importing the module for tests installs nothing.
+  installStoreCloseOnExit();
   const program = createProgram();
   try {
     program.parse(process.argv);

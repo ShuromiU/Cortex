@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import Database from 'better-sqlite3';
 import { deriveProjectScopeKey } from '../scope/keys.js';
 import {
@@ -386,6 +387,121 @@ export function openDatabaseReadOnly(dbPath: string): Database.Database {
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   db.pragma('busy_timeout = 5000');
   return db;
+}
+
+/** Default ceiling before a mid-session checkpoint is worth running (FR-25). */
+export const DEFAULT_WAL_MAX_BYTES = 4 * 1024 * 1024;
+
+export interface WalCheckpointResult {
+  /** A reader held the file, so the WAL could not be reclaimed. Not an error. */
+  busy: boolean;
+  /** Frames left in the WAL afterwards. */
+  log: number;
+  /** Frames moved into the main database. */
+  checkpointed: number;
+}
+
+/** `<dbPath>-wal`. */
+export function walPath(dbPath: string): string {
+  return `${dbPath}-wal`;
+}
+
+/**
+ * Size of the write-ahead log, or 0 when there is none.
+ *
+ * `statSync`, deliberately, not a query: opening the database to ask would
+ * *create* the sidecar it is measuring — story 2.3's finding — and this is
+ * called on paths that must stay cheap.
+ */
+export function walSizeBytes(dbPath: string): number {
+  try {
+    return fs.statSync(walPath(dbPath)).size;
+  } catch {
+    return 0;
+  }
+}
+
+/** Size of the main database file, or 0 when it does not exist. */
+export function databaseSizeBytes(dbPath: string): number {
+  try {
+    return fs.statSync(dbPath).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Checkpoint the WAL and return the space to the filesystem.
+ *
+ * **`TRUNCATE`, not the passive checkpoint SQLite runs on its own.** Measured
+ * on SQLite 3.51.3: `wal_autocheckpoint` is 1000 pages by default and does bound
+ * the WAL, but a passive checkpoint only resets it for reuse — the file stays
+ * parked at its high-water mark (4,128,272 bytes before and after). Only
+ * `TRUNCATE` shrinks it, and shrinking it is the whole of FR-25's footprint
+ * claim.
+ *
+ * Never throws. A `busy` result is the *expected* outcome when another
+ * connection holds a read — Cortex's own MCP server is long-lived, so it is
+ * ordinary — and the checkpoint still moves what frames it can.
+ */
+export function checkpointWal(db: Database.Database): WalCheckpointResult | null {
+  try {
+    const rows = db.pragma('wal_checkpoint(TRUNCATE)') as Array<{
+      busy: number;
+      log: number;
+      checkpointed: number;
+    }>;
+    const row = rows[0];
+    if (!row) {
+      return null;
+    }
+    return {
+      busy: row.busy === 1,
+      log: row.log,
+      checkpointed: row.checkpointed,
+    };
+  } catch {
+    // A checkpoint that cannot run is not a failure worth surfacing (AD-12).
+    return null;
+  }
+}
+
+/**
+ * The configured mid-session ceiling.
+ *
+ * Parsed with `Number`, not `parseInt`. `gc`'s neighbouring `envNumber` uses
+ * `parseInt`, which succeeds on a *prefix* — `4e6` becomes 4, silently turning a
+ * 4 MB ceiling into a 4-byte one that checkpoints on every call. Same reasoning
+ * as `resolvePageLimit` in story 2.1. Non-finite, zero and negative fall back.
+ */
+export function resolveWalMaxBytes(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env['CORTEX_WAL_MAX_BYTES'];
+  if (raw === undefined || raw.trim().length === 0) {
+    return DEFAULT_WAL_MAX_BYTES;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_WAL_MAX_BYTES;
+}
+
+/**
+ * Checkpoint only when the WAL has crossed its ceiling (FR-25 AC #2).
+ *
+ * Callers must be off the tool-call path: `PostToolUse` is pure bash and spawns
+ * no Node (N-4), so nothing on the hot path can reach this — the constraint is
+ * kept by where it is *called*, and the call sites are the spool flush and
+ * `end-of-turn`. Returns null when nothing was done.
+ */
+export function maybeCheckpointWal(
+  db: Database.Database,
+  dbPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): WalCheckpointResult | null {
+  if (walSizeBytes(dbPath) <= resolveWalMaxBytes(env)) {
+    return null;
+  }
+  return checkpointWal(db);
 }
 
 /**

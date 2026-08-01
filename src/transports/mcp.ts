@@ -19,6 +19,7 @@ import { buildSessionSummary } from '../query/summarize.js';
 import { ensureScopedSession, syncBranchSnapshotForSession } from '../scope/runtime.js';
 import { refreshCurrentAppGraph } from '../scope/app-graph.js';
 import {
+  installStoreCloseOnExit,
   openProjectStore,
   resolveProjectStore,
 } from '../scope/store-migration.js';
@@ -654,4 +655,10 @@ export async function startServer(startDir?: string): Promise<void> {
   const server = createMcpServer(store, dir);
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // The MCP server is the one long-lived transport, so its store closes on
+  // shutdown rather than after a command (FR-25 AC #1). It is also the reason a
+  // checkpoint elsewhere frequently returns `busy`: this connection holds a
+  // read for the whole session, which blocks reclaiming the WAL file.
+  installStoreCloseOnExit();
 }

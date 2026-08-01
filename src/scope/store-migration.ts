@@ -4,11 +4,13 @@ import * as path from 'node:path';
 import type Database from 'better-sqlite3';
 
 import {
+  checkpointWal,
   ensureCortexSchema,
   getMetaValue,
   openDatabase,
   openDatabaseReadOnly,
   setMetaValue,
+  type WalCheckpointResult,
 } from '../db/schema.js';
 import {
   resolveStoreIdentity,
@@ -795,6 +797,7 @@ export function openProjectStore(
 ): OpenedProjectStore {
   const resolved = resolveProjectStore(startDir, options);
   const db = openDatabase(resolved.dbPath);
+  openStores.add(db);
   ensureCortexSchema(db, resolved.identity.projectRoot);
   recordStoreIdentityMeta(db, resolved.identity);
   recordMigrationOutcome(db, resolved.migration);
@@ -808,6 +811,89 @@ export function openProjectStore(
     /* bookkeeping must never break an open */
   }
   return { ...resolved, db };
+}
+
+/**
+ * Close a project store, checkpointing first (FR-25 AC #1).
+ *
+ * `db.close()` already checkpoints — measured, a 4,128,272-byte WAL becomes 0
+ * and the sidecar is removed — so the value here is not the checkpoint but the
+ * fact that **it is called at all**. Before this, no ambient transport closed
+ * the store: `cli.ts` closed only in its two `gc` paths, and `mcp.ts` and
+ * `hook-entry.ts` never did. The process exited and the OS tore the handle
+ * down, which is not a checkpoint and leaves the sidecar on disk.
+ *
+ * The explicit `TRUNCATE` before closing is belt-and-braces and makes the
+ * intent testable: the checkpoint result is observable, `close()`'s implicit
+ * one is not. Idempotent and never throws — this runs on exit paths where a
+ * failure has nothing left to report to.
+ */
+/**
+ * Handles `openProjectStore` has handed out and that nothing has closed.
+ *
+ * A registry rather than three transports each remembering to hold onto their
+ * database: `openCortexDb` returns a `CortexStore`, so the raw handle is not
+ * even in the caller's hands at the point the process is ending.
+ */
+const openStores = new Set<Database.Database>();
+
+/**
+ * Close every store this process opened, checkpointing each (FR-25 AC #1).
+ *
+ * Wired to process exit in the CLI and hook transports, whose lifetime *is* the
+ * command, and called on shutdown by the MCP server. Closing after each
+ * individual command instead would break the in-process test suite, where one
+ * vitest process runs many commands and win32 refuses to remove a file whose
+ * handle is still open — the hazard story 2.5 hit and had to split a test for.
+ */
+export function closeAllProjectStores(): WalCheckpointResult[] {
+  const results: WalCheckpointResult[] = [];
+  for (const db of openStores) {
+    const result = closeProjectStore(db);
+    if (result !== null) {
+      results.push(result);
+    }
+  }
+  openStores.clear();
+  return results;
+}
+
+/** Register the process-exit close exactly once per process. */
+let exitHookInstalled = false;
+export function installStoreCloseOnExit(): void {
+  if (exitHookInstalled) {
+    return;
+  }
+  exitHookInstalled = true;
+  // `exit` only: better-sqlite3 is synchronous, so a checkpoint and close both
+  // complete inside the handler. An async teardown could not.
+  process.on('exit', () => {
+    try {
+      closeAllProjectStores();
+    } catch {
+      /* nothing left to report to */
+    }
+  });
+}
+
+export function closeProjectStore(db: Database.Database): WalCheckpointResult | null {
+  openStores.delete(db);
+  let result: WalCheckpointResult | null = null;
+  try {
+    if (db.open) {
+      result = checkpointWal(db);
+    }
+  } catch {
+    /* a checkpoint that cannot run must not prevent the close */
+  }
+  try {
+    if (db.open) {
+      db.close();
+    }
+  } catch {
+    /* already closed, or closing under a lock; nothing further to do */
+  }
+  return result;
 }
 
 /** Meta keys carrying what happened to the migration, for `doctor` to read. */

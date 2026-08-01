@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { Command } from 'commander';
-import { createProgram, onlyUnusedProject, renderDoctorReport, renderInstallResult } from '../src/transports/cli.js';
+import { createProgram, formatBytes, onlyUnusedProject, renderDoctorReport, renderInstallResult } from '../src/transports/cli.js';
 import type { DoctorCheck, DoctorReport } from '../src/query/doctor.js';
 import { tokenizeCommand } from '../src/query/doctor.js';
 import type { InstallAction, InstallResult } from '../src/query/install.js';
@@ -1928,6 +1928,39 @@ describe('the relocation, through the transports rather than the resolver', () =
       // the removal is expected to be skipped here. That it *is* removed under
       // a clean handle is asserted in `tests/store-identity.test.ts`.
     });
+  });
+});
+
+describe('cortex stats reports the footprint (FR-25 AC #3)', () => {
+  it('names database and WAL size separately', async () => {
+    const cwd = seedTempProject(store => {
+      const session = store.createSession({ cwd: '/tmp/stats' });
+      store.insertNote({
+        sessionId: session.id,
+        kind: 'decision',
+        content: 'a decision worth storing',
+        subject: 'stats',
+      });
+    });
+
+    const run = await runCommand(cwd, ['stats']);
+
+    expect(run.exitCode).toBeUndefined();
+    // Separately, not as one "footprint" number: a WAL parked at its
+    // high-water mark beside a database that is not growing is precisely what
+    // folding them together would hide.
+    expect(run.stdout).toMatch(/^Database: +\d/m);
+    expect(run.stdout).toMatch(/^WAL: +\d/m);
+  });
+
+  it('formats byte sizes in whole units', () => {
+    expect(formatBytes(0)).toBe('0 B');
+    expect(formatBytes(512)).toBe('512 B');
+    expect(formatBytes(1536)).toBe('1.5 KB');
+    expect(formatBytes(4 * 1024 * 1024)).toBe('4.0 MB');
+    // Never a negative or NaN size in a report.
+    expect(formatBytes(-1)).toBe('0 B');
+    expect(formatBytes(Number.NaN)).toBe('0 B');
   });
 });
 

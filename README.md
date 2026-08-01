@@ -612,6 +612,21 @@ Two things worth knowing before you accept one:
 
 Growth is bounded: `cortex gc` (and the opt-in `CORTEX_GC_AUTO=apply` startup sweep, at most once per 24h) prunes events of consolidated sessions, trims the retrieval log, rolls up old ledger rows, deletes never-accessed archived items after 90 days, and caps stored `command_run` items per scope. Dry-run is the default; `--apply` deletes.
 
+### The write-ahead log
+
+`cortex stats` names the two files separately, because they grow for different reasons:
+
+```text
+Database:      14.0 MB
+WAL:           96.6 KB
+```
+
+SQLite already bounds the WAL — `wal_autocheckpoint` moves its contents into the database every 1000 pages, so it does not grow without limit. What it does *not* do is give the space back: a passive checkpoint resets the log for reuse and leaves the file parked at its high-water mark, which on this repository's own store meant a permanent 4.1 MB.
+
+So Cortex runs a **truncating** checkpoint, which returns the space, at two points: when a command's process exits, and mid-session once the log crosses `CORTEX_WAL_MAX_BYTES` (default 4 MiB). Neither is on the path of a tool call — the `PostToolUse` hook is pure bash and reaches the checkpoint only through a flush it launches detached and does not wait for.
+
+A checkpoint can report `busy`, which is normal rather than a failure: it means another connection — usually Cortex's own long-running MCP server — held a read, so the frames moved into the database but the file could not be reclaimed yet. The next checkpoint gets it.
+
 ## License
 
 MIT

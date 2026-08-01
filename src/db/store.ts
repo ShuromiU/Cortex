@@ -818,7 +818,15 @@ function buildMemoryItemFilterClause(
 // ── Store ─────────────────────────────────────────────────────────────
 
 export class CortexStore {
-  constructor(private db: Database.Database) {}
+  /**
+   * The underlying handle.
+   *
+   * Public and read-only so callers that must operate on the *file* rather than
+   * its rows — the WAL checkpoint of FR-25 — can do so without a second
+   * connection. Read-only because reassigning it would silently orphan every
+   * prepared statement this class holds.
+   */
+  constructor(readonly db: Database.Database) {}
 
   private resolveSessionScope(
     sessionId: string,
