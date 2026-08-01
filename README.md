@@ -603,7 +603,12 @@ Moving a checkout changes its git common dir, so it computes a new identity and 
 cortex adopt
 ```
 
-It previews by default and moves the store only with `--yes`. Ambient startup never adopts on its own — a hook has no way to ask you, and attaching a store you did not approve is not something to do silently. `cortex doctor` and `cortex store` both surface the offer.
+It previews by default and moves the store only with `--yes`. Ambient startup never adopts on its own — a hook has no way to ask you, and attaching a store you did not approve is not something to do silently. `cortex doctor` and `cortex store` both surface the offer, and it survives ordinary use: a session that starts before you adopt does not migrate the stale copy in your project root, and the store it opens is marked so the offer keeps being made.
+
+Two things worth knowing before you accept one:
+
+- **Check the recorded path the preview prints.** A clone or fork of the same repository shares a root commit, so a sibling checkout that happens to be unavailable right now — an unmounted share, a folder mid-rename — can match. Adoption moves the store.
+- **Adopt before you do much work in the moved checkout.** If the new location has recorded notes of its own by then, adoption is refused rather than discarding them, and you have to move that store aside yourself to choose.
 
 Growth is bounded: `cortex gc` (and the opt-in `CORTEX_GC_AUTO=apply` startup sweep, at most once per 24h) prunes events of consolidated sessions, trims the retrieval log, rolls up old ledger rows, deletes never-accessed archived items after 90 days, and caps stored `command_run` items per scope. Dry-run is the default; `--apply` deletes.
 

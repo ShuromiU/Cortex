@@ -170,6 +170,12 @@ describe('AC #2 — two clones of one repository', () => {
     const a = resolveStoreIdentity(cloneA, { env: env() });
     const b = resolveStoreIdentity(cloneB, { env: env() });
 
+    // Preconditions, asserted first so a git hiccup fails as itself rather than
+    // as "the anchor was null". Both must genuinely be repositories, or the
+    // shared-anchor premise below is vacuous.
+    expect(a.degraded, 'clone A must resolve through git').toBe(false);
+    expect(b.degraded, 'clone B must resolve through git').toBe(false);
+
     // The precondition that makes this test meaningful: the root commit — the
     // adoption anchor — is shared, so only the path-primary rule separates them.
     expect(a.readRootCommitOid()).toBe(b.readRootCommitOid());
@@ -263,26 +269,59 @@ describe('AC #3 — migrating a project-root database', () => {
     ).toBe(digest);
   });
 
-  it('leaves no temp file behind when verification fails', () => {
+  it('leaves no temp file behind when the copy itself throws', () => {
     const repo = initRepo('repo');
-    seedLegacyStore(repo, 2);
+    seedLegacyStore(repo, 40);
     const identity = resolveStoreIdentity(repo, { env: env() });
-
-    // A source that opens but cannot be vacuumed: truncated mid-file.
     const legacy = path.join(repo, '.cortex.db');
+
+    // Corrupt pages *after* page 1, so `sqlite_master` still lists the tables
+    // and the source is accepted — then `VACUUM INTO` throws partway through.
+    // Truncating instead is now rejected up front as "not a Cortex store",
+    // which never reaches the copy and so cannot exercise its cleanup.
     const bytes = fs.readFileSync(legacy);
-    fs.writeFileSync(legacy, bytes.subarray(0, Math.floor(bytes.length / 2)));
+    bytes.fill(0xff, 8192, Math.min(bytes.length, 40960));
+    fs.writeFileSync(legacy, bytes);
 
     const outcome = migrateLegacyStore(identity);
 
     expect(outcome.action).toBe('failed');
+    // The failure must name the file that caused it. Spreading the base outcome
+    // in the outer catch reported `sourcePath: null` for a source it had
+    // already found.
+    expect(outcome.sourcePath).toBe(legacy);
     expect(outcome.originalRetained).toBe(true);
     expect(fs.existsSync(legacy)).toBe(true);
     expect(fs.existsSync(identity.dbPath)).toBe(false);
+
+    // Every failed attempt used to strand its partial temp file, and because
+    // the destination is never created the next run retries and strands
+    // another — permanently, since the sweep only collects files over an hour
+    // old.
     const leftovers = fs.existsSync(identity.storeDir)
       ? fs.readdirSync(identity.storeDir).filter(entry => entry.startsWith('.migrating-'))
       : [];
     expect(leftovers).toEqual([]);
+  });
+
+  it('does not adopt a valid SQLite file that is not a Cortex store', () => {
+    // `verifyStoreCopy` compares schema_version and four row counts, and each
+    // read returns null when the table is absent — so for an unrelated database
+    // every comparison is null === null and the copy verifies vacuously. It was
+    // copied, reported verified, and installed as the project's store.
+    const repo = initRepo('repo');
+    const legacy = path.join(repo, '.cortex.db');
+    const unrelated = new Database(legacy);
+    unrelated.exec('CREATE TABLE customers(id INTEGER, name TEXT)');
+    unrelated.prepare('INSERT INTO customers VALUES (1, ?)').run('someone else');
+    unrelated.close();
+
+    const identity = resolveStoreIdentity(repo, { env: env() });
+    const outcome = migrateLegacyStore(identity);
+
+    expect(outcome.action).toBe('none');
+    expect(fs.existsSync(identity.dbPath)).toBe(false);
+    expect(fs.existsSync(legacy)).toBe(true);
   });
 
   it('refuses to install a copy that fails verification', () => {
@@ -449,6 +488,163 @@ describe('AC #4 — a repository that moved', () => {
   });
 });
 
+// ── The two defects the review found ──────────────────────────────────
+
+describe('adoption carries the whole store, not just the main file', () => {
+  it('preserves rows that live only in the WAL', () => {
+    // `fs.renameSync` moves `cortex.db` and abandons `-wal`/`-shm`. A store
+    // whose last writer did not close cleanly — a killed hook, a crashed
+    // session — keeps its rows there. Measured with a rename: 50 rows readable
+    // in place, `no such table` afterwards. Total silent loss on the one
+    // command whose purpose is to rescue memory.
+    const original = initRepo('before');
+    seedLegacyStore(original, 3);
+    const first = openProjectStore(original, { env: env() });
+    first.db.close();
+
+    // Write more rows and leave them in the WAL: no close, no checkpoint.
+    const hot = openDatabase(first.dbPath);
+    const store = new CortexStore(hot);
+    const session = store.createSession({ cwd: original });
+    for (let i = 0; i < 40; i++) {
+      store.insertNote({
+        sessionId: session.id,
+        kind: 'insight',
+        content: `wal-resident ${i}`,
+        subject: `w${i}`,
+      });
+    }
+    expect(fs.statSync(`${first.dbPath}-wal`).size).toBeGreaterThan(0);
+    // What a rename of the main file alone would have carried:
+    const mainFileOnly = path.join(root, 'main-only.db');
+    fs.copyFileSync(first.dbPath, mainFileOnly);
+    expect(countNotes(mainFileOnly)).toBe(3);
+    hot.close();
+
+    const moved = path.join(root, 'after');
+    fs.renameSync(original, moved);
+    clearProjectStoreCache();
+
+    const identity = resolveStoreIdentity(moved, { env: env() });
+    const candidate = findAdoptionCandidates(identity)[0];
+    expect(candidate).toBeDefined();
+
+    const outcome = adoptStore(identity, candidate!);
+
+    expect(outcome.action).toBe('adopted');
+    expect(countNotes(identity.dbPath)).toBe(43);
+    // And the sidecars do not outlive the database they belonged to.
+    expect(fs.existsSync(`${candidate!.dbPath}-wal`)).toBe(false);
+    expect(fs.existsSync(`${candidate!.dbPath}-shm`)).toBe(false);
+  });
+});
+
+describe('an ambient start must not consume the adoption offer', () => {
+  it('declines to migrate a stale original that travelled with a moved repository', () => {
+    // AC #3 keeps the project-root original forever, so it moves with the
+    // repository. Migrating it creates a store at the computed path, and
+    // `findAdoptionCandidates` then returns nothing — permanently. Measured
+    // before the guard: a 22-note store orphaned and a 2-note snapshot
+    // installed by one SessionStart hook.
+    const original = initRepo('before');
+    seedLegacyStore(original, 2);
+    const first = openProjectStore(original, { env: env() });
+    const store = new CortexStore(first.db);
+    const session = store.createSession({ cwd: original });
+    for (let i = 0; i < 20; i++) {
+      store.insertNote({
+        sessionId: session.id,
+        kind: 'decision',
+        content: `later decision ${i}`,
+        subject: `later${i}`,
+      });
+    }
+    first.db.close();
+    expect(countNotes(first.dbPath)).toBe(22);
+    expect(countNotes(path.join(original, '.cortex.db'))).toBe(2);
+
+    const moved = path.join(root, 'after');
+    fs.renameSync(original, moved);
+    clearProjectStoreCache();
+
+    // The ambient path — what every hook runs.
+    const ambient = openProjectStore(moved, { env: env() });
+    ambient.db.close();
+
+    expect(ambient.migration.action).toBe('deferred-to-adoption');
+    clearProjectStoreCache();
+    const identity = resolveStoreIdentity(moved, { env: env() });
+    const candidates = findAdoptionCandidates(identity);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.dbPath).toBe(first.dbPath);
+
+    // And adopting still recovers all 22, not the 2-note snapshot.
+    expect(adoptStore(identity, candidates[0]!).action).toBe('adopted');
+    expect(countNotes(identity.dbPath)).toBe(22);
+  });
+});
+
+describe('which pre-relocation store gets migrated', () => {
+  it('migrates the main checkout when the first command runs in a linked worktree', () => {
+    // Every worktree resolves to one store, but the pre-relocation build gave
+    // each its own `.cortex.db`. Taking the worktree's own file first silently
+    // shadowed the main checkout's real store — measured at 60 notes replaced
+    // by 0, and not recovered by later running from main.
+    const main = initRepo('main');
+    seedLegacyStore(main, 60);
+    const wt = path.join(root, 'wt');
+    git(['worktree', 'add', '-b', 'feat', wt], main);
+    seedLegacyStore(wt, 3);
+
+    const resolved = openProjectStore(wt, { env: env() });
+    resolved.db.close();
+
+    expect(resolved.migration.sourcePath).toBe(path.join(fs.realpathSync(main), '.cortex.db'));
+    expect(countNotes(resolved.dbPath)).toBe(60);
+  });
+
+  it('prefers the repository root over a stray subdirectory store', () => {
+    // The old build wrote `<repo>/src/.cortex.db` whenever it ran from a
+    // subdirectory. Ordering cwd first let that 2-note file win over the real
+    // store at the root.
+    const repo = initRepo('repo');
+    seedLegacyStore(repo, 11);
+    const sub = path.join(repo, 'src');
+    fs.mkdirSync(sub, { recursive: true });
+    seedLegacyStore(sub, 2);
+
+    const resolved = openProjectStore(sub, { env: env() });
+    resolved.db.close();
+
+    expect(countNotes(resolved.dbPath)).toBe(11);
+  });
+});
+
+describe('a failed migration is recorded, not silently swallowed', () => {
+  it('marks the store so the diagnostic can report it', () => {
+    const repo = initRepo('repo');
+    seedLegacyStore(repo, 12);
+    const legacy = path.join(repo, '.cortex.db');
+    const bytes = fs.readFileSync(legacy);
+    bytes.fill(0xff, 8192, Math.min(bytes.length, 40960));
+    fs.writeFileSync(legacy, bytes);
+
+    const resolved = openProjectStore(repo, { env: env() });
+    resolved.db.close();
+
+    expect(resolved.migration.action).toBe('failed');
+    const db = new Database(resolved.dbPath, { readonly: true });
+    try {
+      const failure = db
+        .prepare("SELECT value FROM meta WHERE key = 'migration_failed'")
+        .get() as { value: string } | undefined;
+      expect(failure?.value ?? '').toContain(legacy);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 // ── AC #5: no git ─────────────────────────────────────────────────────
 
 describe('AC #5 — a directory that is not a repository', () => {
@@ -577,6 +773,25 @@ describe('CORTEX_HOME', () => {
   it('falls back to ~/.cortex when unset or blank', () => {
     expect(cortexHome({})).toBe(path.join(os.homedir(), '.cortex'));
     expect(cortexHome({ CORTEX_HOME: '   ' })).toBe(path.join(os.homedir(), '.cortex'));
+  });
+
+  it('uses the trimmed value, not the raw one', () => {
+    // The guard tested `override.trim()` and then resolved `override`, so a
+    // trailing newline or a stray space from a shell export became a relative
+    // path segment: the home nested under cwd, the path grew an embedded drive
+    // colon, and `cortex store` printed it and exited 0 as though healthy.
+    const padded = `  ${home}  `;
+    expect(cortexHome({ CORTEX_HOME: padded })).toBe(path.resolve(home));
+    expect(cortexHome({ CORTEX_HOME: `${home}\n` })).toBe(path.resolve(home));
+  });
+
+  it('resolves a relative value against the user home, never cwd', () => {
+    // Hooks, the MCP server and manual CLI runs all have different working
+    // directories, so a cwd-relative home fans one repository's memory across
+    // several trees — the exact fragmentation this addressing scheme prevents.
+    const resolved = cortexHome({ CORTEX_HOME: 'relhome' });
+    expect(resolved).toBe(path.resolve(os.homedir(), 'relhome'));
+    expect(resolved).not.toBe(path.resolve(process.cwd(), 'relhome'));
   });
 });
 

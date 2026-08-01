@@ -769,7 +769,12 @@ export function createProgram(): Command {
       // Opt-in automatic GC, at most once per 24h.
       if (process.env['CORTEX_GC_AUTO'] === 'apply') {
         try {
-          const gcDb = openDatabase(findDbPath(process.cwd()));
+          // Through `openProjectStore`, not a hand-rolled open: the hand-rolled
+          // form skipped `recordStoreIdentityMeta` and handed `ensureCortexSchema`
+          // a raw `process.cwd()`, so running this from a subdirectory recorded a
+          // `root_path` deeper than the repository — permanently, since the
+          // repair only overwrites a recorded path that no longer exists.
+          const { db: gcDb } = openProjectStore(process.cwd());
           if (shouldAutoGc(gcDb)) {
             runGc(gcDb, { dryRun: false });
           }
@@ -1074,9 +1079,7 @@ export function createProgram(): Command {
     .option('--apply', 'Actually delete (default is a dry-run report)')
     .option('--vacuum <mode>', 'auto | always | never', 'auto')
     .action((opts: { apply?: boolean; vacuum?: string }) => {
-      const dbPath = findDbPath(process.cwd());
-      const db = openDatabase(dbPath);
-      ensureCortexSchema(db, process.cwd());
+      const { db, dbPath } = openProjectStore(process.cwd());
       const vacuum =
         opts.vacuum === 'always' || opts.vacuum === 'never' ? opts.vacuum : 'auto';
       const report = runGc(db, { dryRun: !opts.apply, vacuum });
@@ -1316,6 +1319,13 @@ export function createProgram(): Command {
             `  anchor root commit ${candidate.rootCommitOid ?? '?'}`,
             `  its recorded path ${candidate.recordedPath ?? 'unrecorded'} no longer exists`,
             `  ${candidate.sizeBytes} bytes`,
+            '',
+            // A clone or fork shares the root commit, so a sibling checkout that
+            // is merely unavailable right now — unmounted share, mid-rename,
+            // restoring from backup — matches. Adoption is a move, and there is
+            // no path back once its recorded path is rewritten.
+            'Check that recorded path first: a clone or fork of the same repository',
+            'shares this root commit, and adoption MOVES the store rather than copying it.',
             '',
             'Re-run with --yes to move it.',
           ].join('\n') + '\n',

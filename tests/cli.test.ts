@@ -10,6 +10,8 @@ import type { InstallAction, InstallResult } from '../src/query/install.js';
 import { deriveEngagementPath } from '../src/transports/mcp.js';
 import { openDatabase, ensureCortexSchema } from '../src/db/schema.js';
 import { resolveStoreIdentity } from '../src/scope/identity.js';
+import { clearProjectStoreCache } from '../src/scope/store-migration.js';
+import { execFileSync } from 'node:child_process';
 import { CortexStore } from '../src/db/store.js';
 import { handleCmdEvent } from '../src/capture/hooks.js';
 import {
@@ -288,13 +290,22 @@ function seedTempProject(seed: (store: CortexStore) => void): string {
  * it would silently check a frozen copy and pass for the wrong reason.
  */
 function openProjectDb(cwd: string): ReturnType<typeof openDatabase> {
-  const { dbPath } = resolveStoreIdentity(cwd);
-  // A command that refuses before opening the store never migrates it, so the
-  // seeded data is still at the legacy path — and "unchanged" is precisely what
-  // those tests assert. Opening the computed path regardless would create an
-  // empty store and let a refusal test pass against no data at all.
-  const target = fs.existsSync(dbPath) ? dbPath : path.join(cwd, '.cortex.db');
-  return openDatabase(target);
+  // **Strict: the computed path only.** An earlier version fell back to
+  // `<cwd>/.cortex.db` when the computed path was absent, which made every
+  // assertion here pass whether or not the store had moved — reverting all
+  // three transports to the pre-relocation path left the entire suite green.
+  // A helper that tolerates both answers cannot test which one is right.
+  return openDatabase(resolveStoreIdentity(cwd).dbPath);
+}
+
+/**
+ * The seeded project-root store, for the few tests whose command refuses before
+ * opening anything — nothing migrated, so "unchanged" is asserted where the
+ * data actually still is. Named separately so each test states which store it
+ * means rather than a helper guessing.
+ */
+function openSeededLegacyDb(cwd: string): ReturnType<typeof openDatabase> {
+  return openDatabase(path.join(cwd, '.cortex.db'));
 }
 
 async function runCommand(cwd: string, argv: string[]): Promise<CommandRun> {
@@ -878,7 +889,7 @@ describe('cortex edit-memory', () => {
     expect(run.exitCode).toBe(1);
     expect(run.stderr).toContain('metadata line');
 
-    const db = openProjectDb(cwd);
+    const db = openSeededLegacyDb(cwd);
     const store = new CortexStore(db);
     expect(store.getNote(noteId)!.content).toBe('the flush is batched');
     expect(inspectMemory(store, noteId)!.conflict.diverged).toBe(false);
@@ -913,7 +924,7 @@ describe('cortex edit-memory', () => {
 
     expect(run.exitCode).toBe(1);
     expect(run.stderr).toContain('delete-memory');
-    const db = openProjectDb(cwd);
+    const db = openSeededLegacyDb(cwd);
     expect(new CortexStore(db).getMemoryItem('item')!.text).not.toBe('   ');
     db.close();
   });
@@ -1221,7 +1232,7 @@ describe('cortex note-resolve', () => {
       }).id;
     });
 
-    const before = openProjectDb(cwd);
+    const before = openSeededLegacyDb(cwd);
     const beforeStore = new CortexStore(before);
     expect(beforeStore.getNote(decisionA)!.conflict).toBe(true);
     expect(beforeStore.getNote(blockerId)!.conflict).toBe(false);
@@ -1777,6 +1788,174 @@ async function withSandbox<T>(homeDir: string, binDir: string, run: () => Promis
     }
   }
 }
+
+describe('the relocation, through the transports rather than the resolver', () => {
+  /** A real repository, so identity is the git-common-dir hash and not a fallback. */
+  function initRepo(name: string): { repo: string; home: string } {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-transport-'));
+    const repo = path.join(root, name);
+    fs.mkdirSync(repo, { recursive: true });
+    const git = (args: string[]): void => {
+      execFileSync('git', args, { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'] });
+    };
+    git(['init', '--initial-branch=main']);
+    git(['config', 'user.email', 'test@example.com']);
+    git(['config', 'user.name', 'Cortex Test']);
+    fs.writeFileSync(path.join(repo, 'README.md'), `# ${name}\n`);
+    git(['add', '.']);
+    git(['commit', '-m', 'initial']);
+    return { repo, home: path.join(root, 'home') };
+  }
+
+  async function withHome<T>(home: string, run: () => Promise<T>): Promise<T> {
+    const saved = process.env['CORTEX_HOME'];
+    try {
+      process.env['CORTEX_HOME'] = home;
+      clearProjectStoreCache();
+      return await run();
+    } finally {
+      if (saved === undefined) delete process.env['CORTEX_HOME'];
+      else process.env['CORTEX_HOME'] = saved;
+      clearProjectStoreCache();
+    }
+  }
+
+  it('puts the store under CORTEX_HOME and leaves none in the project root', async () => {
+    // The property the whole story exists for, asserted against a command the
+    // user actually runs. Every other test in this file reaches the store
+    // through a helper, so all of them would pass against a transport that
+    // never moved — which is exactly what a reviewer measured.
+    const { repo, home } = initRepo('proj');
+    await withHome(home, async () => {
+      const run = await runCommand(repo, ['status']);
+      expect(run.exitCode).toBeUndefined();
+
+      const identity = resolveStoreIdentity(repo);
+      expect(identity.degraded).toBe(false);
+      expect(fs.existsSync(identity.dbPath)).toBe(true);
+      expect(identity.dbPath.startsWith(path.resolve(home))).toBe(true);
+      expect(fs.existsSync(path.join(repo, '.cortex.db'))).toBe(false);
+    });
+  });
+
+  it('reports, and then performs, an adoption after the repository moves', async () => {
+    const { repo, home } = initRepo('before');
+    await withHome(home, async () => {
+      await runCommand(repo, ['status']);
+      const first = resolveStoreIdentity(repo);
+      const db = openDatabase(first.dbPath);
+      const store = new CortexStore(db);
+      const session = store.createSession({ cwd: repo });
+      store.insertNote({
+        sessionId: session.id,
+        kind: 'decision',
+        content: 'the decision that must survive a rename',
+        subject: 'survives',
+      });
+      db.close();
+
+      const moved = path.join(path.dirname(repo), 'after');
+      fs.renameSync(repo, moved);
+      clearProjectStoreCache();
+
+      // An ambient start happens first, as it always would.
+      await runCommand(moved, ['status']);
+      clearProjectStoreCache();
+
+      const doctor = await runCommand(moved, ['doctor', '--json']);
+      const report = JSON.parse(doctor.stdout) as {
+        checks: Array<{ id: string; status: string; detail: string }>;
+      };
+      const adoption = report.checks.find(check => check.id === 'store-adoption');
+      expect(adoption?.status).toBe('warn');
+      expect(adoption?.detail).toContain(first.dbPath);
+
+      const store1 = await runCommand(moved, ['store']);
+      expect(store1.stdout).toContain('Adoptable:');
+
+      const preview = await runCommand(moved, ['adopt']);
+      expect(preview.stdout).toContain('Would adopt:');
+      // Preview-by-default: the orphan is untouched until --yes.
+      expect(fs.existsSync(first.dbPath)).toBe(true);
+    });
+  });
+
+  it('`adopt --yes` moves the store and recovers its memory', async () => {
+    // Deliberately no ambient run at the new path first. These tests share one
+    // process, and the CLI's store handle stays open after `runCommand`
+    // returns — on win32 that locks the placeholder, so removing it fails for a
+    // reason no real invocation encounters. The preceding test covers the
+    // ambient-start-first path; this one covers the move.
+    const { repo, home } = initRepo('before');
+    await withHome(home, async () => {
+      await runCommand(repo, ['status']);
+      const first = resolveStoreIdentity(repo);
+      const db = openDatabase(first.dbPath);
+      const store = new CortexStore(db);
+      const session = store.createSession({ cwd: repo });
+      store.insertNote({
+        sessionId: session.id,
+        kind: 'decision',
+        content: 'the decision that must survive a rename',
+        subject: 'survives',
+      });
+      db.close();
+
+      const moved = path.join(path.dirname(repo), 'after');
+      fs.renameSync(repo, moved);
+      clearProjectStoreCache();
+
+      const performed = await runCommand(moved, ['adopt', '--yes']);
+      expect(performed.exitCode).toBeUndefined();
+      expect(performed.stdout).toContain('Adopted');
+
+      clearProjectStoreCache();
+      const identity = resolveStoreIdentity(moved);
+      const adopted = openDatabase(identity.dbPath);
+      try {
+        const row = adopted
+          .prepare("SELECT COUNT(*) AS c FROM notes WHERE content LIKE '%must survive a rename%'")
+          .get() as { c: number };
+        expect(row.c).toBe(1);
+      } finally {
+        adopted.close();
+      }
+      // The store now in use is the computed one, not the orphan.
+      expect(identity.dbPath).not.toBe(first.dbPath);
+      // Removing the source is deliberately best-effort — it must never turn a
+      // completed adoption into a reported failure — and these tests share one
+      // process where the earlier `runCommand` still holds the file open, so
+      // the removal is expected to be skipped here. That it *is* removed under
+      // a clean handle is asserted in `tests/store-identity.test.ts`.
+    });
+  });
+});
+
+describe('no transport derives a project-root store path', () => {
+  // An architectural guard, and labelled as one. `handleHookPayload` and
+  // `handleToolCall` are handed an already-open store, so the MCP and hook
+  // transports' own `openCortexDb` is only reachable through a stdio server or
+  // a stdin-driven `main` — neither testable in process. Without this, those
+  // two files can be reverted to `path.join(startDir, '.cortex.db')` with the
+  // whole suite still green.
+  //
+  // `readFileSync` rather than a grep: `hook-entry.ts` contains a raw NUL byte,
+  // so ripgrep and grep classify it as binary and skip it silently.
+  const TRANSPORTS = [
+    'src/transports/cli.ts',
+    'src/transports/mcp.ts',
+    'src/transports/hook-entry.ts',
+  ];
+
+  it.each(TRANSPORTS)('%s opens through openProjectStore', file => {
+    const source = fs.readFileSync(path.join(process.cwd(), file), 'utf8');
+    expect(source).toContain('openProjectStore');
+    // The literal may still appear in a comment or an ignore list; what must
+    // not appear is a path join that reconstructs the old location.
+    expect(source).not.toMatch(/path\.join\(\s*startDir\s*,\s*'\.cortex\.db'\s*\)/);
+    expect(source).not.toMatch(/path\.join\(\s*process\.cwd\(\)\s*,\s*'\.cortex\.db'\s*\)/);
+  });
+});
 
 describe('cortex doctor', () => {
   it('exits non-zero on a broken installation and names a fix for each failure', async () => {

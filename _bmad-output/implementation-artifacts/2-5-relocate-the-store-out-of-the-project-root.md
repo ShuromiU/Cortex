@@ -253,7 +253,7 @@ Then, on the live installation: `cortex doctor` must stay green, and it must nam
 
 ### Mutation campaign
 
-**21 mutations, 21 killed, 0 survived, 0 unapplied.** Four survived the first pass, and each was a test that did not test what it said:
+**21 mutations, 21 killed, 0 survived, 0 unapplied — and a perfect score that meant less than it looked.** The selection covered the resolver exhaustively and never touched a transport or the adoption offer surface; the review found seven of eight mutations there surviving. See the review section. Four survived the first pass, and each was a test that did not test what it said:
 
 - *copy verification skipped* — no fixture can make `VACUUM INTO` succeed and verification fail; SQLite copies faithfully or errors. Added an injectable `verify` seam, because the defect being modelled is "the verdict is computed and ignored", which is about wiring, not input.
 - *destination guard removed* — masked by the second, pre-rename existence check. Now killed by corrupting the source before the second run: with the guard the answer stays `destination-exists`, without it the corrupt source changes it.
@@ -271,3 +271,50 @@ Then, on the live installation: `cortex doctor` must stay green, and it must nam
 `npm run build`, `npm run lint`, `npx vitest run` (**1064 passed / 34 files**), `npm run gate` (**8 suites, exact zero delta**).
 
 Live installation: `cortex doctor` resolves `C:\Users\dev\.cortex\projects\cortex-3cfdcbfe1ad6e75b\cortex.db (id 3cfdcbfe1ad6e75b from C:\Claude Code\cortex\.git)`, warns that the original is retained, and reports the database reachable. The one pre-existing failure (`hook-currency`: hooks installed before 2.3's stamping) is untouched by this story.
+
+## Senior Developer Review (AI)
+
+Three layers — Blind Hunter, Edge Case Hunter, Acceptance Auditor — each reproduced the verification baseline first (build, lint, 1064 tests, 8 suites at zero delta). **None of the findings below was caught by any command the story ran.**
+
+### Two ways this story could have destroyed a user's memory
+
+**1. `cortex adopt` moved `cortex.db` and abandoned its WAL.** `adoptStore` used `fs.renameSync` on the main file alone. A store whose last writer did not close cleanly — a killed hook, a terminated MCP server — keeps its rows in `-wal`. Reproduced: **50 rows readable in place, `no such table` after the rename**, with a 2.7 MB `-wal` stranded in a directory whose database had moved. `cortex adopt --yes` printed `Adopted …` and exited 0.
+
+The indictment is that this module's own docstring explains why `VACUUM INTO` is mandatory, and the rename sits 200 lines below it. Migration was fixed; the rescue path — the one command whose entire purpose is to save memory — was not. Now `VACUUM INTO` + verify + remove-source-with-sidecars, and removal is best-effort so a locked file can never turn a completed adoption into a reported failure.
+
+**2. One ambient SessionStart permanently destroyed the adoption offer.** AC #3 keeps the project-root original forever, so it travels with a repository that is moved or renamed. `resolveProjectStore` migrated that **stale snapshot**, and a store then existing at the computed path made `findAdoptionCandidates` return nothing — forever. Reproduced end-to-end: a live 22-note store orphaned and a 2-note snapshot installed in its place by one hook fire.
+
+AC #4's promise inverts: Cortex does not "start empty", it starts *stale*, which is worse because nothing signals the loss. And `doctor` walked the user into it — with both warnings showing, `store-legacy`'s fix ("Run any `cortex` command…") destroyed `store-adoption`'s, and printed first.
+
+Fixing the ordering was not enough: opening the store *creates* it, so the offer died one hook later anyway. The store an ambient start creates while an adoption is pending is now marked, the scan keeps asking while that mark is set, and `adoptStore` replaces such a placeholder — unless it has recorded notes of its own, which it refuses rather than discards.
+
+### Three more that silently lost or misreported memory
+
+- **A first command run inside a linked worktree migrated that worktree's store, not the main checkout's.** Every worktree resolves to one store (AC #1), but the old build gave each its own `.cortex.db`. Measured: **60 notes replaced by 0**, not recovered by later running from main. The search order now puts the main worktree first — and the repository root before `cwd`, which fixes the same defect's second shape, where a stray `<repo>/src/.cortex.db` left by the old build beat the real store at the root.
+- **A failed migration was silent, permanent, and reported as success.** `MigrationOutcome` was computed and **no caller anywhere read it**. A failure left an empty store, the destination now existed so it was never retried, and `doctor` inferred "migrated" from the coexistence of a legacy file and a store — then told the user to delete the only surviving copy of their memory. The verdict is now recorded in the store and `doctor` reports from it: migrated (naming the source), present-and-not-migrated, or a `fail` that says **do not delete the original**.
+- **Any valid SQLite file at `<project>/.cortex.db` was adopted as the store.** `verifyStoreCopy` compares `schema_version` and four row counts, and every one reads `null` when the table is absent — so for an unrelated database every comparison was `null === null` and the copy verified vacuously. Sources are now checked for Cortex tables before being copied.
+
+### And a set of smaller ones
+
+`CORTEX_HOME` was *tested* trimmed and *used* untrimmed, so a trailing newline from a shell export produced a path nested under cwd with an embedded drive colon — printed by `cortex store` at exit 0. A relative value resolved against cwd, fanning one repository across several homes. Every failed `VACUUM INTO` stranded its temp file and retried forever, because the sweep only collects files over an hour old — and never collected one with a *future* mtime. The outer catch reported `sourcePath: null` for a failure caused by a source it had already found. `cortex gc` and the auto-sweep bypassed `openProjectStore`, permanently poisoning `root_path` when run from a subdirectory. An injected `runGit` was silently inert after the first call, and one that threw took the whole `doctor` report with it. A bare repository was reported as "not a git repository" with an unactionable fix.
+
+### The test suite was the real failure
+
+**Reverting all three transports to `path.join(startDir, '.cortex.db')` left 1064/1064 green.** The relocation — the entire story — was unproven at the layer that performs it. Seven of eight full-suite mutations across the transports and the adoption offer surface survived.
+
+The specific cause was a helper written for this story: `openProjectDb` in `tests/cli.test.ts` fell back to the legacy path when the computed one was absent, so every assertion passed whether or not the store had moved. **A helper that tolerates both answers cannot test which one is right.** It is now strict, and the three tests that genuinely need the seeded original say so by name.
+
+This is the trap this story's own Dev Notes named, quoting 2.4's worst finding — *"Test the transports, not the helper."* I wrote that warning and then walked into it. The lesson that generalises: **a mutation campaign proves only what it mutates.** The first campaign was 21/21 killed and covered the resolver exhaustively while never touching a transport or the offer surface, so its perfect score meant less than it appeared to.
+
+The repair campaign is **13/13 killed, 0 survived, 0 unapplied**, one mutation per defect above, and it includes all three transport reverts.
+
+### Claims the reviewers proved false
+
+- *"There were four copies of `findDbPath`"* — three. The fourth derivation was an inline join in `doctor.ts`. Corrected in `CLAUDE.md` and the module docstring.
+- *"this module has no delete path at all"* — `adoptStore` deletes the store it has copied and verified. The narrow claim (nothing deletes a *project-root* original) is true and is what the docs now say.
+- The `deferred-work.md` entry accepting the two-worktree case justified itself with *"`doctor` reports it as 'not migrated yet' forever"* — it reported **"migrated"** and advised deletion. An inverted safety net, now corrected along with the defect.
+- R-4's mitigation includes *"dry-run first"*, which this story quoted while implementing only the `doctor` clause. It conflicts with AC #3's "migrated when the store is first opened", and the AC wins — but dropping it silently was wrong. `cortex store` is the pre-migration inspection surface and the README now points at it.
+
+### Verification after repair
+
+`npm run build`, `npm run lint`, `npx vitest run` (**1081 passed / 34 files**), `npm run gate` (**8 suites, exact zero delta**). Both critical defects re-verified end-to-end against the built CLI: the SessionStart hook no longer consumes the offer, and adoption recovers all 22 notes rather than 2.

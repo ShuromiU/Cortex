@@ -5,10 +5,19 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { deriveSpoolPath } from '../capture/spool.js';
-import { SCHEMA_VERSION, getSchemaVersion, openDatabaseReadOnly } from '../db/schema.js';
+import {
+  SCHEMA_VERSION,
+  getMetaValue,
+  getSchemaVersion,
+  openDatabaseReadOnly,
+} from '../db/schema.js';
 import { resolveStoreIdentity } from '../scope/identity.js';
 import type { GitCommandRunner } from '../scope/git.js';
-import { findAdoptionCandidates } from '../scope/store-migration.js';
+import {
+  MIGRATED_FROM_KEY,
+  MIGRATION_FAILED_KEY,
+  findAdoptionCandidates,
+} from '../scope/store-migration.js';
 
 /**
  * Installation diagnostics (FR-23).
@@ -1046,38 +1055,76 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
     }
   })();
 
-  if (legacyPresent.length > 0) {
+  // What the store itself recorded about its own migration. Inferring
+  // "migrated" from the coexistence of a legacy file and a store was wrong for
+  // every reason other than a completed migration — a *failed* one produced an
+  // empty store, and this row then told the user to delete the only surviving
+  // copy of their memory.
+  let migratedFrom: string | null = null;
+  let migrationFailure: string | null = null;
+  if (storeExists) {
+    try {
+      const db = openDatabaseReadOnly(identity.dbPath);
+      try {
+        migratedFrom = getMetaValue(db, MIGRATED_FROM_KEY) ?? null;
+        const failed = getMetaValue(db, MIGRATION_FAILED_KEY) ?? '';
+        migrationFailure = failed.length > 0 ? failed : null;
+      } finally {
+        db.close();
+      }
+    } catch {
+      // An unreadable store is the `database` check's business, not this one's.
+    }
+  }
+
+  const candidates = findAdoptionCandidates(identity);
+
+  if (migrationFailure !== null) {
+    add({
+      id: 'store-legacy',
+      label: 'Legacy store',
+      status: 'fail',
+      detail: `migration failed and the store here is empty — ${migrationFailure}`,
+      fix: `Do NOT delete the original. Move \`${identity.dbPath}\` aside and run any \`cortex\` command to retry the migration; if it fails again the source is unreadable and \`cortex doctor\` on it is the next step.`,
+    });
+  } else if (legacyPresent.length > 0) {
+    const migrated = migratedFrom !== null && legacyPresent.includes(migratedFrom);
     add(
-      storeExists
+      migrated
         ? {
             id: 'store-legacy',
             label: 'Legacy store',
             status: 'warn',
-            detail: `migrated; the original is still at ${legacyPresent.join(', ')}`,
-            fix: `Cortex keeps the original until you confirm. Once \`${identity.dbPath}\` looks right, delete ${legacyPresent.join(', ')} yourself.`,
+            detail: `migrated from ${migratedFrom}; the original is still there`,
+            fix: `Cortex keeps the original until you confirm. Once \`${identity.dbPath}\` looks right, delete ${migratedFrom} yourself.`,
           }
         : {
             id: 'store-legacy',
             label: 'Legacy store',
             status: 'warn',
-            detail: `${legacyPresent.join(', ')} has not been migrated yet`,
-            fix: 'Run any `cortex` command (for example `cortex status`) to migrate it by copy; the original is left in place.',
+            detail: `${legacyPresent.join(', ')} present and not migrated${storeExists ? ' (a store already exists at the computed path)' : ''}`,
+            // The fix must not contradict the adoption offer below. Telling a
+            // user to "run any cortex command" while an orphaned store is
+            // waiting is what walks them into losing it.
+            fix:
+              candidates.length > 0
+                ? 'Run `cortex adopt` FIRST — an orphaned store matching this repository is available, and migrating the file in your project root would replace it with an older snapshot.'
+                : storeExists
+                  ? `A store already exists at \`${identity.dbPath}\`, so the file in your project root is left alone. If it is the one you want, move the current store aside and re-run any \`cortex\` command.`
+                  : 'Run any `cortex` command (for example `cortex status`) to migrate it by copy; the original is left in place.',
           },
     );
   }
 
-  if (!storeExists) {
-    const candidates = findAdoptionCandidates(identity);
-    if (candidates.length > 0) {
-      const best = candidates[0] as (typeof candidates)[number];
-      add({
-        id: 'store-adoption',
-        label: 'Adoptable store',
-        status: 'warn',
-        detail: `${best.dbPath} matches this repository's root commit and its recorded path (${best.recordedPath ?? 'unrecorded'}) no longer exists`,
-        fix: 'This repository was moved or renamed. Run `cortex adopt` to attach that store rather than starting empty.',
-      });
-    }
+  if (candidates.length > 0) {
+    const best = candidates[0] as (typeof candidates)[number];
+    add({
+      id: 'store-adoption',
+      label: 'Adoptable store',
+      status: 'warn',
+      detail: `${best.dbPath} matches this repository's root commit and its recorded path (${best.recordedPath ?? 'unrecorded'}) no longer exists`,
+      fix: 'This repository was moved or renamed. Run `cortex adopt` to attach that store rather than starting empty. Check the recorded path first — a clone or fork of the same repository shares a root commit, and adoption moves the store.',
+    });
   }
 
   // ── Database ────────────────────────────────────────────────────────

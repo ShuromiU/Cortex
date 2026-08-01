@@ -93,10 +93,24 @@ export function resolveRealPath(target: string): string {
  */
 export function cortexHome(env: NodeJS.ProcessEnv = process.env): string {
   const override = env['CORTEX_HOME'];
-  if (override !== undefined && override.trim().length > 0) {
-    return path.resolve(override);
+  const trimmed = override?.trim() ?? '';
+  if (trimmed.length === 0) {
+    return path.join(os.homedir(), DEFAULT_HOME_DIR_NAME);
   }
-  return path.join(os.homedir(), DEFAULT_HOME_DIR_NAME);
+  // Use the *trimmed* value. Testing `override.trim()` and then resolving
+  // `override` meant a trailing newline or a stray space from a shell export
+  // became a relative path segment: `CORTEX_HOME="  /home  "` resolved under
+  // cwd, produced a path with an embedded drive colon, and `cortex store`
+  // printed it and exited 0 as though healthy.
+  //
+  // A relative value resolves against the user's home, never cwd. Hooks, the
+  // MCP server and manual CLI runs all have different working directories, so
+  // cwd-relative resolution silently fans one repository's memory across
+  // several homes — the exact fragmentation this addressing scheme exists to
+  // prevent.
+  return path.isAbsolute(trimmed)
+    ? path.resolve(trimmed)
+    : path.resolve(os.homedir(), trimmed);
 }
 
 /**
@@ -206,6 +220,16 @@ function readWorktreeAndCommonDir(
     }
   }
 
+  // The combined call fails as a unit, and `--show-toplevel` is the half that
+  // fails in a **bare** repository and inside a `.git` directory — so both were
+  // reported as "not a git repository", with a fix telling the user to run from
+  // inside one. Ask for the common dir alone before believing that.
+  const commonDirOnly = readGitPath(cwd, ['--git-common-dir'], runGit);
+  if (commonDirOnly) {
+    // No worktree to speak of; the caller falls back to cwd for `projectRoot`.
+    return { worktreePath: cwd, gitCommonDir: commonDirOnly };
+  }
+
   return null;
 }
 
@@ -234,7 +258,17 @@ export function resolveStoreIdentity(
   let worktreePath: string | null = null;
 
   try {
-    const located = readWorktreeAndCommonDir(cwd, runGit);
+    // Retried once, because the failure is not free. `defaultGitCommandRunner`
+    // cannot distinguish "not a repository" from "git could not be spawned
+    // this instant" — both surface as null — and on win32 a transient spawn
+    // failure under load is real. Degrading is correct for a directory that
+    // genuinely has no git (AC #5), but degrading *inside a repository* means
+    // computing a cwd-derived id and opening a different store, so memory
+    // written during that window is stranded in one nothing will look at
+    // again. One retry costs a single extra spawn, only on the path that has
+    // already failed, and only once per process thanks to the memo.
+    const located =
+      readWorktreeAndCommonDir(cwd, runGit) ?? readWorktreeAndCommonDir(cwd, runGit);
     if (located) {
       worktreePath = resolveRealPath(located.worktreePath);
       gitCommonDir = resolveRealPath(located.gitCommonDir);
@@ -253,8 +287,28 @@ export function resolveStoreIdentity(
   const storeDir = path.join(home, 'projects', `${label}-${storeId}`);
   const projectRoot = worktreePath ?? cwd;
 
+  // Ordered most-authoritative first, and the order is load-bearing.
+  //
+  // The **main** worktree comes first because every worktree of a repository
+  // now resolves to one store, while the pre-relocation build gave each its own
+  // `.cortex.db` — so a first post-upgrade command run inside a *linked*
+  // worktree would migrate that worktree's small store and permanently shadow
+  // the main checkout's real one (measured: 60 notes replaced by 0, not
+  // recovered by later running from main).
+  //
+  // The worktree root then precedes `cwd` for the same reason: the old build
+  // created `<repo>/src/.cortex.db` whenever it ran from a subdirectory, and
+  // cwd-first let that stray file win over the real store at the root.
+  const mainWorktreePath =
+    gitCommonDir !== null && path.basename(gitCommonDir) === '.git'
+      ? path.dirname(gitCommonDir)
+      : null;
+
   const legacyDbPaths: string[] = [];
-  for (const dir of [cwd, projectRoot]) {
+  for (const dir of [mainWorktreePath, projectRoot, cwd]) {
+    if (dir === null) {
+      continue;
+    }
     const candidate = path.join(dir, LEGACY_STORE_FILENAME);
     if (!legacyDbPaths.includes(candidate)) {
       legacyDbPaths.push(candidate);
@@ -276,7 +330,15 @@ export function resolveStoreIdentity(
         return rootCommitOid;
       }
       rootCommitResolved = true;
-      rootCommitOid = gitCommonDir === null ? null : readRootCommitOid(cwd, runGit);
+      try {
+        rootCommitOid = gitCommonDir === null ? null : readRootCommitOid(cwd, runGit);
+      } catch {
+        // The `rev-parse` call above is guarded and this one was not, so an
+        // injected or misbehaving runner threw straight out of `runDoctor` and
+        // took the whole report with it — the failure mode every other
+        // user-controlled read in that command is guarded against.
+        rootCommitOid = null;
+      }
       return rootCommitOid;
     },
     degraded,

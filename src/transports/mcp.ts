@@ -9,7 +9,6 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { openDatabase, ensureCortexSchema } from '../db/schema.js';
 import { CortexStore } from '../db/store.js';
 import type { InsertNoteOpts } from '../db/store.js';
 import { writeSessionSummary } from '../capture/consolidate.js';

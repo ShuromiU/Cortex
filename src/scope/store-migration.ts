@@ -30,8 +30,10 @@ import {
  * destination — a race guard SQLite gives us for free.
  *
  * Nothing here ever deletes a project-root database. AC #3 requires the
- * original to survive "until the user confirms removal", so this module has no
- * delete path at all; removal is a separate explicit command.
+ * original to survive "until the user confirms removal", so no path in this
+ * module touches it; removal is the user's own step. `adoptStore` does remove
+ * the store it has just copied and verified — that is what makes adoption a
+ * move rather than a duplication — and that is the only deletion in the file.
  */
 
 /** Tables whose row counts must agree before a copy is trusted. */
@@ -51,6 +53,7 @@ export type MigrationAction =
   | 'none'
   | 'migrated'
   | 'destination-exists'
+  | 'deferred-to-adoption'
   | 'failed';
 
 export interface MigrationOutcome {
@@ -167,11 +170,48 @@ function sweepStaleTempFiles(dir: string, now: number): void {
     }
     const full = path.join(dir, entry);
     try {
-      if (now - fs.statSync(full).mtimeMs > STALE_TEMP_MS) {
+      // Absolute difference: a future mtime — clock skew, a restored backup, a
+      // network filesystem — would otherwise never be swept, and the same
+      // clamp is already applied to the spool check for the same reasons.
+      if (Math.abs(now - fs.statSync(full).mtimeMs) > STALE_TEMP_MS) {
         fs.rmSync(full, { force: true });
       }
     } catch {
       /* a temp file we cannot stat or remove is not worth failing over */
+    }
+  }
+}
+
+/**
+ * A SQLite file is not enough; it has to be *a Cortex store*.
+ *
+ * `verifyStoreCopy` compares `schema_version` and four row counts, and every one
+ * of those reads returns `null` when the table is absent — so for a source that
+ * is some unrelated database, every comparison is `null === null` and the copy
+ * verifies vacuously. Measured: an unrelated SQLite file placed at
+ * `<project>/.cortex.db` was copied, reported `verified: true`, and installed as
+ * the project's store, carrying the user's own table into it.
+ */
+function looksLikeCortexStore(filePath: string): boolean {
+  if (!looksLikeSqlite(filePath)) {
+    return false;
+  }
+  let db: Database.Database | null = null;
+  try {
+    db = openDatabaseReadOnly(filePath);
+    const row = db
+      .prepare(
+        "SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table' AND name IN ('meta', 'memory_items', 'sessions')",
+      )
+      .get() as { c: number } | undefined;
+    return (row?.c ?? 0) > 0;
+  } catch {
+    return false;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* ignore */
     }
   }
 }
@@ -233,13 +273,19 @@ export function migrateLegacyStore(
     originalRetained: true,
   };
 
+  // Declared outside the try so the outer catch can name the file that failed.
+  // Spreading `base` there reported `sourcePath: null` for a failure caused by
+  // a source it had already found — a failure that never names its own cause.
+  let sourcePath: string | undefined;
+  let tempPath: string | undefined;
+
   try {
     if (fs.existsSync(targetPath)) {
       return { ...base, action: 'destination-exists' };
     }
 
-    const sourcePath = identity.legacyDbPaths.find(
-      candidate => fs.existsSync(candidate) && looksLikeSqlite(candidate),
+    sourcePath = identity.legacyDbPaths.find(
+      candidate => fs.existsSync(candidate) && looksLikeCortexStore(candidate),
     );
     if (sourcePath === undefined) {
       return base;
@@ -248,7 +294,7 @@ export function migrateLegacyStore(
     fs.mkdirSync(identity.storeDir, { recursive: true });
     sweepStaleTempFiles(identity.storeDir, options.now ?? Date.now());
 
-    const tempPath = path.join(
+    tempPath = path.join(
       identity.storeDir,
       `${TEMP_PREFIX}${process.pid}-${Math.floor(Math.random() * 1e9)}.db`,
     );
@@ -307,9 +353,21 @@ export function migrateLegacyStore(
       originalRetained: true,
     };
   } catch (error) {
+    // A throw out of `VACUUM INTO` (corrupt source, disk full, I/O error) left
+    // its partial temp file behind, and because the destination is never
+    // created the next invocation retries and leaks another one — permanently,
+    // since the sweep only collects files older than an hour.
+    if (tempPath !== undefined) {
+      try {
+        fs.rmSync(tempPath, { force: true });
+      } catch {
+        /* nothing further to do about it */
+      }
+    }
     return {
       ...base,
       action: 'failed',
+      sourcePath: sourcePath ?? null,
       reason: error instanceof Error ? error.message : String(error),
     };
   }
@@ -332,15 +390,27 @@ export interface AdoptionCandidate {
  * Detection is ambient and silent; acting on it is `cortex adopt`.
  */
 export function findAdoptionCandidates(identity: StoreIdentity): AdoptionCandidate[] {
-  const anchor = identity.readRootCommitOid();
-  if (anchor === null) {
-    return [];
-  }
+  // Cheap check first. `readRootCommitOid` spawns git, and this now runs on
+  // every resolve — but a project that already has a store is normally not
+  // looking for one, and that is the overwhelmingly common case. Resolving the
+  // anchor before this test would put a subprocess on the hook path to answer a
+  // question `existsSync` already settled, the same inversion
+  // `recordStoreIdentityMeta` had.
+  //
+  // The exception is the whole of AC #4: an ambient start *opens* the store,
+  // which creates the file, so "a store exists here" becomes true one hook
+  // after the repository moved — and the offer would vanish forever. A store
+  // that records a pending adoption keeps being asked.
   try {
-    if (fs.existsSync(identity.dbPath)) {
+    if (fs.existsSync(identity.dbPath) && !hasPendingAdoption(identity.dbPath)) {
       return [];
     }
   } catch {
+    return [];
+  }
+
+  const anchor = identity.readRootCommitOid();
+  if (anchor === null) {
     return [];
   }
 
@@ -409,9 +479,19 @@ export interface AdoptionOutcome {
 /**
  * Attach an orphaned store to this repository's computed path.
  *
- * A move, not a copy: leaving the source in place would keep it matching as a
- * candidate forever, so `doctor` would offer an adoption the user already
- * performed. The recorded path is rewritten so the store stops looking orphaned.
+ * **`VACUUM INTO` and verify, exactly as migration does — never a rename.**
+ * `fs.renameSync` moves `cortex.db` alone and leaves `-wal`/`-shm` behind, and a
+ * store whose last writer did not close cleanly keeps its rows there. Measured:
+ * a store killed mid-write read 50 rows in place and `no such table` after a
+ * rename of the main file. That is total, silent loss on the one command whose
+ * entire purpose is to rescue memory — and unrecoverable afterwards, because the
+ * abandoned directory no longer holds a `cortex.db` for the scan to find.
+ *
+ * It is still a *move*: the source is removed once the copy is verified, because
+ * leaving it would keep it matching as a candidate and `doctor` would go on
+ * offering an adoption already performed. Verification is what makes the removal
+ * safe, and it precedes it. The sidecars go with it — leaving them orphans a
+ * `-wal` next to no database.
  */
 export function adoptStore(
   identity: StoreIdentity,
@@ -420,47 +500,55 @@ export function adoptStore(
   const targetPath = identity.dbPath;
   try {
     if (fs.existsSync(targetPath)) {
-      return {
-        action: 'destination-exists',
-        candidate,
-        targetPath,
-        reason: 'a store already exists at the computed path',
-      };
+      // A store an ambient start created only to have something to open is a
+      // placeholder, and replacing it is the point. One that has since
+      // accumulated real memory is not — adopting over it would destroy work
+      // done since the move, so it is refused with an explanation instead.
+      const placeholder = describePlaceholder(targetPath);
+      if (!placeholder.isPlaceholder) {
+        return {
+          action: 'destination-exists',
+          candidate,
+          targetPath,
+          reason: placeholder.reason,
+        };
+      }
+      for (const suffix of ['', '-wal', '-shm']) {
+        fs.rmSync(`${targetPath}${suffix}`, { force: true });
+      }
     }
 
     fs.mkdirSync(identity.storeDir, { recursive: true });
 
+    let source: Database.Database | null = null;
     try {
-      fs.renameSync(candidate.dbPath, targetPath);
-    } catch {
-      // Different volume, or a lock: fall back to a verified copy and remove
-      // the source only once the copy is proven good.
-      let source: Database.Database | null = null;
+      source = openDatabaseReadOnly(candidate.dbPath);
+      source.prepare('VACUUM INTO ?').run(targetPath);
+    } finally {
       try {
-        source = openDatabaseReadOnly(candidate.dbPath);
-        source.prepare('VACUUM INTO ?').run(targetPath);
-      } finally {
-        try {
-          source?.close();
-        } catch {
-          /* ignore */
-        }
+        source?.close();
+      } catch {
+        /* ignore */
       }
-      const verification = verifyStoreCopy(candidate.dbPath, targetPath);
-      if (!verification.ok) {
-        fs.rmSync(targetPath, { force: true });
-        return {
-          action: 'failed',
-          candidate,
-          targetPath,
-          reason: verification.reason,
-        };
-      }
-      fs.rmSync(candidate.dbPath, { force: true });
     }
 
+    const verification = verifyStoreCopy(candidate.dbPath, targetPath);
+    if (!verification.ok) {
+      fs.rmSync(targetPath, { force: true });
+      return {
+        action: 'failed',
+        candidate,
+        targetPath,
+        reason: verification.reason,
+      };
+    }
+
+    // The copy is proven good and in place from here on. Nothing below may turn
+    // a successful adoption into a reported failure: on win32 a locked source
+    // makes removal throw, and the old code let that `EBUSY` escape and print
+    // "Could not adopt" over a store that had in fact been adopted.
     recordProjectMeta(targetPath, identity);
-    removeDirectoryIfEmpty(candidate.storeDir);
+    removeAdoptedSource(candidate);
 
     return { action: 'adopted', candidate, targetPath, reason: null };
   } catch (error) {
@@ -471,6 +559,64 @@ export function adoptStore(
       reason: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/**
+ * Is the store at this path one Cortex created while an adoption was pending,
+ * and still empty?
+ */
+function describePlaceholder(dbPath: string): {
+  isPlaceholder: boolean;
+  reason: string;
+} {
+  let db: Database.Database | null = null;
+  try {
+    db = openDatabaseReadOnly(dbPath);
+    if ((getMetaValue(db, ADOPTION_PENDING_KEY) ?? '').length === 0) {
+      return {
+        isPlaceholder: false,
+        reason: 'a store already exists at the computed path',
+      };
+    }
+    if (storeHasAuthoredMemory(db)) {
+      return {
+        isPlaceholder: false,
+        reason:
+          'the store here was created while the adoption was pending but has since recorded notes of its own; adopting would discard them. Move it aside first if you want the orphaned store instead.',
+      };
+    }
+    return { isPlaceholder: true, reason: '' };
+  } catch {
+    return {
+      isPlaceholder: false,
+      reason: 'a store already exists at the computed path and could not be read',
+    };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * Remove a store that has been copied elsewhere and verified.
+ *
+ * Best-effort by design: the adoption already succeeded, so a file that cannot
+ * be deleted is untidiness, not failure. A source that survives is re-offered as
+ * a candidate, which is recoverable; a successful adoption reported as failed is
+ * not.
+ */
+function removeAdoptedSource(candidate: AdoptionCandidate): void {
+  for (const suffix of ['', '-wal', '-shm']) {
+    try {
+      fs.rmSync(`${candidate.dbPath}${suffix}`, { force: true });
+    } catch {
+      /* see above */
+    }
+  }
+  removeDirectoryIfEmpty(candidate.storeDir);
 }
 
 function removeDirectoryIfEmpty(dir: string): void {
@@ -500,6 +646,9 @@ function recordProjectMeta(dbPath: string, identity: StoreIdentity): void {
     if (rootCommitOid !== null) {
       setMetaValue(db, 'root_commit_oid', rootCommitOid);
     }
+    // The adoption has happened; the store must stop advertising itself as
+    // awaiting one, or every later scan keeps offering it.
+    setMetaValue(db, ADOPTION_PENDING_KEY, '');
   } catch {
     // The move already succeeded; stale meta is a cosmetic follow-up, and the
     // next ambient open repairs it through `recordStoreIdentityMeta`.
@@ -567,7 +716,7 @@ export function clearProjectStoreCache(): void {
 /**
  * The single entry point every transport uses to find its database.
  *
- * Four copies of `findDbPath` is how three of them drift; this replaces all of
+ * Four scattered derivations is how three of them drift; this replaces all of
  * them. Resolution, directory creation and one-time migration happen here so a
  * caller only has to `openDatabase(dbPath)`.
  */
@@ -576,14 +725,38 @@ export function resolveProjectStore(
   options: ResolveStoreIdentityOptions = {},
 ): ResolvedProjectStore {
   const env = options.env ?? process.env;
+  // An injected `runGit` bypasses the memo entirely rather than being folded
+  // into the key: it is a test seam, functions have no value identity, and a
+  // cached answer made the second injection silently inert — two callers for
+  // one directory got the same object even when the second described a
+  // different repository.
+  const cacheable = options.runGit === undefined;
   const cacheKey = JSON.stringify([path.resolve(startDir), env['CORTEX_HOME'] ?? '']);
-  const cached = projectStoreCache.get(cacheKey);
+  const cached = cacheable ? projectStoreCache.get(cacheKey) : undefined;
   if (cached !== undefined) {
     return cached;
   }
 
   const identity = resolveStoreIdentity(startDir, options);
-  const migration = migrateLegacyStore(identity);
+
+  // **Adoption outranks migration**, and the order is the whole correctness of
+  // AC #4. AC #3 keeps the project-root original forever, so it travels with a
+  // repository that is moved or renamed — and migrating that stale snapshot
+  // creates a store at the computed path, which permanently suppresses the
+  // offer of the real one. Measured before this guard: a 22-note store orphaned
+  // and a 2-note snapshot installed in its place by one SessionStart hook.
+  const migration = findAdoptionCandidates(identity).length > 0
+    ? {
+        action: 'deferred-to-adoption' as const,
+        sourcePath: null,
+        targetPath: identity.dbPath,
+        verified: false,
+        reason:
+          'an orphaned store matching this repository is available for adoption; run `cortex adopt`',
+        originalRetained: true,
+      }
+    : migrateLegacyStore(identity);
+
   try {
     fs.mkdirSync(identity.storeDir, { recursive: true });
   } catch {
@@ -595,7 +768,9 @@ export function resolveProjectStore(
     dbPath: identity.dbPath,
     migration,
   };
-  projectStoreCache.set(cacheKey, resolved);
+  if (cacheable) {
+    projectStoreCache.set(cacheKey, resolved);
+  }
   return resolved;
 }
 
@@ -612,7 +787,7 @@ export interface OpenedProjectStore extends ResolvedProjectStore {
  * caller that resolves and opens by hand produces a working store that can
  * never be recovered after a move — a failure invisible until the day it
  * matters. Leaving that to three transports to each remember is the same shape
- * as the four `findDbPath` copies this story deleted.
+ * as the scattered path derivations this story replaced.
  */
 export function openProjectStore(
   startDir: string,
@@ -622,5 +797,92 @@ export function openProjectStore(
   const db = openDatabase(resolved.dbPath);
   ensureCortexSchema(db, resolved.identity.projectRoot);
   recordStoreIdentityMeta(db, resolved.identity);
+  recordMigrationOutcome(db, resolved.migration);
+  try {
+    // Opening created this file; without the marker its mere existence would
+    // answer "does this project have a store?" with yes and retire the offer.
+    if (resolved.migration.action === 'deferred-to-adoption') {
+      setMetaValue(db, ADOPTION_PENDING_KEY, resolved.migration.reason ?? 'pending');
+    }
+  } catch {
+    /* bookkeeping must never break an open */
+  }
   return { ...resolved, db };
+}
+
+/** Meta keys carrying what happened to the migration, for `doctor` to read. */
+export const MIGRATED_FROM_KEY = 'migrated_from';
+export const MIGRATION_FAILED_KEY = 'migration_failed';
+
+/**
+ * Marks a store Cortex created only because it had to open *something*, while
+ * an orphaned store matching this repository was waiting to be adopted.
+ */
+export const ADOPTION_PENDING_KEY = 'adoption_pending';
+
+/** Does this store record that an adoption is still outstanding? */
+export function hasPendingAdoption(dbPath: string): boolean {
+  let db: Database.Database | null = null;
+  try {
+    db = openDatabaseReadOnly(dbPath);
+    return (getMetaValue(db, ADOPTION_PENDING_KEY) ?? '').length > 0;
+  } catch {
+    return false;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * Has the user written anything into this store?
+ *
+ * **Notes only, deliberately.** Any ambient start creates a session and a
+ * branch snapshot, and the snapshot is projected into `memory_items` — so a
+ * store that has merely been *opened* is never empty by those measures, and
+ * testing them would refuse every adoption the moment a single hook fired.
+ * Notes are the user-authored half; losing a session row recorded in a project
+ * whose real memory was missing is a fair trade for recovering that memory,
+ * and losing a note is not.
+ */
+function storeHasAuthoredMemory(db: Database.Database): boolean {
+  const notes = countRows(db, 'notes');
+  return notes !== null && notes > 0;
+}
+
+/**
+ * Persist the migration verdict, because otherwise nothing ever reads it.
+ *
+ * `MigrationOutcome` was computed and discarded by every caller, so a migration
+ * that failed produced a silent, permanently empty store: the destination now
+ * exists, so the next run short-circuits to `destination-exists` and never
+ * retries. Worse, `doctor` inferred "migrated" from the mere coexistence of a
+ * legacy file and a store, and then told the user to delete the original — the
+ * only surviving copy of their memory.
+ *
+ * Recording it makes the diagnosis evidence-based rather than inferred.
+ */
+function recordMigrationOutcome(
+  db: Database.Database,
+  migration: MigrationOutcome,
+): void {
+  try {
+    if (migration.action === 'migrated' && migration.sourcePath !== null) {
+      setMetaValue(db, MIGRATED_FROM_KEY, migration.sourcePath);
+      setMetaValue(db, MIGRATION_FAILED_KEY, '');
+      return;
+    }
+    if (migration.action === 'failed') {
+      setMetaValue(
+        db,
+        MIGRATION_FAILED_KEY,
+        `${migration.sourcePath ?? 'unknown source'}: ${migration.reason ?? 'unknown reason'}`,
+      );
+    }
+  } catch {
+    // Bookkeeping must never break an open.
+  }
 }

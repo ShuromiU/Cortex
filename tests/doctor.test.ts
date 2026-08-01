@@ -797,6 +797,60 @@ describe('MCP server registration', () => {
 
 // ── Database ──────────────────────────────────────────────────────────
 
+describe('the legacy-store row reports evidence, not coincidence', () => {
+  it('does not claim "migrated" merely because a store and a legacy file both exist', () => {
+    // Inferring migration from the coexistence of the two was wrong for every
+    // cause except a completed migration — and the fix it printed told the user
+    // to delete the original, which after a *failed* migration is the only
+    // surviving copy of their memory.
+    const fixture = buildFixture();
+    fs.writeFileSync(path.join(fixture.projectDir, '.cortex.db'), 'SQLite format 3\u0000legacy');
+
+    const report = doctor(fixture);
+
+    expect(statusOf(report, 'store-legacy')).toBe('warn');
+    expect(detailOf(report, 'store-legacy')).toContain('not migrated');
+    expect(detailOf(report, 'store-legacy')).not.toContain('migrated from');
+  });
+
+  it('reports a recorded migration as migrated, and names the source', () => {
+    const fixture = buildFixture();
+    const legacy = path.join(fixture.projectDir, '.cortex.db');
+    fs.writeFileSync(legacy, 'SQLite format 3\u0000legacy');
+    const db = new Database(fixture.dbPath);
+    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(
+      'migrated_from',
+      legacy,
+    );
+    db.close();
+
+    const report = doctor(fixture);
+
+    expect(statusOf(report, 'store-legacy')).toBe('warn');
+    expect(detailOf(report, 'store-legacy')).toContain('migrated from');
+    expect(detailOf(report, 'store-legacy')).toContain(legacy);
+  });
+
+  it('fails loudly when the store records that its migration failed', () => {
+    const fixture = buildFixture();
+    fs.writeFileSync(path.join(fixture.projectDir, '.cortex.db'), 'SQLite format 3\u0000legacy');
+    const db = new Database(fixture.dbPath);
+    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(
+      'migration_failed',
+      'C:\\proj\\.cortex.db: database disk image is malformed',
+    );
+    db.close();
+
+    const report = doctor(fixture);
+
+    expect(statusOf(report, 'store-legacy')).toBe('fail');
+    expect(detailOf(report, 'store-legacy')).toContain('migration failed');
+    // And it must not tell the user to delete the only copy they have left.
+    const check = report.checks.find(entry => entry.id === 'store-legacy');
+    expect(check?.fix).toContain('Do NOT delete the original');
+  });
+});
+
 describe('database reachability', () => {
   it('fails when the store does not exist, without creating one', () => {
     const fixture = buildFixture();

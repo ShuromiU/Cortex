@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 
-import * as path from 'node:path';
-import { openDatabase, ensureCortexSchema } from '../db/schema.js';
 import { CortexStore } from '../db/store.js';
 import {
   handleAgentEvent,
