@@ -353,7 +353,12 @@ function endOfTurn(
   // Edit/Write path where latency is the user's, so end-of-turn — after the
   // turn's work is done — is where a size-triggered checkpoint belongs.
   try {
-    maybeCheckpointWal(store.db, resolveProjectStore(cwd).dbPath);
+    // Both arguments from ONE resolution. Taking the handle from `store` and
+    // the path from a separate `resolveProjectStore(cwd)` let the size gate read
+    // one file while the checkpoint acted on another — production agreed only
+    // because `main()` derives both from the same cwd, and `handleHookPayload`
+    // is exported with `store` and `cwd` as independent parameters.
+    maybeCheckpointWal(store.db, store.db.name);
   } catch {
     // AD-12: a checkpoint that cannot run degrades to silence.
   }

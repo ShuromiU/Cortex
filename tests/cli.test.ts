@@ -10,6 +10,7 @@ import type { InstallAction, InstallResult } from '../src/query/install.js';
 import { deriveEngagementPath } from '../src/transports/mcp.js';
 import { openDatabase, ensureCortexSchema } from '../src/db/schema.js';
 import { resolveStoreIdentity } from '../src/scope/identity.js';
+import { walSizeBytes } from '../src/db/schema.js';
 import { clearProjectStoreCache } from '../src/scope/store-migration.js';
 import { execFileSync } from 'node:child_process';
 import { CortexStore } from '../src/db/store.js';
@@ -1951,6 +1952,35 @@ describe('cortex stats reports the footprint (FR-25 AC #3)', () => {
     // folding them together would hide.
     expect(run.stdout).toMatch(/^Database: +\d/m);
     expect(run.stdout).toMatch(/^WAL: +\d/m);
+
+    // The VALUES, not just the labels. Asserting only the shape let a reviewer
+    // swap the two numbers, and hard-code both to `0 B`, with the suite green.
+    const identity = resolveStoreIdentity(cwd);
+    const expectedDb = fs.statSync(identity.dbPath).size;
+    expect(run.stdout).toContain(`Database:      ${formatBytes(expectedDb)}`);
+    expect(run.stdout).toContain(`WAL:           ${formatBytes(walSizeBytes(identity.dbPath))}`);
+    // And the database is genuinely the larger of the two here, so a swap moves
+    // both lines rather than being invisible in a store where they happen to match.
+    expect(expectedDb).toBeGreaterThan(walSizeBytes(identity.dbPath));
+  });
+
+  it('does not report a WAL that its own open created', async () => {
+    // `openCortexDb` runs ensureCortexSchema and its backfills — all writes — so
+    // reading the sidecar straight afterwards reported a WAL the command itself
+    // had just made: on a fresh store, `Database: 4.0 KB / WAL: 704.1 KB`. A
+    // 176:1 ratio of its own making, on the one command whose job is to show the
+    // real ratio.
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-stats-fresh-'));
+
+    const run = await runCommand(cwd, ['stats']);
+
+    expect(run.exitCode).toBeUndefined();
+    const wal = /^WAL: +(.+)$/m.exec(run.stdout)?.[1] ?? '';
+    const database = /^Database: +(.+)$/m.exec(run.stdout)?.[1] ?? '';
+    // Nothing is holding this store, so the checkpoint reclaims everything and
+    // the whole footprint is in the database file where it belongs.
+    expect(wal).toBe('0 B');
+    expect(database).not.toBe('0 B');
   });
 
   it('formats byte sizes in whole units', () => {

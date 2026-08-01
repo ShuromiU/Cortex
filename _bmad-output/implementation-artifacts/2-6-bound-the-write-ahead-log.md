@@ -178,3 +178,55 @@ Verified live: this repository's own store went from a 4,132,392-byte WAL to 0, 
 ### One test claim I had to correct
 
 The first version asserted the capture hook "spawns no process" and contained no `__CORTEX_NODE__`. That is false — it spawns one, detached, past the 256 KiB spool threshold. The assertion now checks the property that actually holds and matters: every Node invocation in that script is backgrounded (`&)`), so the hook returns immediately. A test asserting a stronger claim than the code makes is a test that will be deleted the first time someone reads it carefully.
+
+## Senior Developer Review (AI)
+
+Three layers, all reproducing the baseline first (build, lint, 1098 tests, 8 suites at zero delta). **Nothing below was caught by any command this story ran.**
+
+### The story broke the very AC it claimed to satisfy structurally
+
+`closeProjectStore` checkpointed unconditionally, and `TRUNCATE` is RESTART-plus-truncate — RESTART invokes SQLite's busy handler, which inherited `openDatabase`'s `busy_timeout = 5000`. Every hook process that exited while any other Cortex process held a transaction stalled for five seconds:
+
+```
+                 control    with a held transaction
+reflect-pre       1031 ms      6303 ms   (11617 ms with a writer)
+reflect-prompt     769 ms      6278 ms
+inject-header      857 ms      6363 ms
+end-of-turn        762 ms     11830 ms
+```
+
+Three things made it worse than a slow path. It **bought nothing** when it stalled — `busy: true`, WAL unchanged. `db.close()` did the same job in **1–2 ms**, so the entire cost was the explicit call I added and justified in a comment as *"belt-and-braces… makes the intent testable"*. And it landed squarely on `reflect-pre`, the path this story excluded **by design** and wrote a test to protect: I kept `maybeCheckpointWal` off it, then handed the same cost back through the exit handler — ungated by `CORTEX_WAL_MAX_BYTES`, and unaffected by `cortex_disengage`, which cannot help because the store is opened before the engagement gate.
+
+It is reachable from Cortex's own shipped concurrency: the capture hook backgrounds `flush-spool`, and a Stop hook firing during one measured 11,699 ms.
+
+Fixed by dropping the busy timeout to zero for the duration of the checkpoint and restoring it after: **7 ms instead of 5518 ms, and the frames still move**. The suite already held the evidence — my own `busy` test ran in 6.1 seconds with no duration assertion, and I read that number without asking why.
+
+### Two claims I asserted without measuring, both false
+
+**"The process exited and the OS tore the handle down, which is not a checkpoint."** A reviewer commented out the wiring in all three transports, rebuilt, and the WAL was still removed: better-sqlite3's destructor closes cleanly on a natural drain. The wiring is genuinely load-bearing only on `process.exit()`, an uncaught error, and a signal — where the WAL was measured parked at 12,405,352 bytes.
+
+**"Cortex's own MCP server is a long-lived reader," repeated in four places.** An *idle* connection does not make a checkpoint busy (20 ms, `busy: false`), and there is no `.iterate(` anywhere in `src/`, so no long-lived read cursor exists. The real cause is a transient concurrent transaction. My own probe printed `idle → busy:false` and I wrote the opposite anyway.
+
+### And the tests proved much less than they looked like
+
+**Seven of seventeen mutations survived**, including the one that matters most: commenting out `installStoreCloseOnExit()` in all three transports. My three "wiring" assertions were `expect(source(file)).toContain('installStoreCloseOnExit()')` — a **source-string check a commented-out call satisfies**. This story's own Dev Notes quote 2.5's worst finding, *"assert the close happens through the transport"*, and I wrote the string check on the next screen.
+
+Also surviving: removing the checkpoint from `flush-spool` (zero coverage), **adding** one to the Edit/Write reflex path (the guard compared `indexOf`, i.e. the *first* occurrence, so an added call was invisible), swapping the two `stats` values, and hard-coding both to `0 B`.
+
+### What replaced them
+
+- A child process that opens a store, parks a WAL, and exits via `process.exit()` — with and without the handler. Proves the mechanism where it is actually load-bearing.
+- A POSIX-only signal test against a real `cortex serve`, since win32's `child.kill()` is `TerminateProcess` and runs no handler.
+- Real child processes for the CLI and hook transports.
+- Exactly-once matching for the reflex-path guard, value assertions for `stats`, a duration assertion for the checkpoint, and a `closeProjectStore` return-value assertion.
+- **A staleness guard on `dist/`.** These tests spawn `dist/` while the rest of the suite imports `src/`, and a stale build cost an hour here: a child reported zero exit listeners because `dist/` still carried a mutation the source no longer had.
+
+Repair campaign: **12/12 killed, 0 survived**, including all seven earlier survivors.
+
+### Smaller findings, all fixed
+
+SIGINT/SIGTERM reached no handler, leaving a 4 KB database beside a 741,632-byte WAL. `cortex stats` reported a WAL its own open had created (`Database: 4.0 KB / WAL: 704.1 KB` on a fresh store, 176:1) — and measuring *before* the open was no better, since it reports `0 B` for a store the same command is about to migrate into existence; it now checkpoints first, so both numbers are the real footprint. `formatBytes` had no GB tier. `resolveWalMaxBytes` accepted `0.5` and `0x10`. `endOfTurn` sized one file and checkpointed another handle. The `readonly` on `CortexStore.db` was documented as a runtime guarantee it does not provide.
+
+### Verification after repair
+
+`npm run build`, `npm run lint`, `npx vitest run` (**1107 passed, 1 skipped / 35 files**), `npm run gate` (**8 suites, exact zero delta**). Live: `Database: 14.4 MB / WAL: 0 B`.

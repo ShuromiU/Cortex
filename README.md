@@ -625,7 +625,7 @@ SQLite already bounds the WAL — `wal_autocheckpoint` moves its contents into t
 
 So Cortex runs a **truncating** checkpoint, which returns the space, at two points: when a command's process exits, and mid-session once the log crosses `CORTEX_WAL_MAX_BYTES` (default 4 MiB). Neither is on the path of a tool call — the `PostToolUse` hook is pure bash and reaches the checkpoint only through a flush it launches detached and does not wait for.
 
-A checkpoint can report `busy`, which is normal rather than a failure: it means another connection — usually Cortex's own long-running MCP server — held a read, so the frames moved into the database but the file could not be reclaimed yet. The next checkpoint gets it.
+A checkpoint can report `busy`, which is normal rather than a failure: another Cortex process was mid-transaction — most often the spool flush the capture hook launches in the background — so the frames moved into the database but the file could not be reclaimed yet. The next checkpoint gets it. An MCP server that is merely *connected* does not cause this; only one inside a transaction does. Checkpoints never wait for it, so a busy one costs milliseconds.
 
 ## License
 

@@ -96,7 +96,11 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) {
     return `${(bytes / 1024).toFixed(1)} KB`;
   }
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  // A store past a gigabyte was previously reported in thousands of MB.
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 function findDbPath(startDir: string): string {
@@ -917,6 +921,17 @@ export function createProgram(): Command {
       // AC #3: named separately, because "footprint" that folds them together
       // hides the thing FR-25 is about — a WAL parked at its high-water mark
       // next to a database that is not growing.
+      // Checkpoint before measuring, so the two numbers are the footprint the
+      // store actually occupies rather than an artifact of this command.
+      // `openCortexDb` runs `ensureCortexSchema` and its backfills — all writes
+      // — so reading the sidecar straight afterwards reported a WAL this command
+      // had just created: on a fresh store, `Database: 4.0 KB / WAL: 704.1 KB`,
+      // a 176:1 ratio entirely self-inflicted. Measuring *before* the open is no
+      // better; it reports 0 B for a store the same command is about to migrate
+      // into existence. Folding the frames in first makes `Database` the real
+      // size and leaves in `WAL` only what genuinely could not be reclaimed —
+      // which is exactly the parked-WAL state AC #3 exists to surface.
+      maybeCheckpointWal(store.db, dbPath, { CORTEX_WAL_MAX_BYTES: '4096' });
       process.stdout.write(`Database:      ${formatBytes(databaseSizeBytes(dbPath))}\n`);
       process.stdout.write(`WAL:           ${formatBytes(walSizeBytes(dbPath))}\n`);
     });

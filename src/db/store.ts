@@ -821,10 +821,15 @@ export class CortexStore {
   /**
    * The underlying handle.
    *
-   * Public and read-only so callers that must operate on the *file* rather than
-   * its rows — the WAL checkpoint of FR-25 — can do so without a second
-   * connection. Read-only because reassigning it would silently orphan every
-   * prepared statement this class holds.
+   * Public so callers that must operate on the *file* rather than its rows —
+   * the WAL checkpoint of FR-25 — can do so without opening a second
+   * connection.
+   *
+   * `readonly` is a **compile-time** annotation, not a runtime guarantee: this
+   * package ships `dist/`, and a JavaScript consumer can reassign it or call
+   * `close()` on it, after which every method here throws. Stated rather than
+   * implied, because an earlier version of this comment claimed the annotation
+   * prevented what it only discourages.
    */
   constructor(readonly db: Database.Database) {}
 

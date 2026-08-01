@@ -392,6 +392,9 @@ export function openDatabaseReadOnly(dbPath: string): Database.Database {
 /** Default ceiling before a mid-session checkpoint is worth running (FR-25). */
 export const DEFAULT_WAL_MAX_BYTES = 4 * 1024 * 1024;
 
+/** One page. A ceiling below this would checkpoint on every single call. */
+export const MIN_WAL_MAX_BYTES = 4096;
+
 export interface WalCheckpointResult {
   /** A reader held the file, so the WAL could not be reclaimed. Not an error. */
   busy: boolean;
@@ -440,12 +443,30 @@ export function databaseSizeBytes(dbPath: string): number {
  * `TRUNCATE` shrinks it, and shrinking it is the whole of FR-25's footprint
  * claim.
  *
- * Never throws. A `busy` result is the *expected* outcome when another
- * connection holds a read — Cortex's own MCP server is long-lived, so it is
- * ordinary — and the checkpoint still moves what frames it can.
+ * **It never waits, and that is not a detail.** `TRUNCATE` is RESTART plus a
+ * truncate, and RESTART invokes SQLite's busy handler until no other connection
+ * is inside a transaction. `openDatabase` sets `busy_timeout = 5000`, so
+ * inheriting it made every checkpoint a potential five-second stall — measured
+ * at 5518 ms against a concurrent reader and 5560 ms against a writer, both
+ * returning `busy` with the WAL unchanged. Cortex checkpoints only on hook and
+ * command paths, where blocking is the one thing it must not do, so the busy
+ * timeout is dropped to zero for the duration: 7 ms instead of 5518 ms, and the
+ * frames still move (`{busy:1, checkpointed:242}`).
+ *
+ * Never throws. A `busy` result is ordinary rather than a failure — it means
+ * another Cortex process was mid-transaction, most often the spool flush that
+ * `cortex-capture.sh` launches detached past its size threshold.
  */
-export function checkpointWal(db: Database.Database): WalCheckpointResult | null {
+export function checkpointWal(
+  db: Database.Database,
+  options: { waitMs?: number } = {},
+): WalCheckpointResult | null {
+  let previousTimeout: number | null = null;
   try {
+    // Read it back rather than assuming `openDatabase`'s value: this is also
+    // called on handles the caller configured.
+    previousTimeout = db.pragma('busy_timeout', { simple: true }) as number;
+    db.pragma(`busy_timeout = ${Math.max(0, Math.trunc(options.waitMs ?? 0))}`);
     const rows = db.pragma('wal_checkpoint(TRUNCATE)') as Array<{
       busy: number;
       log: number;
@@ -463,6 +484,14 @@ export function checkpointWal(db: Database.Database): WalCheckpointResult | null
   } catch {
     // A checkpoint that cannot run is not a failure worth surfacing (AD-12).
     return null;
+  } finally {
+    if (previousTimeout !== null) {
+      try {
+        db.pragma(`busy_timeout = ${previousTimeout}`);
+      } catch {
+        // The handle is closing anyway; the restore is courtesy, not contract.
+      }
+    }
   }
 }
 
@@ -472,7 +501,12 @@ export function checkpointWal(db: Database.Database): WalCheckpointResult | null
  * Parsed with `Number`, not `parseInt`. `gc`'s neighbouring `envNumber` uses
  * `parseInt`, which succeeds on a *prefix* — `4e6` becomes 4, silently turning a
  * 4 MB ceiling into a 4-byte one that checkpoints on every call. Same reasoning
- * as `resolvePageLimit` in story 2.1. Non-finite, zero and negative fall back.
+ * as `resolvePageLimit` in story 2.1.
+ *
+ * Rejected as well as non-finite, zero and negative: fractions and anything
+ * below one page. `Number` accepts `0.5` and `0x10` happily, and a sub-page
+ * ceiling means every call checkpoints — cheap now that checkpoints do not
+ * block, but still pointless I/O on every hook.
  */
 export function resolveWalMaxBytes(
   env: NodeJS.ProcessEnv = process.env,
@@ -482,7 +516,10 @@ export function resolveWalMaxBytes(
     return DEFAULT_WAL_MAX_BYTES;
   }
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_WAL_MAX_BYTES;
+  if (!Number.isInteger(parsed) || parsed < MIN_WAL_MAX_BYTES) {
+    return DEFAULT_WAL_MAX_BYTES;
+  }
+  return parsed;
 }
 
 /**
