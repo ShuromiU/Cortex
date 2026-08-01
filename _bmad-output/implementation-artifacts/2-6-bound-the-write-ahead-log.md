@@ -4,7 +4,7 @@ baseline_commit: 078d5a0
 
 # Story 2.6: Bound the write-ahead log
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
