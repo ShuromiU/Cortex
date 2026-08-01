@@ -17,6 +17,40 @@ export { normalizeScopePath, deriveProjectScopeKey, deriveBranchScopeKey, derive
 export { detectGitScope, type GitScopeIdentity, type GitCommandRunner } from './scope/git.js';
 export { refreshCurrentAppGraph, listCurrentAppFiles, type RefreshCurrentAppGraphOptions } from './scope/app-graph.js';
 export { ensureScopedSession, resolveAgentSessionId, syncBranchSnapshotForSession, type ScopeSessionOptions } from './scope/runtime.js';
+export {
+  resolveStoreIdentity,
+  resolveRealPath,
+  cortexHome,
+  sanitizeLabel,
+  computeStoreId,
+  storeLabelFor,
+  readRootCommitOid,
+  STORE_ID_LENGTH,
+  STORE_FILENAME,
+  LEGACY_STORE_FILENAME,
+  DEFAULT_HOME_DIR_NAME,
+  type StoreIdentity,
+  type ResolveStoreIdentityOptions,
+} from './scope/identity.js';
+export {
+  resolveProjectStore,
+  openProjectStore,
+  clearProjectStoreCache,
+  migrateLegacyStore,
+  verifyStoreCopy,
+  findAdoptionCandidates,
+  adoptStore,
+  recordStoreIdentityMeta,
+  VERIFIED_TABLES,
+  type ResolvedProjectStore,
+  type OpenedProjectStore,
+  type MigrationOutcome,
+  type MigrationAction,
+  type CopyVerification,
+  type AdoptionCandidate,
+  type AdoptionOutcome,
+  type MigrateOptions,
+} from './scope/store-migration.js';
 // Query
 export { buildHeader, buildFullState } from './query/state.js';
 export { recall } from './query/recall.js';

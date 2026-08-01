@@ -588,7 +588,7 @@ function legacyDatabaseHasData(db: Database.Database): boolean {
   return false;
 }
 
-function getMetaValue(db: Database.Database, key: string): string | undefined {
+export function getMetaValue(db: Database.Database, key: string): string | undefined {
   if (!tableExists(db, 'meta')) {
     return undefined;
   }
@@ -599,7 +599,7 @@ function getMetaValue(db: Database.Database, key: string): string | undefined {
   return row?.value;
 }
 
-function setMetaValue(db: Database.Database, key: string, value: string): void {
+export function setMetaValue(db: Database.Database, key: string, value: string): void {
   db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)')
     .run(key, value);
 }

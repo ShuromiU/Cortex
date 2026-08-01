@@ -20,7 +20,7 @@ export interface GitScopeIdentity {
 
 export type GitCommandRunner = (args: string[], cwd: string) => string | null;
 
-function defaultGitCommandRunner(args: string[], cwd: string): string | null {
+export function defaultGitCommandRunner(args: string[], cwd: string): string | null {
   try {
     const raw = execFileSync('git', args, {
       cwd,
@@ -34,7 +34,7 @@ function defaultGitCommandRunner(args: string[], cwd: string): string | null {
   }
 }
 
-function readGitPath(
+export function readGitPath(
   cwd: string,
   args: string[],
   runGit: GitCommandRunner,

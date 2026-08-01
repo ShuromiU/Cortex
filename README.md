@@ -555,9 +555,25 @@ Anti-patterns: don't add startup rituals to agent instructions, don't note routi
 
 ## Data
 
-Cortex stores memory in `.cortex.db` in the repo root, engagement state in `.cortex.state`, and pending capture in `.cortex.spool.jsonl`.
+Memory lives **outside your repository**, in a per-project directory under a user-level Cortex home:
 
-Add to `.gitignore`:
+```text
+~/.cortex/projects/<repo-name>-<id>/cortex.db
+```
+
+`<id>` is a hash of the absolute realpath of `git rev-parse --git-common-dir`. Three consequences follow, and they are the point:
+
+- **Every worktree of a repository shares one store.** Cortex already partitions worktrees internally by scope key, so splitting them across files only fragmented memory.
+- **Two clones of the same repository get two stores.** Identity is the path, not the remote or the root commit — a fork does not inherit upstream's decisions.
+- **Your project root stays clean.** Nothing about the database needs to be in a directory you commit.
+
+Set `CORTEX_HOME` to move the whole tree elsewhere. Outside a git repository Cortex falls back to a hash of the working directory's realpath and says so in `cortex doctor`.
+
+Run `cortex store` to see where the current project resolves, and why.
+
+Three small files *do* stay in the project root, because the `PostToolUse` hook is pure bash and must not spawn a process per tool call: engagement state in `.cortex.state`, pending capture in `.cortex.spool.jsonl`, and `.cortex.agent-used`.
+
+Add to `.gitignore` (`cortex install` does this for you):
 
 ```text
 .cortex.db
@@ -566,6 +582,28 @@ Add to `.gitignore`:
 .cortex.spool.jsonl.processing
 .cortex.agent-used
 ```
+
+`.cortex.db` stays on that list because migration deliberately leaves your original where it was.
+
+### Migrating an existing store
+
+The first Cortex command after upgrading copies `<project>/.cortex.db` into the new location, verifies the copy, and **leaves the original exactly where it is**. Nothing deletes it but you.
+
+The copy is a SQLite `VACUUM INTO`, not a file copy. Copying `.cortex.db` on its own loses everything still in the `-wal` sidecar — measured here on a live store, a plain copy produced a database in which the tables did not exist. Verification then re-opens the copy from disk and checks `integrity_check`, the schema version, and the row counts of `memory_items`, `notes`, `sessions` and `events` before the new store is used.
+
+`cortex doctor` reports both locations until you remove the original, and tells you the store is still at the pre-relocation path if the migration has not run yet.
+
+One transition note: a Cortex MCP server that was already running resolved its path at startup and keeps using it. Restart it to pick up the new location.
+
+### If you move or rename a repository
+
+Moving a checkout changes its git common dir, so it computes a new identity and finds no store. Rather than starting empty, Cortex records the root-commit OID alongside each store as a repair anchor. When a store's anchor matches this repository and the path it recorded no longer exists, that store is offered for adoption:
+
+```bash
+cortex adopt
+```
+
+It previews by default and moves the store only with `--yes`. Ambient startup never adopts on its own — a hook has no way to ask you, and attaching a store you did not approve is not something to do silently. `cortex doctor` and `cortex store` both surface the offer.
 
 Growth is bounded: `cortex gc` (and the opt-in `CORTEX_GC_AUTO=apply` startup sweep, at most once per 24h) prunes events of consolidated sessions, trims the retrieval log, rolls up old ledger rows, deletes never-accessed archived items after 90 days, and caps stored `command_run` items per scope. Dry-run is the default; `--apply` deletes.
 

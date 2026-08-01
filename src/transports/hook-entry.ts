@@ -10,6 +10,7 @@ import {
   handleReadEvent,
   handleWriteEvent,
 } from '../capture/hooks.js';
+import { openProjectStore } from '../scope/store-migration.js';
 import { reflectMemory, type ReflexEvent } from '../query/reflex.js';
 import { suggestNotes } from '../query/suggest-notes.js';
 import { flushSpool } from '../capture/spool.js';
@@ -50,15 +51,8 @@ export interface HookRuntimeOptions {
   requireEngagement?: boolean;
 }
 
-function findDbPath(startDir: string): string {
-  return path.join(startDir, '.cortex.db');
-}
-
 function openCortexDb(startDir: string): CortexStore {
-  const dbPath = findDbPath(startDir);
-  const db = openDatabase(dbPath);
-  ensureCortexSchema(db, startDir);
-  return new CortexStore(db);
+  return new CortexStore(openProjectStore(startDir).db);
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

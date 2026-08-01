@@ -19,6 +19,10 @@ import { brief } from '../query/brief.js';
 import { buildSessionSummary } from '../query/summarize.js';
 import { ensureScopedSession, syncBranchSnapshotForSession } from '../scope/runtime.js';
 import { refreshCurrentAppGraph } from '../scope/app-graph.js';
+import {
+  openProjectStore,
+  resolveProjectStore,
+} from '../scope/store-migration.js';
 import { estimateTokens } from '../query/retrieval.js';
 import { formatMemoryTimestamp } from '../query/render.js';
 import { suggestNotes } from '../query/suggest-notes.js';
@@ -128,15 +132,12 @@ export function renderCortexRoute(): string {
 }
 
 function findDbPath(startDir: string): string {
-  return path.join(startDir, '.cortex.db');
+  return resolveProjectStore(startDir).dbPath;
 }
 
 function openCortexDb(startDir: string): { store: CortexStore; dbPath: string } {
-  const dbPath = findDbPath(startDir);
-  const db = openDatabase(dbPath);
-  ensureCortexSchema(db, startDir);
-  const store = new CortexStore(db);
-  return { store, dbPath };
+  const { db, dbPath } = openProjectStore(startDir);
+  return { store: new CortexStore(db), dbPath };
 }
 
 function ensureSession(store: CortexStore, cwd: string): string {

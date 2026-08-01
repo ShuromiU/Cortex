@@ -5,6 +5,8 @@ import * as path from 'node:path';
 import Database from 'better-sqlite3';
 
 import { applySchema, initializeMeta, SCHEMA_VERSION } from '../src/db/schema.js';
+import { resolveStoreIdentity } from '../src/scope/identity.js';
+import type { GitCommandRunner } from '../src/scope/git.js';
 import { deriveEngagementPath } from '../src/transports/mcp.js';
 import {
   HOOK_SCRIPTS,
@@ -41,7 +43,16 @@ interface Fixture {
   templateDir: string;
   binDir: string;
   env: NodeJS.ProcessEnv;
+  /** Where the store actually lives now — under the fixture's CORTEX_HOME. */
+  dbPath: string;
+  storeDir: string;
+  cortexHome: string;
+  /** Canned git, so these unit fixtures need no real repository. */
+  runGit: GitCommandRunner;
 }
+
+/** A stable fake root commit, so adoption logic has an anchor to match on. */
+const FIXTURE_ROOT_COMMIT = 'a'.repeat(40);
 
 /** Minimal stand-ins for the real templates: same placeholder vocabulary. */
 const TEMPLATE_BODIES: Record<string, string> = {
@@ -121,7 +132,37 @@ function buildFixture(): Fixture {
 
   writeFile(path.join(projectDir, '.cortex.state'), 'enabled=true\n');
 
-  const db = new Database(path.join(projectDir, '.cortex.db'));
+  // `CORTEX_HOME` is not optional here. Without it `cortexHome()` falls back to
+  // `os.homedir()`, and these fixtures would read — and the migration path
+  // would write — the developer's real store. That is the incident story 2.4
+  // recorded, in a shape that reads as harmless.
+  const cortexHome = path.join(root, 'cortex-home');
+  const gitCommonDir = path.join(projectDir, '.git');
+  fs.mkdirSync(gitCommonDir, { recursive: true });
+
+  // Canned git rather than a real repository: these are unit fixtures built ~40
+  // times per run, and the store-identity ACs that genuinely need real git
+  // (worktree convergence, two clones) live in `tests/store-identity.test.ts`
+  // where they use `git init` and `git worktree add` for real.
+  const runGit: GitCommandRunner = (args: string[]) => {
+    if (args.includes('--show-toplevel')) {
+      return `${projectDir}\n${gitCommonDir}`;
+    }
+    if (args[0] === 'rev-list') {
+      return FIXTURE_ROOT_COMMIT;
+    }
+    return null;
+  };
+
+  const env: NodeJS.ProcessEnv = {
+    PATH: binDir,
+    PATHEXT: '.COM;.EXE;.BAT;.CMD',
+    CORTEX_HOME: cortexHome,
+  };
+  const identity = resolveStoreIdentity(projectDir, { env, runGit });
+
+  fs.mkdirSync(identity.storeDir, { recursive: true });
+  const db = new Database(identity.dbPath);
   // WAL, matching `openDatabase` — the mode every real store is in, and the
   // reason a read-only open has anything to create.
   db.pragma('journal_mode = WAL');
@@ -135,7 +176,11 @@ function buildFixture(): Fixture {
     hooksDir,
     templateDir,
     binDir,
-    env: { PATH: binDir, PATHEXT: '.COM;.EXE;.BAT;.CMD' },
+    env,
+    dbPath: identity.dbPath,
+    storeDir: identity.storeDir,
+    cortexHome,
+    runGit,
   };
 }
 
@@ -146,6 +191,7 @@ function doctor(fixture: Fixture, overrides: Record<string, unknown> = {}): Doct
     templateDir: fixture.templateDir,
     env: fixture.env,
     platform: 'win32',
+    runGit: fixture.runGit,
     ...overrides,
   });
 }
@@ -196,6 +242,10 @@ describe('runDoctor on a healthy installation', () => {
         'node',
         'settings',
         'spool',
+        // Story 2.5: the store is no longer at a fixed path, so "where is it"
+        // became a question a diagnostic has to answer. `store-legacy` and
+        // `store-adoption` are conditional and absent from a healthy fixture.
+        'store',
       ].sort(),
     );
   });
@@ -212,7 +262,7 @@ describe('runDoctor on a healthy installation', () => {
     const fixture = buildFixture();
     // Break one of each severity so both branches are exercised.
     fs.writeFileSync(deriveEngagementPath(fixture.projectDir), 'enabled=false\n');
-    fs.rmSync(path.join(fixture.projectDir, '.cortex.db'));
+    fs.rmSync(fixture.dbPath);
     const report = doctor(fixture);
 
     const nonPassing = report.checks.filter(check => check.status !== 'pass');
@@ -239,7 +289,7 @@ describe('runDoctor is non-mutating', () => {
 
   it('does not migrate an out-of-date store — the version it reports survives the run', () => {
     const fixture = buildFixture();
-    const dbPath = path.join(fixture.projectDir, '.cortex.db');
+    const dbPath = fixture.dbPath;
 
     const seed = new Database(dbPath);
     seed.prepare('UPDATE meta SET value = ? WHERE key = ?').run('4', 'schema_version');
@@ -750,7 +800,7 @@ describe('MCP server registration', () => {
 describe('database reachability', () => {
   it('fails when the store does not exist, without creating one', () => {
     const fixture = buildFixture();
-    const dbPath = path.join(fixture.projectDir, '.cortex.db');
+    const dbPath = fixture.dbPath;
     fs.rmSync(dbPath);
     const report = doctor(fixture);
     expect(statusOf(report, 'database')).toBe('fail');
@@ -771,7 +821,7 @@ describe('database reachability', () => {
 
   it('fails a file that is not a database, and does not blame permissions', () => {
     const fixture = buildFixture();
-    fs.writeFileSync(path.join(fixture.projectDir, '.cortex.db'), 'not a database at all');
+    fs.writeFileSync(fixture.dbPath, 'not a database at all');
     const report = doctor(fixture);
     expect(statusOf(report, 'database')).toBe('fail');
 
@@ -785,7 +835,7 @@ describe('database reachability', () => {
 
   it('names upgrading, not migrating, for a store written by a newer build', () => {
     const fixture = buildFixture();
-    const dbPath = path.join(fixture.projectDir, '.cortex.db');
+    const dbPath = fixture.dbPath;
     const seed = new Database(dbPath);
     seed.prepare('UPDATE meta SET value = ? WHERE key = ?').run(String(SCHEMA_VERSION + 4), 'schema_version');
     seed.close();
@@ -811,23 +861,30 @@ describe('what a doctor run actually writes', () => {
     // content writes, not sidecar creation. Pinned so the documented claim and
     // the behaviour cannot drift apart again.
     const fixture = buildFixture();
-    const dbPath = path.join(fixture.projectDir, '.cortex.db');
+    const dbPath = fixture.dbPath;
     for (const sidecar of ['-shm', '-wal']) {
       fs.rmSync(`${dbPath}${sidecar}`, { force: true });
     }
 
-    const before = fs.readdirSync(fixture.projectDir).sort();
-    expect(before).toEqual(['.cortex.db', '.cortex.state']);
+    const storeBefore = fs.readdirSync(fixture.storeDir).sort();
+    expect(storeBefore).toEqual(['cortex.db']);
+    const projectBefore = fs.readdirSync(fixture.projectDir).sort();
+    expect(projectBefore).toEqual(['.cortex.state', '.git']);
 
     doctor(fixture);
 
-    const after = fs.readdirSync(fixture.projectDir).sort();
-    expect(after).toEqual(['.cortex.db', '.cortex.db-shm', '.cortex.db-wal', '.cortex.state']);
+    const storeAfter = fs.readdirSync(fixture.storeDir).sort();
+    expect(storeAfter).toEqual(['cortex.db', 'cortex.db-shm', 'cortex.db-wal']);
+    // And the relocation's own claim: a diagnostic run leaves the project root
+    // exactly as it found it. Story 2.5 moved the store out; nothing may put a
+    // database back into the working tree, least of all the read-only command.
+    const projectAfter = fs.readdirSync(fixture.projectDir).sort();
+    expect(projectAfter).toEqual(['.cortex.state', '.git']);
   });
 
   it('does not alter the store contents it reads', () => {
     const fixture = buildFixture();
-    const dbPath = path.join(fixture.projectDir, '.cortex.db');
+    const dbPath = fixture.dbPath;
     // Closed explicitly: an open handle blocks the temp-dir cleanup on Windows.
     const readMeta = (): unknown[] => {
       const db = new Database(dbPath, { readonly: true });

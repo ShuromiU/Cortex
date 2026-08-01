@@ -9,6 +9,7 @@ import { tokenizeCommand } from '../src/query/doctor.js';
 import type { InstallAction, InstallResult } from '../src/query/install.js';
 import { deriveEngagementPath } from '../src/transports/mcp.js';
 import { openDatabase, ensureCortexSchema } from '../src/db/schema.js';
+import { resolveStoreIdentity } from '../src/scope/identity.js';
 import { CortexStore } from '../src/db/store.js';
 import { handleCmdEvent } from '../src/capture/hooks.js';
 import {
@@ -262,6 +263,14 @@ interface CommandRun {
   exitCode: number | undefined;
 }
 
+/**
+ * Seed at the *legacy* project-root path on purpose.
+ *
+ * After story 2.5 the CLI reads `$CORTEX_HOME/projects/<id>/cortex.db`, so
+ * every command run against a project seeded this way also exercises the
+ * migration: if copy-and-verify ever stops preserving data, these tests fail
+ * with a missing row rather than passing against a store nobody moved.
+ */
 function seedTempProject(seed: (store: CortexStore) => void): string {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-cli-memory-'));
   const db = openDatabase(path.join(tempDir, '.cortex.db'));
@@ -269,6 +278,23 @@ function seedTempProject(seed: (store: CortexStore) => void): string {
   seed(new CortexStore(db));
   db.close();
   return tempDir;
+}
+
+/**
+ * Reopen the store a CLI command actually wrote.
+ *
+ * Reading `<cwd>/.cortex.db` back would open the *original*, which migration
+ * deliberately leaves in place and never updates again — so assertions against
+ * it would silently check a frozen copy and pass for the wrong reason.
+ */
+function openProjectDb(cwd: string): ReturnType<typeof openDatabase> {
+  const { dbPath } = resolveStoreIdentity(cwd);
+  // A command that refuses before opening the store never migrates it, so the
+  // seeded data is still at the legacy path — and "unchanged" is precisely what
+  // those tests assert. Opening the computed path regardless would create an
+  // empty store and let a refusal test pass against no data at all.
+  const target = fs.existsSync(dbPath) ? dbPath : path.join(cwd, '.cortex.db');
+  return openDatabase(target);
 }
 
 async function runCommand(cwd: string, argv: string[]): Promise<CommandRun> {
@@ -517,7 +543,7 @@ describe('cortex list-memory', () => {
 
     await runCommand(cwd, ['list-memory']);
 
-    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const db = openProjectDb(cwd);
     const store = new CortexStore(db);
     expect(store.getSessionCount()).toBe(0);
     db.close();
@@ -711,7 +737,7 @@ describe('cortex inspect-memory', () => {
 
     await runCommand(cwd, ['inspect-memory', 'quiet']);
 
-    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const db = openProjectDb(cwd);
     expect(new CortexStore(db).getSessionCount()).toBe(0);
     db.close();
   });
@@ -731,7 +757,7 @@ describe('cortex inspect-memory', () => {
 
     await runCommand(cwd, ['inspect-memory', 'cool']);
 
-    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const db = openProjectDb(cwd);
     const item = new CortexStore(db).getMemoryItem('cool')!;
     expect(item.state).toBe('cold');
     expect(item.access_count).toBe(2);
@@ -771,7 +797,7 @@ describe('cortex edit-memory', () => {
     expect(parsed.item.text).toBe('the bug is in src/new.ts');
     expect(parsed.references.map(r => r.normalized_path)).toEqual(['src/new.ts']);
 
-    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const db = openProjectDb(cwd);
     const store = new CortexStore(db);
     expect(store.getMemoryCorrections('item')[0]).toMatchObject({
       operation: 'edit',
@@ -852,7 +878,7 @@ describe('cortex edit-memory', () => {
     expect(run.exitCode).toBe(1);
     expect(run.stderr).toContain('metadata line');
 
-    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const db = openProjectDb(cwd);
     const store = new CortexStore(db);
     expect(store.getNote(noteId)!.content).toBe('the flush is batched');
     expect(inspectMemory(store, noteId)!.conflict.diverged).toBe(false);
@@ -887,7 +913,7 @@ describe('cortex edit-memory', () => {
 
     expect(run.exitCode).toBe(1);
     expect(run.stderr).toContain('delete-memory');
-    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const db = openProjectDb(cwd);
     expect(new CortexStore(db).getMemoryItem('item')!.text).not.toBe('   ');
     db.close();
   });
@@ -921,7 +947,7 @@ describe('cortex edit-memory', () => {
 
     await runCommand(cwd, ['edit-memory', 'item', '--file', file]);
 
-    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const db = openProjectDb(cwd);
     expect(new CortexStore(db).getMemoryItem('item')!.text).toBe('corrected text');
     db.close();
   });
@@ -965,7 +991,7 @@ describe('cortex delete-memory', () => {
     expect(preview.stdout).toContain('--yes');
 
     // The preview must not have deleted anything — the confirmation is the point.
-    const midDb = openDatabase(path.join(cwd, '.cortex.db'));
+    const midDb = openProjectDb(cwd);
     expect(new CortexStore(midDb).getMemoryItem('doomed')).toBeTruthy();
     midDb.close();
 
@@ -973,7 +999,7 @@ describe('cortex delete-memory', () => {
     expect(deleted.exitCode).toBeFalsy();
     expect(deleted.stdout).toContain('deleted doomed');
 
-    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const db = openProjectDb(cwd);
     expect(new CortexStore(db).getMemoryItem('doomed')).toBeUndefined();
     db.close();
   });
@@ -1027,7 +1053,7 @@ describe('cortex delete-memory', () => {
 
     await runCommand(cwd, ['delete-memory', firstId, '--yes']);
 
-    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const db = openProjectDb(cwd);
     expect(new CortexStore(db).getNote(secondId)!.conflict).toBe(false);
     db.close();
   });
@@ -1125,7 +1151,7 @@ describe('cortex note-resolve', () => {
     const run = await runCommand(cwd, ['note-resolve', '--id', firstId]);
     expect(run.exitCode).toBeFalsy();
 
-    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const db = openProjectDb(cwd);
     const store = new CortexStore(db);
     // Before this repair the CLI called only updateNoteStatus, so the resolved
     // note kept Conflict: true and rendered "[contested] (resolved)" forever
@@ -1162,7 +1188,7 @@ describe('cortex note-resolve', () => {
     expect(run.stderr).toContain(secondId);
 
     // Nothing was resolved — the point is that it refused to guess.
-    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const db = openProjectDb(cwd);
     const store = new CortexStore(db);
     expect(store.getNote(firstId)!.status).toBe('active');
     expect(store.getNote(secondId)!.status).toBe('active');
@@ -1195,7 +1221,7 @@ describe('cortex note-resolve', () => {
       }).id;
     });
 
-    const before = openDatabase(path.join(cwd, '.cortex.db'));
+    const before = openProjectDb(cwd);
     const beforeStore = new CortexStore(before);
     expect(beforeStore.getNote(decisionA)!.conflict).toBe(true);
     expect(beforeStore.getNote(blockerId)!.conflict).toBe(false);
@@ -1206,7 +1232,7 @@ describe('cortex note-resolve', () => {
 
     // Resolving a note that is not part of the contest must leave the contest
     // standing — clearing is per-subject, so gating on `subject` alone wipes it.
-    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const db = openProjectDb(cwd);
     const store = new CortexStore(db);
     expect(store.getNote(decisionA)!.conflict).toBe(true);
     expect(store.getNote(decisionB)!.conflict).toBe(true);
@@ -1248,7 +1274,7 @@ describe('cortex note-resolve', () => {
     // millisecond. That latent ambiguity is pre-existing and out of this
     // story's scope — it is logged in deferred-work rather than pinned here,
     // because pinning it would freeze whichever order SQLite happens to pick.
-    const db = openDatabase(path.join(cwd, '.cortex.db'));
+    const db = openProjectDb(cwd);
     const store = new CortexStore(db);
     const statuses = ids.map(id => store.getNote(id)!.status).sort();
     expect(statuses).toEqual(['active', 'resolved']);
@@ -1847,8 +1873,23 @@ describe('cortex doctor', () => {
       'pass: installed scripts match the templates shipped by this build',
     );
 
-    const failing = parsed.checks.filter(check => check.status !== 'pass');
+    // Nothing may FAIL. Kept as an exact list rather than a count so a new
+    // failure names itself instead of shifting a number.
+    const failing = parsed.checks.filter(check => check.status === 'fail');
     expect(failing.map(check => `${check.id}: ${check.detail}`)).toEqual([]);
+
+    // The only warnings permitted are the two story 2.5 introduces for a
+    // project that is not a git repository and has not migrated yet. Asserting
+    // the ids exactly means a *third* warning cannot slip in unnoticed — which
+    // is the property the original `!== 'pass'` check was really protecting.
+    const warned = parsed.checks.filter(check => check.status === 'warn');
+    expect(warned.map(check => check.id).sort()).toEqual(['store', 'store-legacy']);
+
+    // And the pre-relocation store is diagnosed rather than declared missing.
+    const database = parsed.checks.find(check => check.id === 'database');
+    expect(database?.status).toBe('pass');
+    expect(database?.detail).toContain('pre-relocation path');
+
     expect(parsed.ok).toBe(true);
     expect(run.exitCode).toBeUndefined();
   });

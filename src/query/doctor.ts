@@ -6,6 +6,9 @@ import { fileURLToPath } from 'node:url';
 
 import { deriveSpoolPath } from '../capture/spool.js';
 import { SCHEMA_VERSION, getSchemaVersion, openDatabaseReadOnly } from '../db/schema.js';
+import { resolveStoreIdentity } from '../scope/identity.js';
+import type { GitCommandRunner } from '../scope/git.js';
+import { findAdoptionCandidates } from '../scope/store-migration.js';
 
 /**
  * Installation diagnostics (FR-23).
@@ -33,13 +36,21 @@ import { SCHEMA_VERSION, getSchemaVersion, openDatabaseReadOnly } from '../db/sc
  *    creation — and the alternative (opening `immutable=1`) would read past the
  *    WAL and could report a stale `schema_version`, which is a wrong answer
  *    rather than a tidier one.
- *  - **No process is spawned.** `jq` and the hook interpreter are located on
- *    `PATH` rather than executed. That keeps the 3-second budget (B-7)
+ *  - **Nothing under diagnosis is executed.** `jq` and the hook interpreter are
+ *    located on `PATH`, never run. That keeps the 3-second budget (B-7)
  *    structural rather than tuned on a platform where `bash -c 'exit 0'` alone
  *    measures ~36 ms, makes the negative cases testable by pointing `PATH` at a
  *    fixture directory, and avoids executing arbitrary binaries found on a
  *    user's `PATH` while diagnosing. The honest limit: a present-but-broken
  *    `jq` resolves and is reported as available.
+ *
+ *    **One subprocess is spawned, and it is not one of the things being
+ *    checked:** `git rev-parse`, to locate the store. Store identity is defined
+ *    by AD-10 as a hash of `--git-common-dir`, so there is no way to report
+ *    where the store lives without asking git — the alternative is not a purer
+ *    diagnostic, it is a missing check. Injectable via `DoctorOptions.runGit`,
+ *    and measured at ~64 ms. This bullet used to read "no process is spawned"
+ *    and was narrowed when it stopped being true, rather than left standing.
  */
 
 // ── Report shape ──────────────────────────────────────────────────────
@@ -75,6 +86,18 @@ export interface DoctorOptions {
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   now?: Date;
+  /**
+   * Injected so store-location checks need no real repository.
+   *
+   * This is the one place `doctor` runs a subprocess, and the docstring's
+   * "no process is spawned" rule is narrowed rather than quietly broken: `jq`
+   * and the hook interpreter are still only *located*, never executed. Store
+   * identity has no non-git definition — AD-10 is a hash of what
+   * `git rev-parse --git-common-dir` answers — so the choice is one `git`
+   * invocation or no store-location check at all. Measured at ~64 ms against
+   * B-7's 3-second budget.
+   */
+  runGit?: GitCommandRunner;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -974,8 +997,99 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
     );
   }
 
+  // ── Store location ──────────────────────────────────────────────────
+  //
+  // Resolution only. Deliberately NOT `resolveProjectStore`, which migrates:
+  // a diagnostic that relocates the store it is about to report on has changed
+  // the answer before printing it. Migration belongs to the transports.
+  const identity = resolveStoreIdentity(projectDir, {
+    env: options.env,
+    runGit: options.runGit,
+  });
+
+  add(
+    identity.degraded
+      ? {
+          id: 'store',
+          label: 'Store location',
+          // A directory that is not a repository is a supported state, so this
+          // warns rather than fails — `warn` never fails the run, and a project
+          // outside git must not break CI.
+          status: 'warn',
+          detail: `${identity.dbPath} (degraded: ${identity.degradedReason ?? 'no git'})`,
+          fix: 'Run Cortex from inside a git repository so worktrees of one repo share one store.',
+        }
+      : {
+          id: 'store',
+          label: 'Store location',
+          status: 'pass',
+          detail: `${identity.dbPath} (id ${identity.storeId} from ${identity.gitCommonDir ?? 'unknown'})`,
+        },
+  );
+
+  // ── Legacy store and adoption ───────────────────────────────────────
+  //
+  // R-4's mitigation in full: "doctor reports both locations until the user
+  // confirms". Only added when there is something to say.
+  const legacyPresent = identity.legacyDbPaths.filter(candidate => {
+    try {
+      return fs.existsSync(candidate);
+    } catch {
+      return false;
+    }
+  });
+  const storeExists = (() => {
+    try {
+      return fs.existsSync(identity.dbPath);
+    } catch {
+      return false;
+    }
+  })();
+
+  if (legacyPresent.length > 0) {
+    add(
+      storeExists
+        ? {
+            id: 'store-legacy',
+            label: 'Legacy store',
+            status: 'warn',
+            detail: `migrated; the original is still at ${legacyPresent.join(', ')}`,
+            fix: `Cortex keeps the original until you confirm. Once \`${identity.dbPath}\` looks right, delete ${legacyPresent.join(', ')} yourself.`,
+          }
+        : {
+            id: 'store-legacy',
+            label: 'Legacy store',
+            status: 'warn',
+            detail: `${legacyPresent.join(', ')} has not been migrated yet`,
+            fix: 'Run any `cortex` command (for example `cortex status`) to migrate it by copy; the original is left in place.',
+          },
+    );
+  }
+
+  if (!storeExists) {
+    const candidates = findAdoptionCandidates(identity);
+    if (candidates.length > 0) {
+      const best = candidates[0] as (typeof candidates)[number];
+      add({
+        id: 'store-adoption',
+        label: 'Adoptable store',
+        status: 'warn',
+        detail: `${best.dbPath} matches this repository's root commit and its recorded path (${best.recordedPath ?? 'unrecorded'}) no longer exists`,
+        fix: 'This repository was moved or renamed. Run `cortex adopt` to attach that store rather than starting empty.',
+      });
+    }
+  }
+
   // ── Database ────────────────────────────────────────────────────────
-  const dbPath = path.join(projectDir, '.cortex.db');
+  //
+  // Diagnose the store that exists, not the one this build would prefer. On an
+  // upgrade the memory is still at the project-root path and migrates on the
+  // next command, so reporting "database does not exist" would be a red failure
+  // over a store sitting right there, fully readable — the diagnostic telling a
+  // user their memory is gone at the exact moment it is not.
+  const pendingLegacyPath = !storeExists ? legacyPresent[0] : undefined;
+  const dbPath = pendingLegacyPath ?? identity.dbPath;
+  const diagnosingLegacy = pendingLegacyPath !== undefined;
   if (!fs.existsSync(dbPath)) {
     add({
       id: 'database',
@@ -1032,7 +1146,9 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
         id: 'database',
         label: 'Database',
         status: 'pass',
-        detail: `reachable, schema_version ${version}`,
+        detail: diagnosingLegacy
+          ? `reachable at the pre-relocation path ${dbPath}, schema_version ${version}`
+          : `reachable, schema_version ${version}`,
       });
     }
   }

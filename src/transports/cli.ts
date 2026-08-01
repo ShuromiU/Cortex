@@ -42,6 +42,13 @@ import {
 } from './mcp.js';
 import { ensureScopedSession, syncBranchSnapshotForSession } from '../scope/runtime.js';
 import { refreshCurrentAppGraph } from '../scope/app-graph.js';
+import {
+  adoptStore,
+  findAdoptionCandidates,
+  openProjectStore,
+  resolveProjectStore,
+} from '../scope/store-migration.js';
+import { resolveStoreIdentity } from '../scope/identity.js';
 import { suggestNotes } from '../query/suggest-notes.js';
 import {
   runDoctor,
@@ -72,15 +79,12 @@ import {
 } from '../query/correct.js';
 
 function findDbPath(startDir: string): string {
-  return path.join(startDir, '.cortex.db');
+  return resolveProjectStore(startDir).dbPath;
 }
 
 function openCortexDb(startDir: string): { store: CortexStore; dbPath: string } {
-  const dbPath = findDbPath(startDir);
-  const db = openDatabase(dbPath);
-  ensureCortexSchema(db, startDir);
-  const store = new CortexStore(db);
-  return { store, dbPath };
+  const { db, dbPath } = openProjectStore(startDir);
+  return { store: new CortexStore(db), dbPath };
 }
 
 function ensureSession(store: CortexStore, cwd: string): string {
@@ -912,15 +916,20 @@ export function createProgram(): Command {
   program
     .command('evaluate')
     .description('Evaluate current memory state and recall output sizes for a Cortex DB')
-    .option('--db <path>', 'Path to the Cortex SQLite database', '.cortex.db')
+    // No literal default: the store is no longer at a fixed path relative to
+    // cwd, and commander evaluates defaults eagerly. Resolved in the action.
+    .option('--db <path>', "Path to the Cortex SQLite database (default: this project's store)")
     .option('--root <path>', 'Project root path for schema initialization', process.cwd())
     .option('--topics <items>', 'Comma-separated topics to replay')
     .option('--suite <path>', 'Path to a JSON quality suite with retrieval fixtures')
     .option('--compare <path>', 'Path to a previous cortex evaluate JSON result')
-    .action((opts: { db: string; root: string; topics?: string; suite?: string; compare?: string }) => {
-      const dbPath = path.isAbsolute(opts.db)
-        ? opts.db
-        : path.resolve(process.cwd(), opts.db);
+    .action((opts: { db?: string; root: string; topics?: string; suite?: string; compare?: string }) => {
+      const dbPath =
+        opts.db === undefined
+          ? findDbPath(process.cwd())
+          : path.isAbsolute(opts.db)
+            ? opts.db
+            : path.resolve(process.cwd(), opts.db);
       const rootPath = path.isAbsolute(opts.root)
         ? opts.root
         : path.resolve(process.cwd(), opts.root);
@@ -1213,6 +1222,116 @@ export function createProgram(): Command {
       if (!report.ok) {
         process.exitCode = 1;
       }
+    });
+
+  program
+    .command('store')
+    .description('Report where this project\'s memory store lives and how its identity was derived')
+    .option('--json', 'Emit the raw resolution instead of the summary')
+    .action((opts: { json?: boolean }) => {
+      // Resolution only, like `doctor`: this reports where the store is, and a
+      // command that migrated on the way to answering would be reporting on a
+      // state it had just created.
+      const identity = resolveStoreIdentity(process.cwd());
+      const candidates = findAdoptionCandidates(identity);
+
+      if (opts.json) {
+        process.stdout.write(
+          `${JSON.stringify(
+            {
+              storeId: identity.storeId,
+              dbPath: identity.dbPath,
+              storeDir: identity.storeDir,
+              home: identity.home,
+              projectRoot: identity.projectRoot,
+              gitCommonDir: identity.gitCommonDir,
+              rootCommitOid: identity.readRootCommitOid(),
+              degraded: identity.degraded,
+              degradedReason: identity.degradedReason,
+              exists: fs.existsSync(identity.dbPath),
+              legacyDbPaths: identity.legacyDbPaths.filter((candidate: string) =>
+                fs.existsSync(candidate),
+              ),
+              adoptionCandidates: candidates,
+            },
+            null,
+            2,
+          )}\n`,
+        );
+        return;
+      }
+
+      const lines: string[] = [];
+      lines.push(`Store:    ${identity.dbPath}`);
+      lines.push(`Id:       ${identity.storeId}`);
+      lines.push(
+        `Derived:  ${
+          identity.degraded
+            ? `working directory (degraded — ${identity.degradedReason ?? 'no git'})`
+            : `git common dir ${identity.gitCommonDir ?? '?'}`
+        }`,
+      );
+      lines.push(`Exists:   ${fs.existsSync(identity.dbPath) ? 'yes' : 'no'}`);
+
+      const legacy = identity.legacyDbPaths.filter((candidate: string) =>
+        fs.existsSync(candidate),
+      );
+      if (legacy.length > 0) {
+        lines.push(`Original: ${legacy.join(', ')} (kept until you remove it)`);
+      }
+      for (const candidate of candidates) {
+        lines.push(
+          `Adoptable: ${candidate.dbPath} — recorded path ${candidate.recordedPath ?? 'unrecorded'} no longer exists. Run \`cortex adopt\`.`,
+        );
+      }
+      process.stdout.write(`${lines.join('\n')}\n`);
+    });
+
+  program
+    .command('adopt')
+    .description('Attach a store orphaned by a repository move or rename (FR-24)')
+    .option('--yes', 'Perform the adoption instead of previewing it')
+    .action((opts: { yes?: boolean }) => {
+      const identity = resolveStoreIdentity(process.cwd());
+      const candidates = findAdoptionCandidates(identity);
+
+      if (candidates.length === 0) {
+        process.stdout.write(
+          fs.existsSync(identity.dbPath)
+            ? `This project already has a store at ${identity.dbPath}; nothing to adopt.\n`
+            : 'No orphaned store matches this repository. Nothing to adopt.\n',
+        );
+        return;
+      }
+
+      const candidate = candidates[0] as (typeof candidates)[number];
+      if (!opts.yes) {
+        // Preview-by-default, act on --yes: the convention `gc` and
+        // `delete-memory` already follow for anything that moves user data.
+        process.stdout.write(
+          [
+            'Would adopt:',
+            `  from   ${candidate.dbPath}`,
+            `  to     ${identity.dbPath}`,
+            `  anchor root commit ${candidate.rootCommitOid ?? '?'}`,
+            `  its recorded path ${candidate.recordedPath ?? 'unrecorded'} no longer exists`,
+            `  ${candidate.sizeBytes} bytes`,
+            '',
+            'Re-run with --yes to move it.',
+          ].join('\n') + '\n',
+        );
+        return;
+      }
+
+      const outcome = adoptStore(identity, candidate);
+      if (outcome.action === 'adopted') {
+        process.stdout.write(`Adopted ${candidate.dbPath} -> ${outcome.targetPath}\n`);
+        return;
+      }
+      process.stderr.write(
+        `Could not adopt ${candidate.dbPath}: ${outcome.reason ?? outcome.action}\n`,
+      );
+      process.exitCode = 1;
     });
 
   program
