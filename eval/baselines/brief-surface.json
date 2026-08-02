@@ -1,0 +1,210 @@
+{
+  "quality": {
+    "fixtures": [
+      {
+        "topic": "cache eviction policy",
+        "expected_top": "evict-current",
+        "top_result_id": "evict-current",
+        "top1_hit": true,
+        "recall_at_3": 1,
+        "noise_count": 0,
+        "stale_count": 0,
+        "output": {
+          "chars": 466,
+          "est_tokens": 117,
+          "preview": "Most relevant — Decision [cache eviction policy] (1d ago, refs OK)\nDecision [2026-08-01 20:42Z]: [cache eviction policy] evict the cache by least-recently-used in src/cache/evict.ts.\nDecision [2026-07-30 20:42Z]: [cache eviction policy] evict the cache by time-to-live alone in src/cache/policy.ts. (superseded)\nBlocker "
+        },
+        "token_budget": {
+          "max_tokens": null,
+          "actual_tokens": 117,
+          "passed": true
+        },
+        "output_assertions": {
+          "contains_missed": [],
+          "excludes_violated": [],
+          "passed": true
+        },
+        "score_breakdown": [
+          {
+            "id": "evict-current",
+            "subject": "cache eviction policy",
+            "text_preview": "Decision: evict the cache by least-recently-used in src/cache/evict.ts.\nSubject: cache eviction policy",
+            "scores": {
+              "retrieval_score": 53.29999477227366,
+              "lexical_score": 26.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 3,
+              "exact_phrase": true,
+              "fts_rank": -0.000006018660482625283
+            }
+          },
+          {
+            "id": "evict-superseded",
+            "subject": "cache eviction policy",
+            "text_preview": "Decision: evict the cache by time-to-live alone in src/cache/policy.ts.\nSubject: cache eviction policy\nStatus: superseded",
+            "scores": {
+              "retrieval_score": 51.69999481603695,
+              "lexical_score": 26.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 1.2,
+              "access_bonus": 0,
+              "token_hits": 3,
+              "exact_phrase": true,
+              "fts_rank": -0.000005968275837579675
+            }
+          },
+          {
+            "id": "evict-blocker",
+            "subject": "cache eviction sizing",
+            "text_preview": "Blocker: cache eviction sizing needs a measured working-set number before src/cache/evict.ts can bound itself.\nSubject: cache eviction sizing",
+            "scores": {
+              "retrieval_score": 38.19999653639381,
+              "lexical_score": 14,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2.6,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 2,
+              "exact_phrase": false,
+              "fts_rank": -0.00000398763194370402
+            }
+          }
+        ],
+        "passed": true
+      }
+    ],
+    "top1_hit": 1,
+    "recall_at_3": 1,
+    "noise_count": 0,
+    "stale_count": 0,
+    "output_tokens": 117
+  },
+  "quality_comparison": {
+    "top1_hit_delta": 0,
+    "recall_at_3_delta": 0,
+    "noise_count_delta": 0,
+    "stale_count_delta": 0,
+    "output_tokens_delta": 0
+  },
+  "surfaces": [
+    {
+      "surface": "brief",
+      "output": {
+        "chars": 305,
+        "est_tokens": 77,
+        "preview": "Cortex memory (project):\n- [1d ago] decision: [cache eviction policy] evict the cache by least-recently-used in src/cache/evict.ts.\n- [2d ago] blocker: [cache eviction sizing] cache eviction sizing needs a measured working-set number before src/cache/evict.ts can bound itself.\nMore: cortex_recall(topic)."
+      },
+      "contains_missed": [],
+      "excludes_violated": [],
+      "token_budget": {
+        "max_tokens": 150,
+        "actual_tokens": 77,
+        "passed": true
+      },
+      "passed": true
+    },
+    {
+      "surface": "brief",
+      "output": {
+        "chars": 159,
+        "est_tokens": 40,
+        "preview": "Cortex memory (project):\n- [1d ago] decision: [cache eviction policy] evict the cache by least-recently-used in src/cache/evict.ts.\nMore: cortex_recall(topic)."
+      },
+      "contains_missed": [],
+      "excludes_violated": [],
+      "token_budget": {
+        "max_tokens": 44,
+        "actual_tokens": 40,
+        "passed": true
+      },
+      "passed": true
+    },
+    {
+      "surface": "header",
+      "output": {
+        "chars": 852,
+        "est_tokens": 213,
+        "preview": "Cortex: cache eviction policy | 1 session on project\nHot: Decision [2026-08-01 20:42Z]: [cache eviction policy] evict the cache by least-recently-used in src/cache/evi… | Blocker [2026-07-31 20:42Z]: [cache eviction sizing] cache eviction sizing needs a measured working-set numbe…\nCortex is ambient: prior context may s"
+      },
+      "contains_missed": [],
+      "excludes_violated": [],
+      "token_budget": {
+        "max_tokens": 260,
+        "actual_tokens": 213,
+        "passed": true
+      },
+      "passed": true
+    },
+    {
+      "surface": "full_state",
+      "output": {
+        "chars": 427,
+        "est_tokens": 107,
+        "preview": "Decisions:\n- Decision [2026-08-01 20:42Z]: [cache eviction policy] evict the cache by least-recently-used in src/cache/evict.ts.\n- Decision [2026-07-30 20:42Z]: [cache eviction policy] evict the cache by time-to-live alone in src/cache/policy.ts. (superseded)\n\nBlockers:\n- Blocker [2026-07-31 20:42Z]: [cache eviction si"
+      },
+      "contains_missed": [],
+      "excludes_violated": [],
+      "token_budget": {
+        "max_tokens": 150,
+        "actual_tokens": 107,
+        "passed": true
+      },
+      "passed": true
+    }
+  ],
+  "generated_at": "2026-08-02T20:42:44.854Z",
+  "schema_version": 5,
+  "tables": {
+    "sessions": 1,
+    "events": 0,
+    "notes": 0,
+    "state": 0,
+    "token_ledger": 0,
+    "command_runs": 0,
+    "episodes": 0,
+    "branch_snapshots": 0,
+    "project_snapshots": 0,
+    "memory_items": 3,
+    "memory_item_semantics": 0,
+    "current_app_graphs": 1,
+    "memory_references": 3,
+    "retrieval_log": 1,
+    "file_renames": 0,
+    "content_digests": 0
+  },
+  "header": {
+    "chars": 852,
+    "est_tokens": 213,
+    "preview": "Cortex: cache eviction policy | 1 session on project\nHot: Decision [2026-08-01 20:42Z]: [cache eviction policy] evict the cache by least-recently-used in src/cache/evi… | Blocker [2026-07-31 20:42Z]: [cache eviction sizing] cache eviction sizing needs a measured working-set numbe…\nCortex is ambient: prior context may s"
+  },
+  "full_state": {
+    "chars": 427,
+    "est_tokens": 107,
+    "preview": "Decisions:\n- Decision [2026-08-01 20:42Z]: [cache eviction policy] evict the cache by least-recently-used in src/cache/evict.ts.\n- Decision [2026-07-30 20:42Z]: [cache eviction policy] evict the cache by time-to-live alone in src/cache/policy.ts. (superseded)\n\nBlockers:\n- Blocker [2026-07-31 20:42Z]: [cache eviction si"
+  },
+  "session_brief": {
+    "chars": 305,
+    "est_tokens": 77,
+    "preview": "Cortex memory (project):\n- [1d ago] decision: [cache eviction policy] evict the cache by least-recently-used in src/cache/evict.ts.\n- [2d ago] blocker: [cache eviction sizing] cache eviction sizing needs a measured working-set number before src/cache/evict.ts can bound itself.\nMore: cortex_recall(topic)."
+  },
+  "topics": [
+    {
+      "topic": "cache eviction policy",
+      "output": {
+        "chars": 466,
+        "est_tokens": 117,
+        "preview": "Most relevant — Decision [cache eviction policy] (1d ago, refs OK)\nDecision [2026-08-01 20:42Z]: [cache eviction policy] evict the cache by least-recently-used in src/cache/evict.ts.\nDecision [2026-07-30 20:42Z]: [cache eviction policy] evict the cache by time-to-live alone in src/cache/policy.ts. (superseded)\nBlocker "
+      }
+    }
+  ]
+}

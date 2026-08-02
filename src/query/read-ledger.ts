@@ -84,6 +84,17 @@ export interface ReadLedgerQuery {
    * supply a cached answer from a previous flush.
    */
   digestCache?: DigestCache;
+  /**
+   * Answer "is this file unchanged" without answering "who read it".
+   *
+   * `knownUnchangedFiles` renders a scope-wide line that names no reader, so
+   * the attribution lookup is pure waste — a `getSession` per candidate whose
+   * result is discarded, on the B-1 path. It also removes the need for a
+   * sentinel session id to be the thing that makes a read non-eligible: with
+   * this set, eligibility is not consulted at all rather than happening to
+   * evaluate false because no row carries an empty `session_id`.
+   */
+  skipAttribution?: boolean;
 }
 
 /**
@@ -176,6 +187,204 @@ function recorderOf(store: CortexStore, digest: ParsedContentDigest): ReadLedger
   };
 }
 
+/**
+ * Files this scope has read that are **still unchanged**, most-read first
+ * (FR-7, Story 3.4).
+ *
+ * **Scope-wide, not session-scoped, and that is forced.** `inject-header` ends
+ * the session tree and creates a fresh primary on every SessionStart, so a
+ * filter for "reads by the asking session" would leave this permanently empty
+ * on the one surface that runs at session start. The caller must therefore
+ * describe the files rather than the reader — Story 3.3 measured 163 primary
+ * sessions against 9 subagents on this repo's live store and had to stop saying
+ * `read by primary` for the same reason. This function returns paths; it never
+ * asserts who read them.
+ *
+ * **The cost is bounded before it is paid, not discovered while paying it.**
+ * "Unchanged" requires re-hashing (AC #2 of Story 3.3), this runs under B-1
+ * (session brief ≤150 ms p95), and a repository holds files of wildly different
+ * sizes. So candidates are taken in `read_count` order, and `byte_size` — which
+ * Story 3.1 already records — is accumulated against a ceiling *before* any
+ * file is opened. A single 2 MiB candidate cannot consume the whole budget and
+ * leave four cheap files unverified behind it.
+ */
+export interface KnownUnchangedOptions {
+  /** Stop once this many unchanged files are found (AC #1 says up to five). */
+  limit?: number;
+  /** How many rows to consider at all. Bounds the SQL, not the hashing. */
+  candidateLimit?: number;
+  /** Total recorded bytes this call may hash before it stops looking. */
+  byteBudget?: number;
+}
+
+export const KNOWN_UNCHANGED_LIMIT = 5;
+export const KNOWN_UNCHANGED_CANDIDATES = 24;
+/** 1 MiB of hashing, well inside B-1 on the platforms measured. */
+export const KNOWN_UNCHANGED_BYTE_BUDGET = 1024 * 1024;
+
+export function knownUnchangedFiles(
+  store: CortexStore,
+  scopeKeys: string[],
+  options: KnownUnchangedOptions = {},
+  /**
+   * Seams, never used in production. The shared digest memo and the pre-hash
+   * `statSync` have no observable difference from their absent counterparts —
+   * building one cache per file and building one per walk return identical
+   * answers — so without a seam a mutation removing either survives every
+   * behavioural assertion. Story 3.3 added exactly this seam to
+   * `queryReadLedger` after that mutation survived once; it was not extended
+   * here, and the same mutation survived again.
+   */
+  deps: ReadLedgerDeps & { statSync: typeof fs.statSync } = {
+    createDigestCache,
+    statSync: fs.statSync,
+  },
+): string[] {
+  const limit = clampCount(options.limit, KNOWN_UNCHANGED_LIMIT);
+  const candidateLimit = clampCount(options.candidateLimit, KNOWN_UNCHANGED_CANDIDATES);
+  const byteBudget = clampCount(options.byteBudget, KNOWN_UNCHANGED_BYTE_BUDGET);
+  if (scopeKeys.length === 0 || limit < 1) {
+    return [];
+  }
+
+  // Resolve every scope's root FIRST, and drop the ones that have none.
+  //
+  // `resolveOnDiskPath` falls back to `path.resolve(input)` when the root is
+  // null, which anchors a stored RELATIVE key to `process.cwd()` — the exact
+  // substitution Story 3.2 measured silently relocating every key it touched.
+  // This is the first caller to feed stored relative keys back in, so the
+  // fallback becomes reachable here for the first time: an orphan-scope row
+  // plus a cwd that happens to contain a matching relative path yields
+  // `unchanged-since` derived from a completely different file. Measured on
+  // this repo's live store, `resolveScopeRoot` for the project scope key is
+  // already null, and it is one of the two keys the brief always passes.
+  const roots = new Map<string, string>();
+  for (const scopeKey of scopeKeys) {
+    const root = store.resolveScopeRoot(scopeKey);
+    if (root !== null) {
+      roots.set(scopeKey, root);
+    }
+  }
+  if (roots.size === 0) {
+    return [];
+  }
+  const usableScopes = [...roots.keys()];
+
+  const placeholders = usableScopes.map(() => '?').join(', ');
+  // `sha256 IS NOT NULL` excludes oversize records at the SQL layer: Story 3.1
+  // stores path and size only past 2 MiB, so those can never be verified and
+  // would burn a candidate slot to return `unverifiable` every time.
+  // `read_count DESC` is AC #1's ordering; `recorded_at DESC` breaks ties so
+  // paging is deterministic rather than dependent on physical row order.
+  const rows = store.db
+    .prepare(
+      `SELECT scope_key, path, byte_size
+         FROM content_digests
+        WHERE scope_key IN (${placeholders})
+          AND sha256 IS NOT NULL
+        ORDER BY read_count DESC, recorded_at DESC
+        LIMIT ?`,
+    )
+    .all(...usableScopes, candidateLimit) as {
+    scope_key: string;
+    path: string;
+    byte_size: number;
+  }[];
+
+  const found: string[] = [];
+  const seen = new Set<string>();
+  let spent = 0;
+  // One memo for the whole walk: a file recorded under two scope keys (the same
+  // worktree on two branches) is one file on disk and must not be hashed twice.
+  const digests = deps.createDigestCache();
+
+  for (const row of rows) {
+    if (found.length >= limit) {
+      break;
+    }
+    // Dedupe by path. `resolveWorkingScopeKeys` always returns the preferred
+    // scope AND the project scope, and Story 3.2 made digest paths
+    // scope-root-relative — so one file read under both keys is two rows
+    // carrying the same string, and the line rendered `src/a.ts, src/a.ts`,
+    // burning slots out of AC #1's five. The two-scope case was already
+    // anticipated for the hash memo one line below and stopped there.
+    if (seen.has(row.path)) {
+      continue;
+    }
+    seen.add(row.path);
+
+    const absPath = resolveOnDiskPath(row.path, roots.get(row.scope_key) ?? null);
+    // **Charge what the read will ACTUALLY cost, not what was recorded.**
+    // `byte_size` is Story 3.1's size at record time; the hash reads whatever
+    // is on disk now. Measured: rows totalling 24 recorded bytes hashed 48 MiB.
+    // A file that grew is by definition *changed*, so it can never become a
+    // hit — which is why the old `found.length > 0` gate never armed for it and
+    // the two defects compounded into a B-1 breach (102 ms p95 measured, 216 ms
+    // at a raised `CORTEX_DIGEST_MAX_BYTES`).
+    const size = currentSizeOf(absPath, deps);
+    if (size === null) {
+      // Unmeasurable means unhashable, so it cannot be a hit. Skipping costs
+      // nothing and keeps an unreadable path from consuming a candidate slot.
+      continue;
+    }
+    // Gate on `spent > 0`, never on `found.length > 0`. Keying the ceiling on a
+    // file having been *found* meant it could not fire until something had
+    // already succeeded — so when every candidate is changed, which is the
+    // ordinary state after a pull, a rebase or a branch switch, all of them
+    // were hashed regardless of size. `spent > 0` still always attempts the
+    // first candidate, so a single oversized file is not silently skipped.
+    if (spent > 0 && spent + size > byteBudget) {
+      break;
+    }
+    spent += size;
+
+    const [result] = queryReadLedger(store, {
+      paths: [row.path],
+      // No session: this caller asks "is the file unchanged", never "did you
+      // read it". `skipAttribution` makes that explicit rather than leaning on
+      // an id that happens to match nothing — and saves a `getSession` per
+      // candidate whose result was being discarded on the B-1 path.
+      sessionId: '',
+      skipAttribution: true,
+      scopeKey: row.scope_key,
+      digestCache: digests,
+    });
+    if (result?.verdict === 'unchanged-since') {
+      found.push(row.path);
+    }
+  }
+  return found;
+}
+
+/**
+ * A caller-supplied count, or the default.
+ *
+ * `NaN < 1` is false, so an unguarded `limit` of `NaN` sailed past the guard,
+ * and a negative `candidateLimit` reached SQLite — which reads a negative
+ * `LIMIT` as *no limit* and would walk the whole table. That is verbatim the
+ * hazard `resolvePageLimit` documents for `list-memory`.
+ */
+function clampCount(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return fallback;
+  }
+  const floored = Math.floor(value);
+  return floored >= 0 ? floored : fallback;
+}
+
+/** Current size on disk, or null when it cannot be measured at all. */
+function currentSizeOf(
+  absPath: string,
+  deps: { statSync: typeof fs.statSync },
+): number | null {
+  try {
+    const stat = deps.statSync(absPath);
+    return stat.isFile() ? stat.size : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface ReadLedgerDeps {
   /**
    * Injected only so the per-query memo can be *observed*. Building one cache
@@ -250,7 +459,9 @@ export function queryReadLedger(
       key: digest.path,
       recordedAt: digest.recordedAt,
       refundEligible,
-      ...(refundEligible ? {} : { recordedBy: recorderOf(store, digest) }),
+      ...(refundEligible || query.skipAttribution
+        ? {}
+        : { recordedBy: recorderOf(store, digest) }),
     };
 
     const absPath = resolveOnDiskPath(inputPath, scopeRoot);

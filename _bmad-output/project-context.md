@@ -76,7 +76,15 @@ Any change touching ranking, scoring, tokenization, reference validation, or out
 npm run gate
 ```
 
-**It fails on:** any negative `top1_hit` delta, any negative `recall_at_3` delta, any positive `output_tokens` delta, any fixture whose own assertions fail, a suite with no baseline, a baseline with no suite, a baseline missing a metric, a suite that asserts nothing, and any registered `memory_items` kind no suite exercises (AD-5). `noise_count` and `stale_count` are reported, not gated. The eight suites are `alternatives`, `budget`, `contested`, `kind-ordering`, `rename-moved`, `stale-label`, `stemming`, `superseded-history`; CI runs the gate on every push. **Known coverage gap:** the suites read `top1_hit`/`recall_at_3`/`output_tokens` straight off retrieval, so the SessionStart brief and `cortex_state` header surfaces are **not** gated — a regression there will not go red. Adding header/full_state assertion hooks is an open Epic-1 action item; until it lands, do not offer a green gate as evidence about those surfaces.
+**It fails on:** any negative `top1_hit` delta, any negative `recall_at_3` delta, any positive `output_tokens` delta, any fixture whose own assertions fail, a suite with no baseline, a baseline with no suite, a baseline missing a metric, a suite that asserts nothing, and any registered `memory_items` kind no suite exercises (AD-5). `noise_count` and `stale_count` are reported, not gated. The nine suites are `alternatives`, `brief-surface`, `budget`, `contested`, `kind-ordering`, `rename-moved`, `stale-label`, `stemming`, `superseded-history`; CI runs the gate on every push.
+
+**Surface coverage (Story 3.4, FR-7).** The former gap — retrieval metrics only, so a brief or header regression could not go red — is closed for rendered content: a suite may carry a `surfaces` block asserting `expect_contains` / `expect_excludes` / `max_tokens` over `brief`, `header` or `full_state`, and those fail on their own terms rather than by a baseline delta. `brief-surface` exists because `superseded-history` **cannot** exercise the brief's superseded exclusion: it seeds the retired decision `cold`, and `BRIEF_STATES` is pinned/hot/warm, so the state filter removes it before the guard runs.
+
+`brief-surface` also asserts on `header` and `full_state`, so all three named surfaces have real coverage rather than only the mechanism existing.
+
+**What is still NOT gated, stated so a green gate is not over-read:** the brief's **read-ledger line**. The harness builds the brief with `includeReadLedger: false`, because the line names files that must exist on disk with matching hashes and a seeded store cannot stage that; leaving it on would make suites pass or fail by whatever is checked out. That line is covered by unit tests only.
+
+**Write surface needles that can actually fire.** Three of the first eight shipped could not: `expect_excludes: ["(superseded)"]` and `["[conflict]"]` name labels the brief's own renderer never emits, and `["rabbitmq"]` was excluded by the state filter rather than by the guard under test. A `max_tokens` above the seeded size is decoration — supply a `budget` that binds instead.
 
 `evaluate --suite … --compare …` still exists as the single-suite human view. **It always exits 0 and is not a gate** — do not use it as one.
 

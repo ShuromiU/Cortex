@@ -3,8 +3,10 @@ import * as path from 'node:path';
 import { KIND_WEIGHTS } from '../memory/kind-weights.js';
 import {
   evaluateDatabase,
+  type EvaluatedSurface,
   type EvaluationResult,
   type QualityFixture,
+  type SurfaceFixture,
 } from './harness.js';
 import type { EvaluationScenario } from './seed.js';
 
@@ -95,7 +97,11 @@ export interface BaselineJustificationVerdict {
 interface QualitySuiteFile {
   fixtures: QualityFixture[];
   seed?: EvaluationScenario;
+  surfaces?: SurfaceFixture[];
 }
+
+/** The rendered surfaces a suite may assert on. Validated, never trusted. */
+const EVALUATED_SURFACES: EvaluatedSurface[] = ['brief', 'header', 'full_state'];
 
 // ── Loading ───────────────────────────────────────────────────────────
 
@@ -154,9 +160,44 @@ function loadSuite(suitesDir: string, name: string): QualitySuiteFile {
     throw new Error('suite is not a JSON object');
   }
 
-  const suite = parsed as { fixtures?: unknown; seed?: unknown };
+  const suite = parsed as { fixtures?: unknown; seed?: unknown; surfaces?: unknown };
   if (!Array.isArray(suite.fixtures) || suite.fixtures.length === 0) {
     throw new Error('suite has no fixtures — it would assert nothing and pass forever');
+  }
+  if (suite.surfaces !== undefined) {
+    if (!Array.isArray(suite.surfaces) || suite.surfaces.length === 0) {
+      throw new Error('suite has a `surfaces` key that asserts nothing — remove it or fill it');
+    }
+    for (const entry of suite.surfaces as {
+      surface?: unknown;
+      expect_contains?: unknown;
+      expect_excludes?: unknown;
+      max_tokens?: unknown;
+    }[]) {
+      // An entry that asserts NOTHING passes forever — the same failure this
+      // module already refuses for `fixtures: []`, unapplied to the new fixture
+      // type. All of `{surface:'brief'}`, empty assertion arrays, and an
+      // `expect_excludes` naming a string no brief contains were green, while
+      // the error string above claimed the key "asserts nothing" was refused.
+      const asserts =
+        (Array.isArray(entry.expect_contains) && entry.expect_contains.length > 0) ||
+        (Array.isArray(entry.expect_excludes) && entry.expect_excludes.length > 0) ||
+        typeof entry.max_tokens === 'number';
+      if (!asserts) {
+        throw new Error(
+          `surface ${JSON.stringify(entry.surface)} asserts nothing — give it expect_contains, expect_excludes or max_tokens`,
+        );
+      }
+      // A typo'd surface name would otherwise read every assertion against
+      // `undefined` text: `contains` would fail loudly, but `excludes` and the
+      // token budget would pass vacuously — a fixture that looks green while
+      // asserting nothing, which is the failure this whole hook exists to end.
+      if (!EVALUATED_SURFACES.includes(entry.surface as EvaluatedSurface)) {
+        throw new Error(
+          `unknown surface ${JSON.stringify(entry.surface)} — expected one of ${EVALUATED_SURFACES.join(', ')}`,
+        );
+      }
+    }
   }
   if (!suite.seed || typeof suite.seed !== 'object') {
     throw new Error('suite has no seed — it would evaluate against an empty store');
@@ -165,7 +206,43 @@ function loadSuite(suitesDir: string, name: string): QualitySuiteFile {
     throw new Error('suite seed has no items array');
   }
 
-  return { fixtures: suite.fixtures as QualityFixture[], seed: suite.seed as EvaluationScenario };
+  return {
+    fixtures: suite.fixtures as QualityFixture[],
+    seed: suite.seed as EvaluationScenario,
+    ...(suite.surfaces ? { surfaces: suite.surfaces as SurfaceFixture[] } : {}),
+  };
+}
+
+/**
+ * Surface assertions fail on their own terms, not by a baseline delta.
+ *
+ * A rendered-text assertion is either satisfied or it is not; there is no
+ * metric to regress. Comparing against the baseline the way fixtures do would
+ * also mean a surface assertion could be "known failing" — and a baseline that
+ * records a broken brief as acceptable is exactly the state this hook exists to
+ * make impossible.
+ */
+function findSurfaceFailures(result: EvaluationResult): string[] {
+  const failures: string[] = [];
+  for (const surface of result.surfaces ?? []) {
+    if (surface.passed) {
+      continue;
+    }
+    const reasons: string[] = [];
+    if (surface.contains_missed.length > 0) {
+      reasons.push(`missing ${JSON.stringify(surface.contains_missed)}`);
+    }
+    if (surface.excludes_violated.length > 0) {
+      reasons.push(`forbidden ${JSON.stringify(surface.excludes_violated)}`);
+    }
+    if (!surface.token_budget.passed) {
+      reasons.push(
+        `over token budget (${surface.token_budget.actual_tokens} > ${surface.token_budget.max_tokens})`,
+      );
+    }
+    failures.push(`surface '${surface.surface}' failing: ${reasons.join('; ')}`);
+  }
+  return failures;
 }
 
 function evaluateSuite(
@@ -175,6 +252,7 @@ function evaluateSuite(
 ): EvaluationResult {
   return evaluateDatabase(':memory:', rootPath, [], {
     fixtures: suite.fixtures,
+    ...(suite.surfaces ? { surfaces: suite.surfaces } : {}),
     ...(suite.seed ? { scenario: suite.seed } : {}),
     ...(compareTo ? { compareTo } : {}),
   });
@@ -426,6 +504,7 @@ export function runEvalGate(options: EvalGateOptions = {}): GateResult {
     const regressions = [
       ...findMetricRegressions(result, baseline),
       ...findFixtureRegressions(result, baseline),
+      ...findSurfaceFailures(result),
     ];
     if (regressions.length > 0) {
       fail(name, regressions);
@@ -508,7 +587,34 @@ export function regenerateBaseline(
   const result = evaluateSuite(suite, rootPath, previous);
   const accepted = previous
     ? [...findMetricRegressions(result, previous), ...findFixtureRegressions(result, previous)]
-    : [];
+    : // **A FIRST baseline must still report what it is baking in.**
+      // `findFixtureRegressions` compares against the previous baseline and so
+      // has nothing to say here, and it also *skips* any fixture the baseline
+      // records as failing — "the author accepted it deliberately". Together
+      // those meant a brand-new suite could enter the locked set with a
+      // permanently disabled assertion and no warning at all. Measured: a new
+      // suite shipped with a needle missing four words from the rendered text;
+      // the fixture failed on arrival, was written into its own baseline as
+      // `passed: false`, and every recall assertion in it was excused forever
+      // while `npm run gate` printed `ok`. The known-failing escape hatch is
+      // for the documented red→green workflow, not for typos.
+      result.quality?.fixtures
+        .filter(fixture => !fixture.passed)
+        .map(
+          fixture =>
+            `fixture '${fixture.topic}' is FAILING in this first baseline and will be excused by every future run` +
+            (fixture.output_assertions.contains_missed.length > 0
+              ? `: missing ${JSON.stringify(fixture.output_assertions.contains_missed)}`
+              : ''),
+        ) ?? [];
+  // Surface assertions never enter a baseline's excused set — they fail on
+  // their own terms — but a first baseline that records one as failing is still
+  // worth naming, because the author is about to commit it.
+  for (const surface of result.surfaces ?? []) {
+    if (!surface.passed) {
+      accepted.push(`surface '${surface.surface}' is FAILING in this baseline`);
+    }
+  }
 
   fs.mkdirSync(baselinesDir, { recursive: true });
   fs.writeFileSync(baselinePath, `${JSON.stringify(result, null, 2)}\n`);

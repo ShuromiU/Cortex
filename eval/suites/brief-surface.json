@@ -1,0 +1,86 @@
+{
+  "_comment": "FR-7 / Story 3.4. The SessionStart brief was, until this suite existed, a surface the gate could not see: `evaluateStore` computed `header` and `full_state` and asserted on neither, and did not build the brief at all. Every guarantee CLAUDE.md publishes about it — the [contested] marker on unprompted channels, the explicit superseded exclusion, the <=150-token budget — was enforced by unit tests alone and could regress without a red build.\n\nThis suite exists because the OTHER suites cannot exercise the superseded exclusion. `superseded-history` seeds its retired decision in state `cold`, and BRIEF_STATES is pinned/hot/warm, so the STATE filter removes it before `isSupersededMemoryItem` is ever consulted. Measured: deleting the superseded guard from the brief left `npm run gate` fully green against that suite. The guard is load-bearing precisely at `warm`, which is where FR-4 says a superseded decision lands ('demotes to warm at best, which is INSIDE both sets'), so the item here is seeded warm on purpose. Change it to cold and this suite silently stops testing the thing it names.\n\nThe surviving decision is asserted PRESENT alongside every exclusion. Without that, a brief that rendered nothing at all would satisfy all three `expect_excludes` and pass — the vacuous green this whole hook exists to end.",
+  "seed": {
+    "scope": { "type": "branch", "key": "eval/brief-surface" },
+    "focus": "cache eviction policy",
+    "app_graph": {
+      "head_oid": "eval00000000000000000000000000000000000f",
+      "files": ["src/cache/evict.ts", "src/cache/policy.ts"]
+    },
+    "items": [
+      {
+        "id": "evict-current",
+        "kind": "note:decision",
+        "subject": "cache eviction policy",
+        "text": "Decision: evict the cache by least-recently-used in src/cache/evict.ts.\nSubject: cache eviction policy",
+        "state": "hot",
+        "importance": 2.6,
+        "age_days": 1
+      },
+      {
+        "id": "evict-superseded",
+        "kind": "note:decision",
+        "subject": "cache eviction policy",
+        "text": "Decision: evict the cache by time-to-live alone in src/cache/policy.ts.\nSubject: cache eviction policy\nStatus: superseded",
+        "state": "warm",
+        "importance": 2.4,
+        "age_days": 3
+      },
+      {
+        "id": "evict-blocker",
+        "kind": "note:blocker",
+        "subject": "cache eviction sizing",
+        "text": "Blocker: cache eviction sizing needs a measured working-set number before src/cache/evict.ts can bound itself.\nSubject: cache eviction sizing",
+        "state": "warm",
+        "importance": 2.0,
+        "age_days": 2
+      }
+    ]
+  },
+  "fixtures": [
+    {
+      "topic": "cache eviction policy",
+      "expected_top": "evict-current",
+      "allowed": ["evict-superseded"],
+      "expect_output_contains": [
+        "evict the cache by least-recently-used",
+        "evict the cache by time-to-live alone in src/cache/policy.ts. (superseded)"
+      ]
+    }
+  ],
+  "_needles_comment": "Every needle here is reachable, checked rather than assumed. The recall needle above previously omitted ' in src/cache/policy.ts' and so could never match: the fixture failed on arrival, regenerateBaseline recorded passed:false, and findFixtureRegressions then skipped it permanently as 'accepted by the author' — leaving the whole recall half of this suite un-gated on the suite added to close a coverage gap. Below, '(superseded)' is deliberately NOT asserted as excluded: the brief has its own renderer and emits that label nowhere, so excluding it would pass no matter what the code did. What is load-bearing is that the retired decision's TEXT is absent while the surviving decision and the blocker are present.",
+  "surfaces": [
+    {
+      "surface": "brief",
+      "expect_contains": [
+        "evict the cache by least-recently-used",
+        "cache eviction sizing needs a measured working-set number"
+      ],
+      "expect_excludes": ["time-to-live alone"],
+      "max_tokens": 150
+    },
+    {
+      "_comment": "The only fixture that exercises the brief's token budget. At the 150 default the seeded brief is 77 tokens, so `max_tokens: 150` has ~73 tokens of headroom and cannot fire — deleting the enforcement loop outright left the gate green. Rendered at 44 the budget genuinely binds: the decision survives and the blocker is dropped. Both halves are asserted, so the fixture fails whether the loop stops trimming (77 > 44) or trims the wrong line.",
+      "surface": "brief",
+      "budget": 44,
+      "expect_contains": ["evict the cache by least-recently-used"],
+      "expect_excludes": ["cache eviction sizing needs a measured working-set number"],
+      "max_tokens": 44
+    },
+    {
+      "_comment": "header and full_state were the two surfaces the Epic-1 action item named, and every `surfaces` block shipped before this one targeted `brief` — so the mechanism existed while their coverage stayed zero.",
+      "surface": "header",
+      "expect_contains": ["evict the cache by least-recently-used", "cache eviction sizing"],
+      "max_tokens": 260
+    },
+    {
+      "_comment": "The complement of the brief assertion, and the reason both are worth having: a superseded decision is EXCLUDED from the unprompted SessionStart brief but stays retrievable in state with its `(superseded)` label (FR-4). Asserting both surfaces locks the contrast, not just one side of it.",
+      "surface": "full_state",
+      "expect_contains": [
+        "evict the cache by least-recently-used",
+        "evict the cache by time-to-live alone in src/cache/policy.ts. (superseded)"
+      ],
+      "max_tokens": 150
+    }
+  ]
+}

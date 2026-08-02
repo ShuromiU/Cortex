@@ -51,5 +51,14 @@
       "allowed": ["queue-superseded"],
       "expect_output_contains": ["use rabbitmq for the queue engine. (superseded)"]
     }
+  ],
+  "_surfaces_comment": "The complement of the contested suite's brief assertion, and the harder half. CLAUDE.md states that the SessionStart brief and reflex EXPLICITLY exclude superseded items — `resolved` never needed that filter because it lands cold, outside BRIEF_STATES, but a superseded decision demotes to warm at best, which is inside it. So the exclusion is load-bearing code, not a property of the state machine, and it was ungated. Asserting the surviving decision IS present alongside the exclusion is what stops a brief that renders nothing at all from passing.",
+  "surfaces": [
+    {
+      "surface": "brief",
+      "expect_contains": ["use kafka for the queue engine"],
+      "expect_excludes": ["rabbitmq"],
+      "max_tokens": 150
+    }
   ]
 }

@@ -33,7 +33,7 @@ Each is a behavior you can go and check, not a label:
 3. **Deterministic contradiction detection.** Contradictions are found by an offline lexical rule — an explicit polarity flip over demonstrably shared context — with no model in the loop, so the same two notes always produce the same verdict. The rules are deliberately strict, because a detector that cries wolf gets ignored. See [Contradiction detection](#contradiction-detection).
 4. **Checkout freshness with rename resolution.** Memory is scored against the current file inventory, with a graduated and capped penalty so stale items stay reachable and labeled instead of buried, and renames resolve to `[moved:]` rather than counting as missing.
 5. **Enforced budgets.** The numbers above are spent, not advisory targets a caller is trusted to honour. Two edges, stated because a budget with undisclosed exceptions is only a suggestion: `cortex_recall` never drops its top-ranked result, so one oversized result overruns the budget rather than returning nothing; and `cortex_state` *skips* an over-large section and keeps walking rather than stopping, so a lower-priority section can outlive a higher-priority one. Continuation lines are charged only after every affordable primary line is placed, so adding them cannot change which decisions you see at any budget.
-6. **CI-gated retrieval quality.** Hermetic seeded suites are locked against reference results; `npm run gate` fails on a drop in `top1_hit` or `recall_at_3` or a rise in `output_tokens`, and CI runs it on every push. Regenerating a baseline requires a `Baseline-Regenerated:` trailer on the commit that does it. See [Retrieval Quality Gate](#retrieval-quality-gate).
+6. **CI-gated retrieval quality.** Hermetic seeded suites are locked against reference results; `npm run gate` fails on a drop in `top1_hit` or `recall_at_3` or a rise in `output_tokens`, and CI runs it on every push. Suites can also assert on whole rendered surfaces — the SessionStart brief, `cortex header`, `cortex_state` — so a change that quietly stops marking a contested decision, or starts leaking a superseded one into the brief, fails the build instead of passing it. Regenerating a baseline requires a `Baseline-Regenerated:` trailer on the commit that does it. See [Retrieval Quality Gate](#retrieval-quality-gate).
 
 ## How it works
 
@@ -41,7 +41,7 @@ Cortex is retrieval-first and pull-based. It stores decisions, blockers, command
 
 ## Core Behavior
 
-- `SessionStart` quietly enables capture with `cortex inject-header --quiet` and prints the validated session brief (or nothing on a cold start).
+- `SessionStart` quietly enables capture with `cortex inject-header --quiet` and prints the validated session brief (or nothing on a cold start). The brief also names up to five files this branch has already read that are **still unchanged**, most-read first, so a resuming agent does not re-read them to orient itself — verified by re-hashing, and phrased about the files rather than the reader, because a fresh session did not read them.
 - `cortex reflect` can emit short hook `additionalContext` on high-confidence focus shifts.
 - Cortex now supports branch-scoped restore: switching branches restores the right snapshot.
 - `cortex_route` / `cortex route` provide the cold-callable capability map.
@@ -217,6 +217,12 @@ Everything ambiguous fails closed, because a gate that cannot fail is worse than
 - a **fixture whose own assertions fail** — two suites exist only to lock `[stale:` and `[moved:` in the output, and losing a label shrinks the output, so the aggregate delta alone would read the regression as an improvement
 - a suite with no fixtures or no seed, which would score zero on everything and pass forever
 - an unreadable suite, baseline or manifest
+
+Suites can also assert on a whole **rendered surface** rather than on a recall query, via a `surfaces` block naming `brief`, `header` or `full_state` with `expect_contains` / `expect_excludes` / `max_tokens`. This exists because those surfaces were previously unreachable: the harness computed `header` and `full_state` on every run and asserted on neither, and never built the session brief at all — so the guarantees Cortex publishes about the brief (a contested decision is always marked; a superseded one is never shown) held only by unit test and could regress without a red build. Surface assertions fail on their own terms rather than by a baseline delta, because rendered text is either right or it is not, and a baseline able to record a broken brief as acceptable would defeat the point. An unknown surface name is refused when the suite loads: it would read every assertion against nothing, so `contains` would fail loudly while `excludes` and the token budget passed vacuously.
+
+A fixture may also supply its own `budget`, which is the only way the brief's token-budget enforcement is exercised at all: a seeded brief is well under 150 tokens, so a `max_tokens: 150` assertion has too much headroom to ever fire.
+
+One limit worth stating: the brief's read-ledger line is deliberately **not** gated. It names files that must exist on disk with matching hashes, which a seeded in-memory scenario cannot stage, so leaving it on would make a suite pass or fail by whatever happens to be checked out. That line is covered by unit tests; everything else the brief renders now gates.
 
 It also enforces AD-5: a `memory_items` kind that no fixture exercises is invisible to the suites rather than penalised by them, so a newly registered kind fails the gate until a fixture ships with it. `eval/kind-coverage.json` grandfathers the kinds that predate the gate — and a test pins that list to exactly the kinds no suite covers, so widening it means editing an assertion, not quietly appending to an array.
 

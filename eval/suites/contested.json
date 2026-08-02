@@ -46,5 +46,13 @@
       "expect_output_contains": ["[contested]", "[contested]\nDecision ["],
       "expect_output_excludes": ["[conflict]"]
     }
+  ],
+  "_surfaces_comment": "CLAUDE.md names the SessionStart brief as a surface that MUST carry the [contested] marker, and calls the unprompted channels the ones that matter most — each injects a lone remembered item as settled context, so an unmarked side of an open contest is the exact failure the marker prevents. Nothing gated it: the harness computed `header` and `full_state` and asserted on neither, and did not build the brief at all. This is that guarantee, locked. The marker is asserted together with the decision text so a brief that dropped the note entirely cannot pass by vacuously not containing an unmarked one.",
+  "surfaces": [
+    {
+      "surface": "brief",
+      "expect_contains": ["flush the spool at turn end", "[contested]"],
+      "max_tokens": 150
+    }
   ]
 }

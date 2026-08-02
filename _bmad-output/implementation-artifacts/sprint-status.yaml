@@ -146,7 +146,7 @@ action_items:
   - epic: 1
     action: "Add header/full_state assertion hooks to the eval harness so state-surface regressions gate"
     owner: "Amelia (Developer)"
-    status: open
+    status: done  # Story 3.4 shipped it: suites carry `surfaces` entries over brief/header/full_state (expect_contains/expect_excludes/max_tokens/budget), validated at load, failing on their own terms, with unit tests for the mechanism itself. brief-surface asserts on all three surfaces. Found along the way: superseded-history could not exercise the brief's superseded guard at all (its item is `cold`, filtered before the guard) so brief-surface seeds it `warm`; max_tokens:150 was decoration against a 77-token brief so a binding `budget` was added; and a first baseline silently baked in a failing fixture, now reported. Stated limit: the FR-7 read-ledger line itself is excluded from the gate (includeReadLedger:false) because a seeded store cannot stage on-disk files.
   - epic: 3
     action: "content_digests has no GC rule (certify_refs: zero hits in src/db/gc.ts). One row per path per scope and every branch mints a scope, so it grows monotonically. Fold into Story 4.6, which owns GC and bounds."
     owner: "create-story (Story 4.6)"

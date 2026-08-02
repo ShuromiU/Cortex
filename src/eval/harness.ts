@@ -2,6 +2,7 @@ import type { CortexStore, TableCounts } from '../db/store.js';
 import { openDatabase, ensureCortexSchema } from '../db/schema.js';
 import { CortexStore as Store } from '../db/store.js';
 import { buildHeader, buildFullState } from '../query/state.js';
+import { buildSessionBrief } from '../query/session-brief.js';
 import { recall } from '../query/recall.js';
 import { retrieveMemory, type RetrievedMemoryItem } from '../query/retrieval.js';
 import { createSeededStore, type EvaluationScenario } from './seed.js';
@@ -28,6 +29,53 @@ export interface QualityFixture {
   expect_output_contains?: string[];
   /** Substrings that must not appear in the rendered recall output. */
   expect_output_excludes?: string[];
+}
+
+/**
+ * An assertion on a whole rendered **surface**, rather than on a recall query.
+ *
+ * The gate compared `top1_hit`, `recall_at_3` and `output_tokens` from
+ * topic-driven fixtures only. `header` and `full_state` were computed on every
+ * run and **nothing ever looked at them**, and the SessionStart brief was not
+ * computed at all — so a change to any of those three could not turn the gate
+ * red. Story 3.4 edits the brief, which made shipping without this the same as
+ * shipping untested.
+ *
+ * Deliberately not a retrieval metric: these are `contains`/`excludes`/token
+ * assertions on rendered text, so they can fail a suite without touching the
+ * three gated numbers, and every existing baseline stays byte-identical.
+ */
+export type EvaluatedSurface = 'brief' | 'header' | 'full_state';
+
+export interface SurfaceFixture {
+  surface: EvaluatedSurface;
+  expect_contains?: string[];
+  expect_excludes?: string[];
+  max_tokens?: number;
+  /**
+   * Render the brief at this budget instead of its 150 default.
+   *
+   * Without it the token budget cannot be gated at all: a seeded brief is 36–77
+   * tokens against `max_tokens: 150`, so the assertion has ~100 tokens of
+   * headroom and can never bind — and deleting the enforcement loop outright
+   * left the whole gate green. A fixture that renders at a budget the content
+   * genuinely exceeds is the only way this surface's budget code is exercised.
+   * Ignored for `header` and `full_state`, which take no budget here.
+   */
+  budget?: number;
+}
+
+export interface SurfaceEvaluation {
+  surface: EvaluatedSurface;
+  output: TextMetric;
+  contains_missed: string[];
+  excludes_violated: string[];
+  token_budget: {
+    max_tokens: number | null;
+    actual_tokens: number;
+    passed: boolean;
+  };
+  passed: boolean;
 }
 
 export interface QualityScoreBreakdown {
@@ -91,6 +139,7 @@ export interface QualityComparison {
 
 export interface EvaluationOptions {
   fixtures?: QualityFixture[];
+  surfaces?: SurfaceFixture[];
   compareTo?: EvaluationResult;
   /** Hermetic seed: evaluate against an in-memory store built from this scenario. */
   scenario?: EvaluationScenario;
@@ -103,9 +152,16 @@ export interface EvaluationResult {
   tables: TableCounts;
   header: TextMetric;
   full_state: TextMetric;
+  /**
+   * The SessionStart brief. Recorded even when no suite asserts on it, because
+   * a surface the harness does not compute is a surface no future fixture can
+   * reach — the exact reason this one went unmeasured until Story 3.4.
+   */
+  session_brief: TextMetric;
   topics: TopicEvaluation[];
   quality?: QualityEvaluation;
   quality_comparison?: QualityComparison;
+  surfaces?: SurfaceEvaluation[];
 }
 
 export function estimateTokens(text: string): number {
@@ -317,25 +373,74 @@ export function evaluateStore(
   const topics = deriveTopics(store, requestedTopics);
   const header = buildHeader(store);
   const fullState = buildFullState(store);
+  // `includeReadLedger: false` — the FR-7 line names files that must exist on
+  // disk with matching hashes, which a seeded in-memory scenario cannot stage.
+  // Leaving it on would make the brief's content depend on the developer's
+  // working tree, so a suite would pass or fail by what happened to be checked
+  // out. The line has its own unit tests; what gates here is everything else
+  // the brief renders.
+  const sessionBrief = buildSessionBrief(store, { includeReadLedger: false });
   const quality =
     options.fixtures !== undefined
       ? evaluateQualitySuite(store, options.fixtures)
       : undefined;
   const qualityComparison = compareQuality(quality, options.compareTo);
+  const surfaces = options.surfaces?.map(fixture =>
+    evaluateSurfaceFixture(fixture, {
+      // A fixture supplying its own budget re-renders the brief at it; the
+      // default rendering is shared by every fixture that does not.
+      brief:
+        fixture.budget === undefined
+          ? sessionBrief
+          : buildSessionBrief(store, { includeReadLedger: false, budget: fixture.budget }),
+      header,
+      full_state: fullState,
+    }),
+  );
 
   return {
     ...(dbPath ? { db_path: dbPath } : {}),
     ...(quality ? { quality } : {}),
     ...(qualityComparison ? { quality_comparison: qualityComparison } : {}),
+    ...(surfaces ? { surfaces } : {}),
     generated_at: new Date().toISOString(),
     schema_version: Number.parseInt(store.getMeta('schema_version') ?? '0', 10) || 0,
     tables: store.getTableCounts(),
     header: buildTextMetric(header),
     full_state: buildTextMetric(fullState),
+    session_brief: buildTextMetric(sessionBrief),
     topics: topics.map(topic => ({
       topic,
       output: buildTextMetric(recall(store, topic)),
     })),
+  };
+}
+
+function evaluateSurfaceFixture(
+  fixture: SurfaceFixture,
+  rendered: Record<EvaluatedSurface, string>,
+): SurfaceEvaluation {
+  const text = rendered[fixture.surface];
+  const output = buildTextMetric(text);
+  const containsMissed = (fixture.expect_contains ?? []).filter(
+    needle => !text.includes(needle),
+  );
+  const excludesViolated = (fixture.expect_excludes ?? []).filter(needle =>
+    text.includes(needle),
+  );
+  const tokenBudget = {
+    max_tokens: fixture.max_tokens ?? null,
+    actual_tokens: output.est_tokens,
+    passed: fixture.max_tokens === undefined || output.est_tokens <= fixture.max_tokens,
+  };
+  return {
+    surface: fixture.surface,
+    output,
+    contains_missed: containsMissed,
+    excludes_violated: excludesViolated,
+    token_budget: tokenBudget,
+    passed:
+      containsMissed.length === 0 && excludesViolated.length === 0 && tokenBudget.passed,
   };
 }
 
