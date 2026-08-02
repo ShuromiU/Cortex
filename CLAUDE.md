@@ -1,6 +1,6 @@
 # Cortex
 
-Persistent working memory for coding agents.
+A trust, freshness, and economy layer for coding-agent memory, not a transcript store. A remembered item carries whether it is still agreed (`[contested]`, `(superseded)`), whether it still describes the checkout (`[stale:`, `[moved:`), and what it cost (every retrieval channel budgeted; `cortex stats` reports spent/saved/net, with the credit side still consolidation-derived until the read ledger lands). `README.md` carries the positioning and the honest comparison against platform auto-memory; this file is the invariants log.
 
 ## Current Model
 - Cortex is retrieval-first, not transcript-first, and pull-based, not push-based: a tiny validated session brief at startup plus the high-confidence reflex are the memory channels; coercion is reduced to one one-line hint per session.

@@ -1,35 +1,43 @@
 # Cortex
 
-Persistent working memory for Claude Code and other MCP-compatible coding agents.
+**A trust, freshness, and economy layer for coding-agent memory.**
 
-Cortex V2 is branch-aware, retrieval-first, and ambient by default. It stores decisions, blockers, command outcomes, snapshots, and session summaries in a local SQLite database, then quietly captures activity and surfaces short prior-context whispers only when a high-confidence focus shift matches memory.
+Agent memory is no longer hard to come by — as of 2026-08-01 Claude Code ships it on by default and other agents ship comparable features. What none of them tell you is whether the thing they just remembered is still true.
 
-## What Changed In V2
+Cortex answers three questions a storage layer normally leaves open:
 
-Before:
-- mostly note/state dumps
-- lexical recall over notes and recent summaries
-- project memory behaved as mostly linear history
-- stale notes stayed active forever
+- **Trust — is this still what we decided?** Writing a note that opposes an active decision on the same subject marks *both* sides `[contested]` on every **retrieval** surface — recall, brief, state, the SessionStart brief and the reflex — the last two mattering most, since they inject a lone remembered item as settled context. (The operator listing `cortex list-memory` shows neither marker; `cortex inspect-memory` reports the contest in full.) Neither side is quietly retired until you close the contest with `cortex_resolve`. When a decision is genuinely superseded it cools one tier instead of vanishing, and carries a `(superseded)` label so it can never read as live.
+- **Freshness — does this still describe the checkout?** File references in memory are validated against the working tree. A memory pointing at a deleted file is penalised in ranking and renders `[stale: missing …]` rather than disappearing; a renamed file resolves through a git rename map to `[moved: a.ts → b.ts]`. The penalty is graduated and capped so stale memory stays reachable, which means the **label** is the guarantee, not the rank.
+- **Economy — what did remembering cost?** Every channel carries a token budget it actually spends rather than treats as advice: **150** for the session brief, **450** for `cortex_brief`, **600** for `cortex_recall`, **800** for `cortex_state`. Recall and the brief drop evidence from the bottom; `cortex_state` drops whole sections. Output size is gated retrospectively too — `npm run gate` fails CI on any *rise* in `output_tokens` against a locked baseline, so recall getting more expensive is a build failure rather than something noticed later. `cortex stats` reports the running spent/saved/net.
 
-Now:
-- branch/worktree-aware sessions and snapshots, identified by `(scope_key, agent_id)` so subagent work lands in its own session
-- retrieval quality gated in CI against locked baselines, so ranking cannot regress silently
-- live `memory_items` retrieval layer with FTS search
-- command failures and test cycles captured as durable episodes
-- hot/warm/cold decay with reinforcement from actual use
-- default state built from a scored working set, not “all active notes”
-- timestamped note output, current-checkout reference validation, fixture-backed retrieval evaluation, and optional semantic shadow/rank retrieval
+Under all three: memory is scoped to a branch and a worktree, capture is ambient and costs no process per tool call, and the default lexical ranking is locked against reference baselines that CI re-checks on every push. (The optional `CORTEX_SEMANTIC_MODE=rank` path is off by default and is *not* covered by those baselines.)
 
-## What Changed In V3 (pull, not push)
+> **Read `Saved:` with one caveat.** The ledger's credit side is currently an estimate derived from session consolidation — not evidence that a specific read was avoided. The *read ledger* — crediting an avoided read against the content digest that proves it was redundant, and refusing modeled or counterfactual credit — is the next release. Until it lands, treat the savings figure as an indicator rather than an accounting.
 
-- A tiny validated **session brief** (≤150 tokens: top branch-scoped decisions/blockers/intents plus a resume line) is the SessionStart payload; cold starts emit nothing.
-- The consult gate shrank to **one line, at most once per session**; the PreToolUse gate is gone. The reflex whisper remains the only mid-session push.
-- The Stop nudge fires **only** when a subagent ran this turn *and* suggest-notes has high-confidence candidates — and it embeds them. Disable with `CORTEX_STOP_NUDGE=off`.
-- Ambient capture is **spooled**: PostToolUse hooks append a JSON line to `.cortex.spool.jsonl` (no Node spawn per tool call); one flush per turn replays the batch.
-- Recall is **answer-shaped**: a lead line naming the most relevant memory and its trust level (`refs OK` / `stale refs` / `refs moved`), then timestamped evidence, within a token budget.
-- Rerank matches stemmed terms (`testing` finds `test flake`), renamed files resolve to `moved:` labels via a git rename map, and stale memory is labeled and demoted gently instead of buried.
-- `cortex_resolve` closes out notes; repeated command failures fold into one episode with an occurrence counter; `cortex gc` prunes derived data (dry-run by default).
+## How this compares
+
+Competitors move, so each claim below carries how it was checked. Treat the specifics as dated and the axis of difference as the durable part.
+
+**Native auto-memory** writes plain Markdown into a per-project directory and reads it back at session start. It is better than Cortex at three real things: nothing to install, files you can read and edit by hand, and no database to migrate or corrupt. If what you want is an agent that remembers your preferences across sessions, it is enough, and Cortex is not competing for that job.
+
+Its limit is structural rather than a missing feature: **the project key is the working-directory path**, mangled — `~/.claude/projects/<key>/memory/`. *(Observed directly, 2026-08-01: one repository's main checkout and its linked worktrees each hold a separate key, and only the main checkout had a `memory/` directory at all. That establishes the namespaces are separate; nothing was written in a worktree to test whether main can read it back, so read this as "separate by construction", not as a measured isolation test.)* The branch consequence follows from the same fact and needs no measurement: the key is a path, and `git switch` does not change a path, so a decision recorded while on a feature branch is served back on `main` as if it had been settled there. There is no branch dimension to have.
+
+**claude-mem** is the established third-party option and shares Cortex's shape — hooks capture activity, SQLite stores it. The difference is what happens between capture and recall: it compresses sessions with an LLM, where Cortex projects them deterministically. Compression buys better prose about *what happened*; determinism buys the ability to say *why* a given answer was returned, to reproduce it, and to gate it in CI. Which you want depends on whether you are reconstructing a session or trusting a decision. It is also the more established of the two by a wide margin, which is worth something concrete: more people have hit its edges before you do. *(This paragraph is second-hand — from a 2026-07-28 survey, not from running it. Corrections welcome.)*
+
+### The six things that are unique here
+
+Each is a behavior you can go and check, not a label:
+
+1. **Branch and worktree scoping.** Every worktree of a repository shares one store — the store id is a hash of the **absolute realpath** of `git rev-parse --git-common-dir`, and the realpath step is load-bearing rather than tidy: the raw output is `.git` in a main worktree and an absolute path in a linked one, so only the resolved form is identical across them. Memory inside that store is partitioned by a scope key carrying the worktree path *and* the branch ref. Switching branches restores the matching snapshot. See [Data](#data).
+2. **Subagent sessions.** A session is identified by `(scope_key, agent_id)`. A subagent's reads, edits and commands are filed under a child session recording its `parent_session_id` and `agent_type`, instead of being merged into the timeline of the agent that dispatched it — and a tool call *carrying an `agent_id`* never rotates or ends its parent's session, whatever its own working directory resolves to. That precondition is load-bearing: a hook installed before agent identity existed sends no `agent_id`, and those lines take the ordinary primary-session path, which does rotate on a scope change. `cortex doctor` reports such a hook as out of date. See [Subagent attribution](#subagent-attribution).
+3. **Deterministic contradiction detection.** Contradictions are found by an offline lexical rule — an explicit polarity flip over demonstrably shared context — with no model in the loop, so the same two notes always produce the same verdict. The rules are deliberately strict, because a detector that cries wolf gets ignored. See [Contradiction detection](#contradiction-detection).
+4. **Checkout freshness with rename resolution.** Memory is scored against the current file inventory, with a graduated and capped penalty so stale items stay reachable and labeled instead of buried, and renames resolve to `[moved:]` rather than counting as missing.
+5. **Enforced budgets.** The numbers above are spent, not advisory targets a caller is trusted to honour. Two edges, stated because a budget with undisclosed exceptions is only a suggestion: `cortex_recall` never drops its top-ranked result, so one oversized result overruns the budget rather than returning nothing; and `cortex_state` *skips* an over-large section and keeps walking rather than stopping, so a lower-priority section can outlive a higher-priority one. Continuation lines are charged only after every affordable primary line is placed, so adding them cannot change which decisions you see at any budget.
+6. **CI-gated retrieval quality.** Hermetic seeded suites are locked against reference results; `npm run gate` fails on a drop in `top1_hit` or `recall_at_3` or a rise in `output_tokens`, and CI runs it on every push. Regenerating a baseline requires a `Baseline-Regenerated:` trailer on the commit that does it. See [Retrieval Quality Gate](#retrieval-quality-gate).
+
+## How it works
+
+Cortex is retrieval-first and pull-based. It stores decisions, blockers, command outcomes, snapshots, and session summaries in a local SQLite database, captures activity ambiently through hooks, and surfaces *remembered content* in exactly two channels you did not ask for: a validated session brief at startup, and a short whisper when a high-confidence focus shift matches memory. Two other hooks speak unprompted but inject no memory — a one-line consult hint, at most once per session, and a turn-end nudge when a subagent ran and there are high-confidence notes worth saving. Everything else you ask for.
 
 ## Core Behavior
 
@@ -626,6 +634,38 @@ SQLite already bounds the WAL — `wal_autocheckpoint` moves its contents into t
 So Cortex runs a **truncating** checkpoint, which returns the space, at two points: when a command's process exits, and mid-session once the log crosses `CORTEX_WAL_MAX_BYTES` (default 4 MiB). Neither is on the path of a tool call — the `PostToolUse` hook is pure bash and reaches the checkpoint only through a flush it launches detached and does not wait for.
 
 A checkpoint can report `busy`, which is normal rather than a failure: another Cortex process was mid-transaction — most often the spool flush the capture hook launches in the background — so the frames moved into the database but the file could not be reclaimed yet. The next checkpoint gets it. An MCP server that is merely *connected* does not cause this; only one inside a transaction does. Checkpoints never wait for it, so a busy one costs milliseconds.
+
+## Version history
+
+Kept for readers upgrading from an earlier build. Nothing below is required
+to use Cortex today.
+
+### What Changed In V2
+
+Before:
+- mostly note/state dumps
+- lexical recall over notes and recent summaries
+- project memory behaved as mostly linear history
+- stale notes stayed active forever
+
+Now:
+- branch/worktree-aware sessions and snapshots, identified by `(scope_key, agent_id)` so subagent work lands in its own session
+- retrieval quality gated in CI against locked baselines, so ranking cannot regress silently
+- live `memory_items` retrieval layer with FTS search
+- command failures and test cycles captured as durable episodes
+- hot/warm/cold decay with reinforcement from actual use
+- default state built from a scored working set, not “all active notes”
+- timestamped note output, current-checkout reference validation, fixture-backed retrieval evaluation, and optional semantic shadow/rank retrieval
+
+### What Changed In V3 (pull, not push)
+
+- A tiny validated **session brief** (≤150 tokens: top branch-scoped decisions/blockers/intents plus a resume line) is the SessionStart payload; cold starts emit nothing.
+- The consult gate shrank to **one line, at most once per session**; the PreToolUse gate is gone. The reflex whisper remains the only mid-session push.
+- The Stop nudge fires **only** when a subagent ran this turn *and* suggest-notes has high-confidence candidates — and it embeds them. Disable with `CORTEX_STOP_NUDGE=off`.
+- Ambient capture is **spooled**: PostToolUse hooks append a JSON line to `.cortex.spool.jsonl` (no Node spawn per tool call); one flush per turn replays the batch.
+- Recall is **answer-shaped**: a lead line naming the most relevant memory and its trust level (`refs OK` / `stale refs` / `refs moved`), then timestamped evidence, within a token budget.
+- Rerank matches stemmed terms (`testing` finds `test flake`), renamed files resolve to `moved:` labels via a git rename map, and stale memory is labeled and demoted gently instead of buried.
+- `cortex_resolve` closes out notes; repeated command failures fold into one episode with an occurrence counter; `cortex gc` prunes derived data (dry-run by default).
 
 ## License
 
