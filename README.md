@@ -301,6 +301,7 @@ For new projects, keep the global `~/.codex/AGENTS.md` Cortex section aligned wi
 | `cortex_brief` | Return a smaller topical brief, optionally for an agent, budgeted |
 | `cortex_suggest_notes` | Suggest load-bearing notes from the current session without writing them |
 | `cortex_validate_memory` | Audit memories against the current checkout without deleting notes |
+| `cortex_read_ledger` | Ask whether files were already read in this scope and whether they changed since — four verdicts, produced by re-hashing |
 | `cortex_engage` | Re-enable Cortex if it was disengaged |
 | `cortex_disengage` | Disable Cortex hooks for the current session |
 | `cortex_summarize` | Force a session summary/checkpoint |
@@ -321,6 +322,8 @@ cortex evaluate
 cortex evaluate --suite eval/suites/stemming.json --compare eval/baselines/stemming.json
 cortex suggest-notes
 cortex validate-memory --topic "Activity notes portal"
+cortex read-ledger src/db/store.ts src/query/recall.ts
+cortex read-ledger src/db/store.ts --json
 cortex list-memory
 cortex list-memory --kind note:decision --state hot,warm --limit 50
 cortex list-memory --scope "branch:c:/work/cortex/.git:c:/work/cortex:main" --offset 20 --json
@@ -485,6 +488,53 @@ Stored text is printed verbatim except for terminal control characters, which ar
 Both commands are read-only in the sense that matters: neither creates a session, and neither touches access counts, so inspecting memory cannot change the ranking it exists to reveal. `--json` on either emits the same data as a structure; a missing id exits non-zero in both modes and `--json` gets a parseable `{"error":"not_found"}` rather than empty output.
 
 Stored strings are author-supplied, so the renderer treats them as content rather than as its own output: alternatives and subjects are each collapsed onto a single line, and the alternatives payload is capped. Without that, an alternative containing a newline could print what looked like a counterpart line inside the conflict section of a note that has no contest at all.
+
+## The read ledger
+
+Cortex records a content digest for every file an agent reads. `cortex read-ledger` (and the
+`cortex_read_ledger` tool) turns that into an answer to the question worth asking before a
+re-read — *have I already got this, and is it still current?*
+
+```text
+$ cortex read-ledger src/scope/keys.ts src/capture/spool.ts src/db/store.ts docs/gone.md
+src/scope/keys.ts: unchanged-since 2026-08-02 18:48Z
+src/capture/spool.ts: unchanged-since 2026-08-02 18:48Z (read by subagent general-purpose)
+src/db/store.ts: edited-by-you-since 2026-08-02 18:48Z
+docs/gone.md: changed-since 2026-08-01 09:02Z (missing)
+```
+
+There are exactly four verdicts — `unread`, `unchanged-since`, `changed-since`,
+`edited-by-you-since` — and three properties matter more than the list:
+
+**`unchanged` is never inferred.** It is asserted only after re-hashing the file and matching the
+current bytes against the recorded digest. Cortex does not trust mtime, in either direction: a
+same-second edit keeps the old timestamp with different content, and a `git checkout` or a restore
+rewrites the timestamp without changing a byte. Both cases are tested.
+
+**Uncertainty resolves to a miss, never to the convenient answer.** A deleted file is
+`changed-since (missing)`, never `unchanged`. A file that cannot be hashed — unreadable, now a
+directory, or past the 2 MiB digest ceiling — is `changed-since (unverifiable)`, and so is a file
+whose *record* was oversize and therefore carries no hash to compare. Each of those costs one
+re-read. None of them can license a skip that turns out to be wrong.
+
+**"You already have this" is session-bound, even though change detection is not.** A digest
+recorded by a subagent is a perfectly good fact about the file, and it is reported — but attributed
+to whoever actually read it, as in the `read by subagent general-purpose` line above. Cortex will
+not tell you a file is unchanged *since you read it* when you never did. A read by your own session
+or by one of its ancestors is yours; a sibling's or a descendant's is not. A read from an earlier
+session of the same project is reported as `read in an earlier session` rather than being named,
+because every non-subagent session carries the same role label and naming it would say nothing.
+
+`edited-by-you-since` is checked **before** the content comparison, and that order matters more
+than it looks. A digest describes the file as of the moment the capture spool was *flushed*, not
+the moment it was read — so the ordinary sequence of reading a file and then editing it records
+the **post-edit** bytes. The record then matches what is on disk while your context still holds
+the old content. Comparing content first would answer `unchanged` there, which is exactly the
+wrong skip. If your own edit sits between the record and the question, Cortex says so.
+
+The same flush-time window is the one caveat worth stating plainly: a file changed by something
+*outside* Cortex between the read and the flush records the changed bytes and will later read as
+`unchanged`. The window is one flush interval, and nothing in the ledger can close it.
 
 ## Correcting and deleting memory
 

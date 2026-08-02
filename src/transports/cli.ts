@@ -67,6 +67,12 @@ import {
 import { runInstall, type InstallAction, type InstallResult } from '../query/install.js';
 import { validateMemory } from '../query/validate-memory.js';
 import {
+  queryReadLedger,
+  renderReadLedger,
+  resolveOnDiskPath,
+  READ_LEDGER_MAX_PATHS,
+} from '../query/read-ledger.js';
+import {
   listMemory,
   inspectMemory,
   ACCESS_HISTORY_LIMIT,
@@ -1466,6 +1472,46 @@ export function createProgram(): Command {
       refreshCurrentGraphQuietly(store, process.cwd());
       const report = validateMemory(store, opts.topic);
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    });
+
+  program
+    .command('read-ledger')
+    .description('Ask whether files were already read in this scope and whether they changed since (FR-6)')
+    .argument('<paths...>', `File paths to ask about (max ${READ_LEDGER_MAX_PATHS})`)
+    .option('--json', 'Emit the structured verdicts instead of the rendered lines')
+    .action((paths: string[], opts: { json?: boolean }) => {
+      const { store } = openCortexDb(process.cwd());
+      const session = ensureScopedSession(store, process.cwd());
+      // Relative arguments resolve against cwd here — what someone typing a
+      // path in a shell means. The core resolves against the scope root, which
+      // is deterministic but not the shell convention; see `resolveOnDiskPath`.
+      const results = queryReadLedger(store, {
+        paths: paths.map(p => resolveOnDiskPath(p, process.cwd())),
+        sessionId: session.id,
+      });
+      const labeled = results.map((result, index) => ({
+        ...result,
+        path: paths[index] ?? result.path,
+      }));
+
+      if (opts.json) {
+        // The cap must be visible here too. The rendered form names the paths
+        // it dropped; emitting a bare array of 20 for a question about 25 makes
+        // five files indistinguishable from "not asked about" — and the JSON
+        // consumer is precisely the one that cannot see the note, the same rule
+        // `inspect-memory` follows when it prints `{"error":"not_found"}`
+        // rather than nothing.
+        process.stdout.write(`${JSON.stringify({
+          requested: paths.length,
+          answered: labeled.length,
+          ...(paths.length > labeled.length
+            ? { capped: true, cap: READ_LEDGER_MAX_PATHS, dropped: paths.length - labeled.length }
+            : {}),
+          results: labeled,
+        }, null, 2)}\n`);
+        return;
+      }
+      process.stdout.write(`${renderReadLedger(labeled, paths.length)}\n`);
     });
 
   program

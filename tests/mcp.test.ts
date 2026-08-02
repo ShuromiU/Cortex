@@ -33,8 +33,8 @@ function createStore(): { store: CortexStore; sessionId: string } {
 // ── TOOL_DEFINITIONS ──────────────────────────────────────────────────
 
 describe('TOOL_DEFINITIONS', () => {
-  it('defines exactly 11 tools', () => {
-    expect(TOOL_DEFINITIONS).toHaveLength(11);
+  it('defines exactly 12 tools', () => {
+    expect(TOOL_DEFINITIONS).toHaveLength(12);
   });
 
   it('has cortex_route tool', () => {

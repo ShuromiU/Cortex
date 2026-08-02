@@ -27,6 +27,12 @@ import { estimateTokens } from '../query/retrieval.js';
 import { formatMemoryTimestamp } from '../query/render.js';
 import { suggestNotes } from '../query/suggest-notes.js';
 import { validateMemory } from '../query/validate-memory.js';
+import {
+  queryReadLedger,
+  renderReadLedger,
+  resolveOnDiskPath,
+  READ_LEDGER_MAX_PATHS,
+} from '../query/read-ledger.js';
 
 let engagementPath: string | null = null;
 const CORTEX_CONSULTED_KEY = 'cortex_consulted';
@@ -128,6 +134,7 @@ export function renderCortexRoute(): string {
     'Use cortex_state for a broader working set when resuming dense work, and cortex_brief(topic) before delegating with context.',
     'Use cortex_validate_memory(topic) when retrieved notes mention files/plans and you need to check them against the current checkout.',
     'Use cortex_note for durable decisions, blockers, and non-obvious insights; use cortex_disengage to silence capture and reflex.',
+    'Use cortex_read_ledger(paths) before re-reading files, to learn whether you already read them and whether they changed since.',
   ].join('\n');
 }
 
@@ -356,7 +363,36 @@ export const TOOL_DEFINITIONS = [
       required: [],
     },
   },
+  {
+    name: 'cortex_read_ledger',
+    description: 'Ask whether you have already read a file in this scope and whether it has changed since (FR-6). Returns one of exactly four verdicts per file — unread, unchanged-since, changed-since, edited-by-you-since — produced by re-hashing the current bytes, never by trusting mtime. A read recorded by a sibling or descendant session is reported as a change fact but attributed to that agent, never as "you read it".',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: `File paths to ask about (max ${READ_LEDGER_MAX_PATHS}). Relative paths resolve against the current working directory.`,
+        },
+      },
+      required: ['paths'],
+    },
+  },
 ] as const;
+
+/**
+ * `paths` arrives from a model, so it is whatever the model emitted. A bare
+ * string instead of an array is the common shape error and is accepted rather
+ * than rejected — refusing it would return an error where the honest answer is
+ * available. Non-string entries and blanks are dropped: a path that is not a
+ * path cannot be looked up, and coercing `null` to `"null"` would answer
+ * `unread` about a file named "null", which is a wrong answer rather than a
+ * missing one.
+ */
+export function normalizeReadLedgerPaths(raw: unknown): string[] {
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : [];
+  return list.filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
+}
 
 export function handleToolCall(
   store: CortexStore,
@@ -582,6 +618,26 @@ export function handleToolCall(
         markCortexConsulted();
       }
       return JSON.stringify(validateMemory(store, topic), null, 2);
+    }
+
+    case 'cortex_read_ledger': {
+      const session = ensureScopedSession(store, cwd);
+      const requested = normalizeReadLedgerPaths(args['paths']);
+      // Resolved here, against the MCP server's cwd, because that is what a
+      // caller typing a relative path means. The core resolves against the
+      // scope root instead — deterministic, but not what a user meant — so the
+      // transport is where the cwd convention belongs. See `resolveOnDiskPath`.
+      const results = queryReadLedger(store, {
+        paths: requested.map(p => resolveOnDiskPath(p, cwd)),
+        sessionId: session.id,
+      });
+      // Report the paths as asked, not as resolved: an absolute path burns the
+      // per-file token budget on a prefix the caller already knows.
+      const labeled = results.map((result, index) => ({
+        ...result,
+        path: requested[index] ?? result.path,
+      }));
+      return renderReadLedger(labeled, requested.length);
     }
 
     case 'cortex_engage': {

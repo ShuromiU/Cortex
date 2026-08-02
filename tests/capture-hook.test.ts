@@ -3,6 +3,7 @@ import * as childProcess from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { findPosixTool } from './posix-tools.js';
 
 /**
  * Executes the real PostToolUse hook script. Nothing else can: the script is
@@ -12,16 +13,34 @@ import * as path from 'node:path';
 
 const SCRIPT = path.resolve(__dirname, '..', 'hooks', 'claude', 'cortex-capture.sh');
 
+/**
+ * Resolved absolutely, not looked up on `PATH`.
+ *
+ * `execFileSync('bash', …)` inherits the parent's PATH, and Git for Windows
+ * keeps `usr/bin` off it deliberately — so launching vitest from PowerShell
+ * instead of Git Bash made this whole file self-skip, and the shell/jq layer
+ * (the one `tsc` cannot see into) went unverified while the run reported green
+ * with a single skip line. The skip is still honest when bash genuinely is
+ * absent; it just no longer fires on a machine that has bash sitting right
+ * there. See `tests/posix-tools.ts`.
+ */
+const BASH = findPosixTool('bash');
+
 function hasTool(tool: string): boolean {
+  if (BASH === null) {
+    return false;
+  }
   try {
-    childProcess.execFileSync('bash', ['-lc', `command -v ${tool}`], { stdio: 'ignore' });
+    // `-lc` sources the login profile, which is what puts jq on PATH *inside*
+    // bash even when the parent process cannot see it.
+    childProcess.execFileSync(BASH, ['-lc', `command -v ${tool}`], { stdio: 'ignore' });
     return true;
   } catch {
     return false;
   }
 }
 
-const canRun = hasTool('bash') && hasTool('jq');
+const canRun = BASH !== null && hasTool('jq');
 
 // Silent skipping would let the only coverage of the shell change disappear on
 // a machine without jq. Say so loudly instead.
@@ -32,6 +51,51 @@ if (!canRun) {
   );
 }
 
+/**
+ * The resolver is part of the verification surface, so it is asserted rather
+ * than trusted.
+ *
+ * These run unconditionally — outside the `skipIf` — on purpose. A regression
+ * in `findPosixTool` does not make the suite below FAIL, it makes it SKIP, and
+ * a skipped suite reports green. That is the exact shape of the defect this
+ * file exists to catch in production code, so the harness gets the same
+ * treatment.
+ */
+describe('posix tool resolution', () => {
+  it('does not resolve bash to the WSL launcher when Git Bash is present', () => {
+    if (process.platform !== 'win32' || BASH === null) {
+      // Nothing to distinguish on a platform with one real bash.
+      expect(true).toBe(true);
+      return;
+    }
+    // `C:\WINDOWS\system32\bash.exe` is the WSL launcher: a different OS with a
+    // different filesystem view, which cannot see the Windows PATH's jq. It is
+    // what a bare `bash` resolves to on most Windows installs with WSL enabled,
+    // and picking it made this whole file self-skip.
+    expect(BASH.toLowerCase()).not.toContain('system32');
+  });
+
+  it('prefers the Git wrapper over the bare usr/bin binary', () => {
+    if (process.platform !== 'win32' || BASH === null) {
+      expect(true).toBe(true);
+      return;
+    }
+    // `Git/bin/bash.exe` sets up a POSIX PATH before handing over; the bare
+    // `Git/usr/bin/bash.exe` does not, so a hook launched through it finds no
+    // jq, no grep, no date — and exits 0 having written nothing, which is
+    // indistinguishable from AD-12's intended silent degradation.
+    const normalized = BASH.replace(/\\/g, '/').toLowerCase();
+    expect(normalized.endsWith('/git/usr/bin/bash.exe')).toBe(false);
+  });
+
+  it('resolves the tools the index suites spawn', () => {
+    // A missing grep must fail loudly rather than resolving to null and
+    // producing `spawnSync(null)`, whose failure surfaces as `status === null`
+    // rather than as an assertion.
+    expect(findPosixTool('grep')).not.toBeNull();
+  });
+});
+
 function runHook(payload: Record<string, unknown>): {
   cwd: string;
   lines: Array<Record<string, unknown>>;
@@ -41,7 +105,7 @@ function runHook(payload: Record<string, unknown>): {
 
   // Git Bash resolves forward-slashed Windows paths; backslashes it does not.
   const posixCwd = cwd.replace(/\\/g, '/');
-  childProcess.execFileSync('bash', [SCRIPT], {
+  childProcess.execFileSync(BASH as string, [SCRIPT], {
     input: JSON.stringify({ cwd: posixCwd, ...payload }),
     stdio: ['pipe', 'pipe', 'pipe'],
   });

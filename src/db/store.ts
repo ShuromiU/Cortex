@@ -1353,6 +1353,115 @@ export class CortexStore {
       .all(parentId) as SessionRow[];
   }
 
+  /**
+   * The session's own id followed by each ancestor, nearest first (AD-16).
+   *
+   * A read is refund-eligible when the recording session is the requester or an
+   * *ancestor* of it, so this list is exactly the eligibility set — membership
+   * is the whole predicate, which keeps the rule in one place instead of spread
+   * across the caller.
+   *
+   * Walked rather than computed as `parent_session_id ?? id`. Depth is 2 today
+   * by construction (a subagent's parent is the scope's active *primary*, never
+   * another subagent), and the shorthand would be correct for exactly that
+   * shape — which is why it is not used: a future nesting change would silently
+   * start reporting a grandparent's read as someone else's, and the failure
+   * mode of AD-16 is a wrong "you read it". The visited set is not decoration
+   * either: `parent_session_id` carries no CHECK preventing a cycle, and a
+   * cycle here would hang the query surface rather than answer it wrongly.
+   */
+  getSessionAncestorIds(sessionId: string, maxDepth = 32): string[] {
+    const chain: string[] = [];
+    const seen = new Set<string>();
+    const read = this.db.prepare(
+      'SELECT parent_session_id FROM sessions WHERE id = ?',
+    );
+
+    let current: string | null = sessionId;
+    while (current !== null && chain.length < maxDepth) {
+      if (seen.has(current)) {
+        break;
+      }
+      seen.add(current);
+      chain.push(current);
+      const row = read.get(current) as { parent_session_id: string | null } | undefined;
+      // A session id that does not exist still contributes itself — the caller
+      // asked about *that* session, and dropping it would make a digest recorded
+      // by it look like someone else's read.
+      current = row?.parent_session_id ?? null;
+    }
+    return chain;
+  }
+
+  /**
+   * Whether `sessionId` edited or wrote the file behind `filePath` after `after`.
+   *
+   * The evidence behind Story 3.3's `edited-by-you-since`, and the reason it
+   * lives in the store: `events.target` holds the **raw** path the tool
+   * reported, while `content_digests.path` is normalized and scope-root-relative.
+   * Comparing the two directly never matches, and the failure is silent — the
+   * verdict degrades to a bare `changed-since` with nothing to indicate the
+   * join was the problem.
+   *
+   * The SQL `LIKE` is a **prefilter only**, never the decision. It narrows to
+   * events whose raw target ends in the same basename so a session with tens of
+   * thousands of edits does not stream them all into JS; the exact answer is the
+   * key comparison below, which is the same derivation the write used. A
+   * prefilter that over-matches costs nothing; one that under-matches loses the
+   * edit fact silently, degrading `edited-by-you-since` to a bare
+   * `changed-since` with nothing to indicate why.
+   *
+   * **So it is applied only to a pure-ASCII basename.** An earlier version of
+   * this comment claimed the prefilter could not under-match, because the
+   * basename is invariant under every transformation `toScopeRelativeKey`
+   * applies except case, and SQLite's `LIKE` is case-insensitive. That claim was
+   * false and the code inherited the bug: SQLite's `LIKE` folds case for **ASCII
+   * only**, while `normalizeFilePathKey` uses JavaScript `toLowerCase()`, which
+   * folds the full Unicode range on win32 and darwin. Measured — `Unicode-Ü.ts`
+   * normalises to the key `unicode-ü.ts`, the raw event target still holds `Ü`,
+   * `LIKE` matched zero rows, and AC #4 was **unreachable for that file** on
+   * both case-insensitive platforms while `Ascii.ts` passed. Skipping the
+   * prefilter there costs a full scan of one session's edit events and always
+   * returns the right answer; the ASCII path keeps the optimisation.
+   */
+  sessionEditedPathAfter(opts: {
+    sessionId: string;
+    scopeKey: string;
+    path: string;
+    after: string;
+    scopeRoot?: string | null;
+  }): boolean {
+    const root = opts.scopeRoot ?? this.scopeRootFor(opts.scopeKey);
+    const key = toScopeRelativeKey(opts.path, root);
+    const basename = key.slice(key.lastIndexOf('/') + 1);
+    // Only a pure-ASCII basename may be prefiltered — see the note above. The
+    // test is on the KEY's basename, which is the case-folded form, so it is
+    // the same string `LIKE` would have to match.
+    // eslint-disable-next-line no-control-regex
+    const asciiOnly = /^[\u0000-\u007F]*$/.test(basename);
+    // `%` and `_` are LIKE wildcards and a filename may legally contain either;
+    // unescaped, `a_b.ts` would also prefilter `axb.ts` (harmless) but a name
+    // that is *only* wildcards would prefilter everything (slow, still correct).
+    const escaped = basename.replace(/([\\%_])/g, '\\$1');
+
+    const rows = this.db
+      .prepare(
+        `SELECT target
+           FROM events
+          WHERE session_id = ?
+            AND type IN ('edit', 'write')
+            AND timestamp > ?
+            AND target IS NOT NULL
+            AND (:skipPrefilter OR target LIKE :needle ESCAPE '\\')`,
+      )
+      .all(opts.sessionId, opts.after, {
+        skipPrefilter: asciiOnly ? 0 : 1,
+        needle: `%${escaped}`,
+      }) as { target: string }[];
+
+    return rows.some(row => toScopeRelativeKey(row.target, root) === key);
+  }
+
   getSessionCount(): number {
     const row = this.db
       .prepare('SELECT COUNT(*) as count FROM sessions')
@@ -3126,6 +3235,24 @@ export class CortexStore {
    */
   private readonly scopeRootCache = new Map<string, string | null>();
 
+  /**
+   * Public because a caller that must resolve an on-disk path for a scope has
+   * to use the SAME root the key derivation uses.
+   *
+   * The read ledger resolves a relative input against the scope root in order
+   * to hash it, while `getContentDigest` derives the lookup key against this
+   * one. Taking the requesting session's own `worktree_path` for the first and
+   * leaving the store to resolve the second is two roots for one query — the
+   * shape Story 3.2 was bitten by, and the shape `recordReadDigest` carries
+   * three lines of comment to avoid. Content-derived comparison happens to
+   * absorb the divergence today (hashing the wrong file can only produce a
+   * *content* mismatch, never a false `unchanged`), which is exactly why it
+   * would sit undetected until a path-identity check is added.
+   */
+  resolveScopeRoot(scopeKey: string): string | null {
+    return this.scopeRootFor(scopeKey);
+  }
+
   private scopeRootFor(scopeKey: string): string | null {
     const cached = this.scopeRootCache.get(scopeKey);
     if (cached !== undefined && cached !== null) {
@@ -3163,6 +3290,22 @@ export class CortexStore {
     const scopeRoot = opts.scopeRoot ?? this.scopeRootFor(opts.scopeKey);
     const key = toScopeRelativeKey(opts.path, scopeRoot);
 
+    // **The ancestor-retention rule is conditional on the CONTENT being the
+    // same, and that condition is load-bearing.** Retaining an ancestor's
+    // `session_id` exists so a descendant's re-read does not erase the fact
+    // that the ancestor read the file (AD-16). Unconditionally, it retained the
+    // ancestor's *identity* while overwriting the ancestor's *snapshot* — so
+    // `session_id` stopped meaning "the session that produced these bytes".
+    // Measured: parent reads X, the file becomes Y, the parent's own subagent
+    // reads Y. The row kept `session_id = parent` and `sha256 = Y`, so the
+    // parent was told `unchanged-since`, refund-eligible and **unattributed**,
+    // about content it had never seen — AD-16's "says you read it when you
+    // didn't" and AD-6's "asserts unchanged without the evidence" at once, at
+    // the only nesting depth that exists today. When the content matches, the
+    // retained identity is still true of these bytes and the rule is correct.
+    // `IS` rather than `=` so two oversize rows (both `sha256` NULL) compare
+    // equal instead of yielding NULL and silently taking the ELSE branch.
+    //
     // RETURNING rather than a follow-up SELECT: the read-back was a second
     // statement compiled and executed per read entry, inside the flush's write
     // transaction, and every caller either ignores it or wants exactly this row.
@@ -3178,9 +3321,11 @@ export class CortexStore {
            byte_size = excluded.byte_size,
            mtime = excluded.mtime,
            session_id = CASE WHEN content_digests.session_id = :parent
+                                  AND excluded.sha256 IS content_digests.sha256
                              THEN content_digests.session_id
                              ELSE excluded.session_id END,
            agent_id   = CASE WHEN content_digests.session_id = :parent
+                                  AND excluded.sha256 IS content_digests.sha256
                              THEN content_digests.agent_id
                              ELSE excluded.agent_id END,
            oversize = excluded.oversize,

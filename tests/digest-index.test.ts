@@ -26,12 +26,20 @@ import { appendSpoolEntry, flushSpool } from '../src/capture/spool.js';
 import { IGNORE_ENTRIES } from '../src/query/install.js';
 import { isAbsoluteFileKey, normalizeFilePathKey, toScopeRelativeKey } from '../src/scope/keys.js';
 import { runGc } from '../src/db/gc.js';
+import { requirePosixTool } from './posix-tools.js';
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
 function tempRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-index-'));
 }
+
+// Absolute paths, never bare names: `spawnSync` inherits PATH, and Git for
+// Windows keeps its POSIX tools off it. See `tests/posix-tools.ts` — run from
+// PowerShell rather than Git Bash, every grep assertion below failed with a
+// spawn error instead of an assertion.
+const GREP = requirePosixTool('grep');
+const CUT = requirePosixTool('cut');
 
 function createStore(root: string): {
   store: CortexStore;
@@ -195,7 +203,7 @@ describe('digest index: the hot path can read it with grep (AC #2)', () => {
 
     // A REAL grep subprocess. Reimplementing the search in JS would prove the
     // format is parseable by JavaScript, which is not the claim AD-3 makes.
-    const grep = spawnSync('grep', ['-F', '\tsrc/db/store.ts\t', DIGEST_INDEX_FILENAME], {
+    const grep = spawnSync(GREP, ['-F', '\tsrc/db/store.ts\t', DIGEST_INDEX_FILENAME], {
       cwd: root,
       encoding: 'utf8',
     });
@@ -215,7 +223,10 @@ describe('digest index: the hot path can read it with grep (AC #2)', () => {
     seedRead(store, sessionId, root, 'only.ts', 'body');
     writeDigestIndex(store, root);
 
-    const cut = spawnSync('sh', ['-c', `grep -F '\tonly.ts\t' ${DIGEST_INDEX_FILENAME} | cut -f3`], {
+    const cut = spawnSync(requirePosixTool('sh'), [
+      '-c',
+      `"${GREP}" -F '\tonly.ts\t' ${DIGEST_INDEX_FILENAME} | "${CUT}" -f3`,
+    ], {
       cwd: root,
       encoding: 'utf8',
     });
@@ -724,7 +735,7 @@ describe('digest index: the lookup contract (AC #2)', () => {
 
   function grepCount(root: string, needle: string, fixedString = true): number {
     const args = fixedString ? ['-cF', needle] : ['-c', needle];
-    const res = spawnSync('grep', [...args, DIGEST_INDEX_FILENAME], {
+    const res = spawnSync(GREP, [...args, DIGEST_INDEX_FILENAME], {
       cwd: root,
       encoding: 'utf8',
     });
@@ -1045,7 +1056,7 @@ describe('digest index: lookup cost (AC #5)', () => {
     fs.writeFileSync(indexPath, `${rows.join('\n')}\n${collectIndexRecords(store, root).map(formatIndexLine).join('\n')}\n`);
 
     const started = Date.now();
-    const grep = spawnSync('grep', ['-F', '\tneedle.ts\t', DIGEST_INDEX_FILENAME], {
+    const grep = spawnSync(GREP, ['-F', '\tneedle.ts\t', DIGEST_INDEX_FILENAME], {
       cwd: root,
       encoding: 'utf8',
     });
