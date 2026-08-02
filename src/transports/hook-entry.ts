@@ -16,6 +16,7 @@ import {
 import { maybeCheckpointWal, UnopenableStoreError } from '../db/schema.js';
 import { reflectMemory, type ReflexEvent } from '../query/reflex.js';
 import { suggestNotes } from '../query/suggest-notes.js';
+import { estimateTokens } from '../query/retrieval.js';
 import { flushSpool } from '../capture/spool.js';
 import { writeDigestIndex } from '../capture/digest-index.js';
 import { ensureScopedSession, type ScopeSessionOptions } from '../scope/runtime.js';
@@ -152,6 +153,34 @@ function incrementConsultGateCount(engagement: Record<string, string>): void {
 }
 
 /**
+ * Book what a hook surface injected (AC #1).
+ *
+ * Guarded end to end: AD-12 binds every hook edge to silence, so accounting
+ * must never turn an injection into a broken hook. A missing session simply
+ * books nothing — there is no session to attribute it to, and inventing one
+ * from a hook path is worse than an unbooked row.
+ */
+function bookHookInjection(store: CortexStore, type: string, text: string): void {
+  if (text.length === 0) {
+    return;
+  }
+  try {
+    const session = store.getCurrentSession();
+    if (!session) {
+      return;
+    }
+    store.insertLedgerEntry({
+      sessionId: session.id,
+      type,
+      direction: 'injected',
+      tokens: estimateTokens(text),
+    });
+  } catch {
+    // Never breaks a hook.
+  }
+}
+
+/**
  * One-line, once-per-session hint. The SessionStart brief and the reflex are
  * the real memory channels; this only catches sessions where the brief was
  * empty but the prompt looks memory-relevant.
@@ -186,6 +215,11 @@ function renderConsultGate(
 
   writeEngagement(CONSULT_GATE_FIRED_KEY, 'true');
   incrementConsultGateCount(engagement);
+  // AC #1: this injects into the agent's context, so it books what it cost.
+  // `hook-entry` contained no ledger write at all — two surfaces that push
+  // text unprompted were invisible to the P&L that judges whether Cortex is
+  // worth its tokens, which is exactly the surface a cost figure must not miss.
+  bookHookInjection(store, 'consult_gate', CONSULT_GATE_CONTEXT);
   return toHookJson(hookEventName, CONSULT_GATE_CONTEXT);
 }
 
@@ -416,6 +450,7 @@ function endOfTurn(
     'Write the load-bearing ones with cortex_note(kind, content); if none apply, reply DONE.',
   ].join('\n');
 
+  bookHookInjection(store, 'stop_nudge', reason);
   return JSON.stringify({ decision: 'block', reason });
 }
 

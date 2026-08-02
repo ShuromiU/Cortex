@@ -9,6 +9,9 @@ import { handleReadEvent } from '../src/capture/hooks.js';
 import { queryReadLedger } from '../src/query/read-ledger.js';
 import { appendSpoolEntry, flushSpool } from '../src/capture/spool.js';
 import { handleToolCall } from '../src/transports/mcp.js';
+import { createProgram } from '../src/transports/cli.js';
+import { openProjectStore, clearProjectStoreCache } from '../src/scope/store-migration.js';
+import { ensureScopedSession } from '../src/scope/runtime.js';
 import { estimateTokens } from '../src/query/retrieval.js';
 
 /**
@@ -721,6 +724,69 @@ describe('token ledger: unrealized savings (AC #6)', () => {
     expect(openOffers(fx)).toBe(0);
   });
 
+  it('consuming an offer and booking the decline is ONE transaction', () => {
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/a.ts', 'x'.repeat(4000));
+    handleReadEvent(fx.store, fx.sessionId, { file });
+    queryReadLedger(fx.store, { paths: [file], sessionId: fx.sessionId, recordOffers: true });
+    expect(openOffers(fx)).toBe(1);
+
+    // As two operations, a failure between them destroyed the offer and
+    // recorded nothing — measured, "offer consumed but nothing booked: true".
+    // Unrecoverable, because the offer is gone. Moving offers out of
+    // `token_ledger` fixed AD-8's append-only violation and did NOT fix this;
+    // they are separate defects and the first was reported as covering both.
+    const real = fx.store.insertLedgerEntry.bind(fx.store);
+    (fx.store as unknown as { insertLedgerEntry: typeof real }).insertLedgerEntry = () => {
+      throw new Error('booking failed');
+    };
+    handleReadEvent(fx.store, fx.sessionId, { file });
+    (fx.store as unknown as { insertLedgerEntry: typeof real }).insertLedgerEntry = real;
+
+    // The offer survives, so the decline can still be recorded later. Losing it
+    // silently is the outcome AC #6 cannot tolerate.
+    expect(openOffers(fx)).toBe(1);
+    expect(ledgerRows(fx).filter(r => r.direction === 'unrealized')).toHaveLength(0);
+  });
+
+  it('will not consume a FUTURE-dated offer', () => {
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/a.ts', 'x'.repeat(4000));
+    handleReadEvent(fx.store, fx.sessionId, { file });
+    queryReadLedger(fx.store, { paths: [file], sessionId: fx.sessionId, recordOffers: true });
+    // A clock jump, or a store carried between machines. Only the lower bound
+    // was checked, so such an offer stayed consumable indefinitely.
+    (fx.store as unknown as { db: Database.Database }).db
+      .prepare('UPDATE read_offers SET offered_at = ?')
+      .run('2099-01-01T00:00:00.000Z');
+
+    handleReadEvent(fx.store, fx.sessionId, { file });
+    expect(ledgerRows(fx).filter(r => r.direction === 'unrealized')).toHaveLength(0);
+  });
+
+  it('reports all four directions in the per-type breakdown', () => {
+    const fx = createFixture();
+    fx.store.insertLedgerEntry({
+      sessionId: fx.sessionId, type: 'recall', direction: 'injected', tokens: 300,
+    });
+    fx.store.insertLedgerEntry({
+      sessionId: fx.sessionId, type: 'substitution:read', direction: 'saved', tokens: 25,
+      evidence: { kind: 'read', ref: 'a.ts', size: 100 },
+    });
+    fx.store.insertLedgerEntry({
+      sessionId: fx.sessionId, type: 'unrealized:read', direction: 'unrealized', tokens: 25,
+      evidence: { kind: 'read', ref: 'b.ts', size: 100 },
+    });
+    // `byType` carried only spent/saved, so unrealized and estimated rows fell
+    // out of it entirely — a consumer would under-report with no sign that rows
+    // were missing.
+    const stats = fx.store.getLedgerStats();
+    expect(stats.byType['recall']?.spent).toBe(300);
+    expect(stats.byType['substitution:read']?.saved).toBe(25);
+    expect(stats.byType['unrealized:read']?.unrealized).toBe(25);
+    expect(stats.unrealized).toBe(25);
+  });
+
   it('books nothing when no offer was made', () => {
     const fx = createFixture();
     const file = writeFile(fx, 'src/a.ts', 'x'.repeat(4000));
@@ -744,6 +810,68 @@ describe('token ledger: unrealized savings (AC #6)', () => {
     // A loop reading the same file ten times would otherwise book ten declines
     // from one offer, inflating the exact figure this exists to keep honest.
     expect(ledgerRows(fx).filter(r => r.direction === 'unrealized')).toHaveLength(1);
+  });
+
+  it('the CLI surface records offers and books its own output, like MCP', () => {
+    // An agent reaches the ledger by shelling out to the CLI as readily as
+    // through MCP. The CLI recorded neither the offer nor what it injected, so
+    // the same question answered two ways produced different accounting —
+    // which is how a metric stops being trustworthy.
+    //
+    // Run against the store the CLI itself resolves (hermetic: `CORTEX_HOME`
+    // is a temp dir for the whole suite), then reopen it and assert. Driving
+    // the command and asserting nothing would be the vacuous test this file
+    // has already had to correct twice.
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-cli-ledger-')));
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    const rel = 'src/a.ts';
+    fs.writeFileSync(path.join(root, rel), 'x'.repeat(4000));
+
+    const cwd = process.cwd();
+    const stdout: string[] = [];
+    const write = process.stdout.write.bind(process.stdout);
+    try {
+      process.chdir(root);
+      clearProjectStoreCache();
+      // Seed the read through the same store the CLI will open.
+      const seed = openProjectStore(root);
+      const seedStore = new CortexStore(seed.db);
+      const session = ensureScopedSession(seedStore, root);
+      handleReadEvent(seedStore, session.id, { file: path.join(root, rel) });
+      seed.db.close();
+      clearProjectStoreCache();
+
+      (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+        stdout.push(s);
+        return true;
+      };
+      const program = createProgram();
+      program.exitOverride();
+      program.parse(['read-ledger', rel], { from: 'user' });
+    } finally {
+      (process.stdout as unknown as { write: typeof write }).write = write;
+      process.chdir(cwd);
+      clearProjectStoreCache();
+    }
+
+    expect(stdout.join('')).toContain('unchanged-since');
+
+    const check = openProjectStore(root);
+    const store = new CortexStore(check.db);
+    const offers = (
+      check.db.prepare('SELECT COUNT(*) AS n FROM read_offers').get() as { n: number }
+    ).n;
+    const injected = (
+      check.db
+        .prepare("SELECT COUNT(*) AS n FROM token_ledger WHERE type = 'read_ledger' AND direction = 'injected'")
+        .get() as { n: number }
+    ).n;
+    check.db.close();
+    clearProjectStoreCache();
+
+    expect(offers).toBe(1);
+    expect(injected).toBe(1);
+    void store;
   });
 
   it('does NOT record offers for Cortex probing itself', () => {

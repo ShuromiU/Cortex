@@ -958,6 +958,23 @@ function migrateTokenLedger(db: Database.Database): void {
   ensureColumn(db, 'token_ledger', 'evidence_ref', 'evidence_ref TEXT');
   ensureColumn(db, 'token_ledger', 'evidence_size', 'evidence_size INTEGER');
 
+  // Short-circuit before opening a write transaction. This runs on EVERY store
+  // open — every CLI command and every hook fire — and unconditionally took the
+  // write lock for two UPDATEs that match nothing once the migration has run:
+  // measured 0.2 ms at 0 rows but 8.1 ms at 100k, paid forever. One indexed-free
+  // COUNT over the three legacy shapes is cheap and read-only.
+  const pending = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM token_ledger
+        WHERE direction = 'spent'
+           OR type = 'offer:read'
+           OR (direction = 'saved' AND evidence_kind IS NULL)`,
+    )
+    .get() as { n: number };
+  if (pending.n === 0) {
+    return;
+  }
+
   db.transaction(() => {
     // Order matters: reclassify the evidence-free credit FIRST, then rename the
     // cost side. Renaming first is harmless here, but doing the credit pass on

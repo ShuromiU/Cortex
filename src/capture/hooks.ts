@@ -203,16 +203,24 @@ function bookUnrealizedIfOffered(
   if (!scopeKey) {
     return;
   }
-  const offer = store.consumeReadOffer(sessionId, scopeKey, filePath);
-  if (!offer) {
-    return;
-  }
-  store.insertLedgerEntry({
-    sessionId,
-    type: 'unrealized:read',
-    direction: 'unrealized',
-    tokens: offer.tokens,
-    evidence: { kind: 'read', ref: offer.path, size: offer.byteSize },
+  // **Consume and book in ONE transaction.** As two operations, a failure
+  // between them destroyed the offer and recorded nothing — measured, "offer
+  // consumed but nothing booked: true" — silently losing the exact fact AC #6
+  // exists to capture, and unrecoverably, because the offer is gone. Moving
+  // offers out of `token_ledger` fixed AD-8's append-only violation; it did not
+  // make the pair atomic, and those are separate defects.
+  store.runInTransaction(() => {
+    const offer = store.consumeReadOffer(sessionId, scopeKey, filePath);
+    if (!offer) {
+      return;
+    }
+    store.insertLedgerEntry({
+      sessionId,
+      type: 'unrealized:read',
+      direction: 'unrealized',
+      tokens: offer.tokens,
+      evidence: { kind: 'read', ref: offer.path, size: offer.byteSize },
+    });
   });
 }
 

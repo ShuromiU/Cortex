@@ -493,6 +493,13 @@ export interface InsertLedgerOpts {
   id?: string;
 }
 
+export interface LedgerTypeTotals {
+  spent: number;
+  saved: number;
+  unrealized: number;
+  estimated: number;
+}
+
 const LEDGER_DIRECTIONS: ReadonlySet<string> = new Set([
   'injected',
   'saved',
@@ -3120,7 +3127,13 @@ export class CortexStore {
     withinMs = 60 * 60 * 1000,
   ): { path: string; byteSize: number; tokens: number } | null {
     const key = toScopeRelativeKey(filePath, this.scopeRootFor(scopeKey));
-    const since = new Date(Date.now() - withinMs).toISOString();
+    const now = Date.now();
+    const since = new Date(now - withinMs).toISOString();
+    // Bounded at BOTH ends. A future-dated offer — a clock jump, or a store
+    // carried between machines — was consumable indefinitely, because only the
+    // lower bound was checked. A small skew allowance keeps an offer written
+    // milliseconds ago from failing its own upper bound.
+    const until = new Date(now + 60 * 1000).toISOString();
     const ancestry = this.getSessionAncestorIds(sessionId);
     const placeholders = ancestry.map(() => '?').join(', ');
 
@@ -3130,11 +3143,12 @@ export class CortexStore {
           `SELECT session_id, path, byte_size, tokens
              FROM read_offers
             WHERE session_id IN (${placeholders})
-              AND scope_key = ? AND path = ? AND offered_at >= ?
+              AND scope_key = ? AND path = ?
+              AND offered_at >= ? AND offered_at <= ?
             ORDER BY offered_at DESC
             LIMIT 1`,
         )
-        .get(...ancestry, scopeKey, key, since) as
+        .get(...ancestry, scopeKey, key, since, until) as
         | { session_id: string; path: string; byte_size: number; tokens: number }
         | undefined;
       if (!row) {
@@ -3192,7 +3206,20 @@ export class CortexStore {
     };
   }
 
-  getLedgerStats(): { spent: number; saved: number; byType: Record<string, { spent: number; saved: number }> } {
+  /**
+   * Totals plus a per-type breakdown.
+   *
+   * `byType` carries all four directions. It carried only `spent`/`saved`, so
+   * `unrealized` and `estimated` rows fell out of it entirely — a consumer
+   * would have under-reported without any indication that rows were missing.
+   */
+  getLedgerStats(): {
+    spent: number;
+    saved: number;
+    unrealized: number;
+    estimated: number;
+    byType: Record<string, LedgerTypeTotals>;
+  } {
     const totals = this.getTotalTokens();
     const rows = this.db
       .prepare(
@@ -3202,15 +3229,19 @@ export class CortexStore {
       )
       .all() as { type: string; direction: string; total: number }[];
 
-    const byType: Record<string, { spent: number; saved: number }> = {};
+    const byType: Record<string, LedgerTypeTotals> = {};
     for (const row of rows) {
       if (!byType[row.type]) {
-        byType[row.type] = { spent: 0, saved: 0 };
+        byType[row.type] = { spent: 0, saved: 0, unrealized: 0, estimated: 0 };
       }
       if (row.direction === 'injected') {
         byType[row.type]!.spent = row.total;
       } else if (row.direction === 'saved') {
         byType[row.type]!.saved = row.total;
+      } else if (row.direction === 'unrealized') {
+        byType[row.type]!.unrealized = row.total;
+      } else if (row.direction === 'estimated') {
+        byType[row.type]!.estimated = row.total;
       }
     }
 

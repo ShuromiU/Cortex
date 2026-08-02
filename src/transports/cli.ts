@@ -1521,6 +1521,12 @@ export function createProgram(): Command {
       const results = queryReadLedger(store, {
         paths: paths.map(p => resolveOnDiskPath(p, process.cwd())),
         sessionId: session.id,
+        // Parity with the MCP tool. An agent can reach the ledger by shelling
+        // out to the CLI just as easily as through MCP, and the two surfaces
+        // answering the same question with different accounting is how a metric
+        // becomes untrustworthy — the CLI recorded neither the offer nor what
+        // it injected.
+        recordOffers: true,
       });
       const labeled = results.map((result, index) => ({
         ...result,
@@ -1544,7 +1550,18 @@ export function createProgram(): Command {
         }, null, 2)}\n`);
         return;
       }
-      process.stdout.write(`${renderReadLedger(labeled, paths.length)}\n`);
+      const rendered = renderReadLedger(labeled, paths.length);
+      try {
+        store.insertLedgerEntry({
+          sessionId: session.id,
+          type: 'read_ledger',
+          direction: 'injected',
+          tokens: estimateTokens(rendered),
+        });
+      } catch {
+        // Accounting never breaks the answer.
+      }
+      process.stdout.write(`${rendered}\n`);
     });
 
   program

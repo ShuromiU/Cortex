@@ -101,6 +101,42 @@ describe('gc', () => {
     ]);
   });
 
+  it('prunes read offers nobody acted on', () => {
+    const { db, store } = createDb();
+    const session = store.createSession({ scopeType: 'project', scopeKey: 'project:/gc/root' });
+    // The SUCCESS case — an offer the agent adopted — is never consumed and so
+    // never deleted. Keyed by (session, scope, path), it grows with distinct
+    // files × sessions forever, and nothing in `src/` deletes a session so the
+    // FK cascade never fires either. `pruneExpiredReadOffers` shipped with
+    // exactly one caller: a test.
+    for (const name of ['a', 'b', 'c']) {
+      store.upsertReadOffer({
+        sessionId: session.id,
+        scopeKey: 'project:/gc/root',
+        path: `src/${name}.ts`,
+        byteSize: 400,
+        tokens: 100,
+      });
+    }
+    db.prepare('UPDATE read_offers SET offered_at = ?').run(isoDaysAgo(20));
+    const fresh = store.createSession({ scopeType: 'project', scopeKey: 'project:/gc/root' });
+    store.upsertReadOffer({
+      sessionId: fresh.id, scopeKey: 'project:/gc/root', path: 'src/new.ts',
+      byteSize: 400, tokens: 100,
+    });
+
+    const dry = runGc(db, { dryRun: true, vacuum: 'never' });
+    expect(dry.read_offers.candidates).toBe(3);
+    expect(dry.read_offers.deleted).toBe(0);
+
+    const report = runGc(db, { dryRun: false, vacuum: 'never' });
+    expect(report.read_offers.deleted).toBe(3);
+    // The fresh offer survives: it can still be declined.
+    expect(
+      (db.prepare('SELECT COUNT(*) AS n FROM read_offers').get() as { n: number }).n,
+    ).toBe(1);
+  });
+
   it('keeps avoided-read and avoided-command credit in separate rollups', () => {
     const { db, store } = createDb();
     const session = store.createSession({ scopeType: 'project', scopeKey: 'project:/gc/root' });
