@@ -79,6 +79,15 @@ export const IGNORE_ENTRIES = [
   '.cortex.spool.jsonl.processing',
   '.cortex.state',
   '.cortex.agent-used',
+  // The flat digest index (AD-3). In the project root for the same reason the
+  // spool is: the hot path resolves it in pure bash from $CWD and cannot hash a
+  // store path per tool call. Derived and regenerable, so it is ignored rather
+  // than committed.
+  '.cortex.index',
+  // Its atomic-write temp file, for the same reason `.cortex.spool.jsonl.processing`
+  // is listed beside the spool: a failed rename whose cleanup also fails would
+  // otherwise leave an untracked file in the user's checkout.
+  '.cortex.index.tmp-*',
 ] as const;
 
 // ── Hook script rendering and modification detection ──────────────────

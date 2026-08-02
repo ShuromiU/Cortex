@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import Database from 'better-sqlite3';
-import { deriveProjectScopeKey } from '../scope/keys.js';
+import { deriveProjectScopeKey, isAbsoluteFileKey, toScopeRelativeKey } from '../scope/keys.js';
 import {
   buildCommandMemoryText as buildCommandMemoryTextValue,
   buildNoteMemoryText,
@@ -335,26 +335,30 @@ CREATE TABLE IF NOT EXISTS memory_corrections (
 -- reconstruct after the fact.
 -- WITHOUT ROWID, and (scope_key, path) is the real PRIMARY KEY rather than a
 -- surrogate id. Both are footprint decisions forced by AC #5's 400 byte/file
--- ceiling, and both were measured rather than estimated: a UUID id plus a
--- separate unique index cost 639 bytes/file, which FAILS the AC. Dropping the
--- surrogate and folding the row into the stated key gives 376.8 bytes/file for
--- a 130-char absolute Windows path and 278.5 for a typical repo-relative one.
+-- ceiling, and every number here was measured, never estimated. Cost is a
+-- page-granularity STEP function of the WHOLE row (scope_key + path + sha256 +
+-- mtime + agent_id), not a linear function of path length — interpolating two
+-- points overstates the headroom, which is how an earlier version of this
+-- comment claimed a cliff 28 characters further out than it is.
 --
--- AC #5 is met for typical content and BREACHED AT THE TAIL, which is recorded
--- here rather than rounded off. Cost is a page-granularity STEP function of the
--- whole row (scope_key + path + sha256 + mtime + agent_id), not a linear
--- function of path length. Measured with this branch's real 74-char scope key:
+-- A UUID id plus a separate unique index cost 639 b/file, a failing AC.
+-- Dropping the surrogate and folding the row into the stated key fixed that,
+-- but Story 3.1 still shipped keys ABSOLUTE and breached at 417.8 for this
+-- repo's longest real path (135 ch) with the real 74-char branch scope key.
+-- Story 3.2 stores the path RELATIVE to the scope root — the repo prefix is
+-- exactly what is redundant with scope_key. Measured after, COUNT=500:
 --
---   path 44 (this repo's median read) 303.1   PASS
---   path 122 (p90)                    376.8   PASS
---   path 135 (max)                    417.8   FAIL
---   path 145 (repo-b's max)        417.8   FAIL
+--   absLen                         no agent_id     with agent_id (17 ch)
+--   44  (this repo's median read)   278.5 PASS       303.1 PASS
+--   122 (p90)                       376.8 PASS       376.8 PASS
+--   135 (this repo's max)           376.8 PASS       417.8 FAIL
+--   145 (repo-b's max)           376.8 PASS       417.8 FAIL
+--   first breach                    152              135
 --
--- So the ceiling holds through the 90th percentile of real reads and fails on
--- the longest ones, and fails earlier when agent_id is populated or the branch
--- name is long. The fix is to store the path RELATIVE to the scope root — the
--- repo prefix is exactly what is redundant with scope_key — which Story 3.2
--- should adopt when it defines the flat index format, per AD-3.
+-- Stated plainly: the ceiling now holds for every real path in this repository
+-- and in repo-b on a PRIMARY-session read, and is still breached for a
+-- SUBAGENT read of the longest paths, because agent_id shares the same row
+-- budget. Reducing it further means shortening scope_key, a scope-layer change.
 --
 -- The architecture already specified the key ("Digests keyed by (scope_key,
 -- path)"), so this makes the storage match the stated key instead of adding one.
@@ -933,8 +937,103 @@ function migrateV1ToV2(db: Database.Database, rootPath: string): void {
   setMetaValue(db, 'migrated_to_v2_at', new Date().toISOString());
 }
 
+/**
+ * Story 3.2 changed `content_digests.path` from an absolute key to one relative
+ * to the scope root. Rows written by 3.1 are keyed absolute, and without this
+ * every one of them becomes unreachable — the ledger would report "unread" for
+ * files that were read, silently, with the rows still sitting in the table.
+ *
+ * The mapping is mechanical: `sessions.worktree_path` records each scope's root.
+ * Rows whose file lives outside their scope root, and rows whose scope has no
+ * session recording a root, keep their absolute key — which is the same thing
+ * `toScopeRelativeKey` does for them going forward.
+ *
+ * Idempotent: a key that is already relative does not start with a root, so the
+ * conversion is a no-op on a second run. Collisions are possible in principle
+ * (an absolute and a relative row for one file), so the update is written as
+ * INSERT OR REPLACE semantics via a delete-then-insert of the losing row.
+ */
+function migrateContentDigestPaths(db: Database.Database): void {
+  if (!tableExists(db, 'content_digests')) {
+    return;
+  }
+
+  // Must match `CortexStore.scopeRootFor` exactly: newest session wins. A bare
+  // `GROUP BY scope_key` lets SQLite return an arbitrary row, and measured on a
+  // scope with two worktrees it picked the OLDER one while the runtime picked
+  // the newest — so the migration rewrote keys relative to a root that no read
+  // or write would ever use, orphaning precisely the rows it exists to repair.
+  const roots = db
+    .prepare(
+      `SELECT s.scope_key AS scope_key, s.worktree_path AS worktree_path
+         FROM sessions s
+         JOIN (
+           SELECT scope_key, MAX(started_at) AS newest
+             FROM sessions
+            WHERE scope_key IS NOT NULL AND worktree_path IS NOT NULL
+            GROUP BY scope_key
+         ) newest_per_scope
+           ON newest_per_scope.scope_key = s.scope_key
+          AND newest_per_scope.newest = s.started_at
+        WHERE s.worktree_path IS NOT NULL
+        GROUP BY s.scope_key`,
+    )
+    .all() as { scope_key: string; worktree_path: string }[];
+  if (roots.length === 0) {
+    return;
+  }
+
+  const rootByScope = new Map(roots.map(r => [r.scope_key, r.worktree_path]));
+  const rows = db
+    .prepare('SELECT scope_key, path FROM content_digests')
+    .all() as { scope_key: string; path: string }[];
+
+  const update = db.prepare(
+    'UPDATE content_digests SET path = ? WHERE scope_key = ? AND path = ?',
+  );
+  const dropLegacy = db.prepare(
+    'DELETE FROM content_digests WHERE scope_key = ? AND path = ?',
+  );
+  const exists = db.prepare(
+    'SELECT 1 FROM content_digests WHERE scope_key = ? AND path = ?',
+  );
+  db.transaction(() => {
+    for (const row of rows) {
+      // Only absolute keys are 3.1 rows needing conversion. Belt-and-braces
+      // beside `toScopeRelativeKey`'s own guard: a relative key must never be
+      // re-resolved, or it is anchored to whatever cwd this process has.
+      if (!isAbsoluteFileKey(row.path)) {
+        continue;
+      }
+      const root = rootByScope.get(row.scope_key);
+      if (!root) {
+        continue;
+      }
+      const next = toScopeRelativeKey(row.path, root);
+      if (next === row.path) {
+        continue;
+      }
+      // Collision: a current relative row already exists for this file. It was
+      // written by the current code and is newer than the legacy absolute row
+      // by construction, so the legacy row is dropped rather than promoted.
+      //
+      // `UPDATE OR REPLACE` did the opposite: SQLite's REPLACE deletes the
+      // *pre-existing conflicting* row, so the 2020 legacy digest survived and
+      // a 2026 row lost its sha256, byte size and 42 accumulated reads —
+      // measured. Silent memory corruption inside the function whose whole job
+      // is to prevent silent orphaning.
+      if (exists.get(row.scope_key, next)) {
+        dropLegacy.run(row.scope_key, row.path);
+        continue;
+      }
+      update.run(next, row.scope_key, row.path);
+    }
+  })();
+}
+
 function backfillV2Artifacts(db: Database.Database, rootPath: string): void {
   backfillSessionScopes(db, rootPath);
+  migrateContentDigestPaths(db);
   backfillCommandRuns(db);
   backfillEpisodes(db);
   backfillProjectSnapshots(db, rootPath);

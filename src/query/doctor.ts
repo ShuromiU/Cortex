@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { deriveSpoolPath } from '../capture/spool.js';
+import { DIGEST_INDEX_FILENAME, parseIndexLine } from '../capture/digest-index.js';
 import {
   SCHEMA_VERSION,
   getMetaValue,
@@ -1271,6 +1272,66 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
       label: 'Capture spool',
       status: 'pass',
       detail: `${spoolSize} bytes pending, written ${Math.round(spoolAgeMs / 1000)}s ago`,
+    });
+  }
+
+  // ── Digest index (AD-3) ─────────────────────────────────────────────
+  //
+  // Story 3.2 asked whether a stale or unreadable index deserves a check, and
+  // the answer is yes — but only a REPORTING one. The index is derived and
+  // self-healing (rebuilt when absent, empty or unparseable on the next cold
+  // path), so its absence is never a failure. What is worth surfacing is that
+  // three of its failure modes are silent by design: a write that could not
+  // rename, a project root that matched no scope, and a prune that outran the
+  // rebuild. Without a surface here they are invisible, which is a departure
+  // from this command's standard that every non-passing check names a fix.
+  //
+  // It reads only. A diagnostic must not repair what it is checking — the rule
+  // that keeps `openDatabaseReadOnly` in this file — so it never rebuilds.
+  const indexPath = path.join(projectDir, DIGEST_INDEX_FILENAME);
+  // Every read of a user-controlled path is guarded: `.cortex.state` as a
+  // directory once threw EISDIR out of `runDoctor` and took the whole report
+  // with it.
+  let indexStat = { present: false, size: 0, lines: 0, parses: false };
+  try {
+    const stat = fs.statSync(indexPath);
+    const head = stat.isFile() && stat.size > 0 ? fs.readFileSync(indexPath, 'utf8') : '';
+    const newline = head.indexOf('\n');
+    const firstLine = newline === -1 ? head : head.slice(0, newline);
+    indexStat = {
+      present: stat.isFile(),
+      size: stat.isFile() ? stat.size : 0,
+      lines: head.length === 0 ? 0 : head.split('\n').filter(Boolean).length,
+      parses: firstLine.length > 0 && parseIndexLine(firstLine) !== null,
+    };
+  } catch {
+    // Absent or unreadable. Both report as "not written yet", which is true
+    // enough for a derived file and is never a failure.
+  }
+
+  if (!indexStat.present || indexStat.size === 0) {
+    add({
+      id: 'digest-index',
+      label: 'Digest index',
+      status: 'pass',
+      detail: indexStat.present
+        ? `${indexPath} is empty — it is derived and will be rebuilt on the next flush`
+        : 'not written yet (derived; the next flush creates it)',
+    });
+  } else if (!indexStat.parses) {
+    add({
+      id: 'digest-index',
+      label: 'Digest index',
+      status: 'warn',
+      detail: `${indexPath} exists (${indexStat.size} bytes) but its first record does not parse`,
+      fix: 'Nothing is lost — the index is derived. Run `cortex flush-spool` here to rebuild it from the store.',
+    });
+  } else {
+    add({
+      id: 'digest-index',
+      label: 'Digest index',
+      status: 'pass',
+      detail: `${indexStat.lines} record(s), ${indexStat.size} bytes`,
     });
   }
 

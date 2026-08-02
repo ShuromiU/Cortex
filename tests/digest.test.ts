@@ -25,7 +25,7 @@ import {
 } from '../src/capture/digest.js';
 import { handleReadEvent } from '../src/capture/hooks.js';
 import { appendSpoolEntry, flushSpool } from '../src/capture/spool.js';
-import { normalizeFilePathKey } from '../src/scope/keys.js';
+import { normalizeFilePathKey, toScopeRelativeKey, isAbsoluteFileKey } from '../src/scope/keys.js';
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -80,8 +80,12 @@ describe('content digests: recording (AC #1)', () => {
     expect(digest).toBeDefined();
     expect(digest!.sha256).toBe(sha256Of(bytes));
     expect(digest!.byteSize).toBe(bytes.length);
-    // Stored under the normalized key, not the raw argument.
-    expect(digest!.path).toBe(normalizeFilePathKey(file));
+    // Stored relative to the scope root, not as the raw absolute argument:
+    // the repo prefix is redundant with scope_key and carrying it twice is what
+    // breached AC #5 in Story 3.1.
+    expect(digest!.path).toBe('a.ts');
+    expect(isAbsoluteFileKey(digest!.path)).toBe(false);
+    expect(normalizeFilePathKey(file).endsWith(digest!.path)).toBe(true);
     expect(digest!.scopeKey).toBe(scopeKey);
     expect(digest!.oversize).toBe(false);
     // mtime is ISO-8601 UTC text, never an epoch number or a Date.
@@ -122,7 +126,7 @@ describe('content digests: recording (AC #1)', () => {
 
     const rows = store.db
       .prepare('SELECT COUNT(*) c FROM content_digests WHERE scope_key = ? AND path = ?')
-      .get(scopeKey, normalizeFilePathKey(file)) as { c: number };
+      .get(scopeKey, toScopeRelativeKey(file, root)) as { c: number };
     // One row per file per scope, never one per read — otherwise the table
     // grows without bound and 3.3 has to pick among histories.
     expect(rows.c).toBe(1);
@@ -168,7 +172,7 @@ describe('content digests: recording (AC #1)', () => {
 
     const total = store.db
       .prepare('SELECT COUNT(*) c FROM content_digests WHERE path = ?')
-      .get(normalizeFilePathKey(file)) as { c: number };
+      .get(toScopeRelativeKey(file, root)) as { c: number };
     expect(total.c).toBe(2);
   });
 
@@ -654,67 +658,95 @@ describe('content digests: storage footprint (AC #5)', () => {
     expect(perFile).toBeLessThanOrEqual(400);
   });
 
-  it('pins where the ceiling actually breaks, with a real scope key', () => {
-    // The test above pins ONE path length, which is how a single-point ceiling
-    // assertion hides its own cliff. This one records the boundary so a future
-    // change that moves it fails loudly instead of silently.
-    const root = tempRoot();
-    const dbPath = path.join(root, 'boundary.db');
+  it('meets the ceiling for every real path length, now that keys are relative', () => {
+    // Story 3.1 shipped this FAILING at the repo's longest real path (417.8
+    // b/file at 135 chars). Story 3.2 stripped the scope root from the key —
+    // the prefix redundant with scope_key — and the same path now costs 376.8.
+    // This test asserts the fix and pins where the cliff moved to; if a change
+    // moves it back, this fails rather than the ceiling silently regressing.
+    const repoRoot = 'C:/Claude Code/cortex';
+    const scopeKey = 'branch:c:/claude code/cortex/.git:c:/claude code/cortex:r1-context-economy';
+    const home = tempRoot();
+    const dbPath = path.join(home, 'boundary.db');
     const db = new Database(dbPath);
     db.pragma('foreign_keys = ON');
     applySchema(db);
-    initializeMeta(db, root);
+    initializeMeta(db, home);
     const store = new CortexStore(db);
-    // A real branch scope key from this repo, not a short synthetic one —
-    // scope_key shares the same row budget as the path.
-    const scopeKey = 'branch:c:/claude code/cortex/.git:c:/claude code/cortex:r1-context-economy';
     const session = store.createSession({
-      worktreePath: root,
-      scopeType: 'project',
+      worktreePath: repoRoot,
+      scopeType: 'branch',
       scopeKey,
     });
 
     const COUNT = 300;
-    function perFileAt(len: number): number {
+    function perFileAtAbsoluteLength(len: number, agentId: string | null = null): number {
       db.exec('DELETE FROM content_digests');
       db.exec('VACUUM');
       const before = fs.statSync(dbPath).size;
-      const insert = db.transaction(() => {
+      db.transaction(() => {
         for (let i = 0; i < COUNT; i++) {
           const suffix = `-${i}.ts`;
-          const p =
-            'c:/claude code/cortex/' +
-            'x'.repeat(Math.max(1, len - 22 - suffix.length)) +
-            suffix;
+          const fill = Math.max(1, len - repoRoot.length - 1 - suffix.length);
           store.upsertContentDigest({
             scopeKey,
-            path: p,
+            path: `${repoRoot}/${'x'.repeat(fill)}${suffix}`,
             sha256: crypto.createHash('sha256').update(`c${i}`).digest('hex'),
             byteSize: 4096,
             mtime: '2026-08-01T00:00:00.000Z',
             sessionId: session.id,
+            agentId,
           });
         }
-      });
-      insert();
+      })();
       db.exec('VACUUM');
       return (fs.statSync(dbPath).size - before) / COUNT;
     }
 
-    const median = perFileAt(44);
-    const p90 = perFileAt(122);
-    const longest = perFileAt(135);
-    db.close();
+    // Precondition: the key really is being stored relative, or this measures
+    // the absolute fallback and proves nothing about the fix.
+    store.upsertContentDigest({
+      scopeKey,
+      path: `${repoRoot}/src/db/store.ts`,
+      sha256: 'x'.repeat(64),
+      byteSize: 1,
+      sessionId: session.id,
+    });
+    expect(store.getContentDigest(scopeKey, `${repoRoot}/src/db/store.ts`)!.path).toBe(
+      'src/db/store.ts',
+    );
 
-    // What holds: the ceiling is met through the 90th percentile of real reads.
+    const median = perFileAtAbsoluteLength(44);
+    const p90 = perFileAtAbsoluteLength(122);
+    const repoMax = perFileAtAbsoluteLength(135);
+    const siblingRepoMax = perFileAtAbsoluteLength(145);
+    const beyond = perFileAtAbsoluteLength(220);
+
+    // AC #5 now holds for every real path length measured across this repo and
+    // repo-b — including the 135-char path that failed in Story 3.1.
     expect(median).toBeLessThanOrEqual(400);
     expect(p90).toBeLessThanOrEqual(400);
-    // What does NOT hold, asserted so it cannot be quietly forgotten: the
-    // longest real path in this repository breaches AC #5. Story 3.2 fixes this
-    // by storing paths relative to the scope root. If a change makes this pass,
-    // the ceiling moved — update CLAUDE.md and this assertion together.
-    expect(longest).toBeGreaterThan(400);
+    expect(repoMax).toBeLessThanOrEqual(400);
+    expect(siblingRepoMax).toBeLessThanOrEqual(400);
+    // The cliff still exists, further out. Pinned at the MEASURED first breach
+    // (152) rather than at a comfortably distant value, because an assertion 68
+    // characters past the cliff locates nothing.
+    expect(beyond).toBeGreaterThan(400);
+    expect(perFileAtAbsoluteLength(152)).toBeGreaterThan(400);
+    expect(perFileAtAbsoluteLength(145)).toBeLessThanOrEqual(400);
+
+    // And the dimension the fixture previously could not see: `agent_id` shares
+    // the same row budget, so a SUBAGENT read breaches 17 characters earlier —
+    // at 135, exactly this repository's longest real path. AC #5 holds for a
+    // primary-session read across the full real range and is still breached for
+    // a subagent read of the longest paths. Asserted so the limit is a recorded
+    // fact rather than a footnote.
+    const agentId = 'a9f7b2b4450b02c8f';
+    expect(perFileAtAbsoluteLength(122, agentId)).toBeLessThanOrEqual(400);
+    expect(perFileAtAbsoluteLength(135, agentId)).toBeGreaterThan(400);
+    db.close();
   });
+
 });
 
 // ── AC #6 (corrected) / #7 / #8 — migration discipline ──────────────────────

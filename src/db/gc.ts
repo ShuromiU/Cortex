@@ -18,6 +18,8 @@ export interface GcOptions {
   /** Delete archived memory items with zero accesses older than this. */
   archivedDays?: number;
   commandRunCapPerScope?: number;
+  /** Delete content digests not re-read within this many days (FR-5, AD-3). */
+  digestDays?: number;
   dryRun?: boolean;
   vacuum?: 'auto' | 'always' | 'never';
   now?: Date;
@@ -36,6 +38,7 @@ export interface GcReport {
   memory_corrections: GcCategoryReport;
   archived_memory_items: GcCategoryReport;
   command_run_items: GcCategoryReport;
+  content_digests: GcCategoryReport;
   freelist_ratio: number;
   vacuumed: boolean;
 }
@@ -48,6 +51,10 @@ const DEFAULTS = {
   correctionDays: 90,
   archivedDays: 90,
   commandRunCapPerScope: 200,
+  // Digests are cheap to re-earn: a pruned row costs one re-read, never memory.
+  // Longer than the ledger because a file read a month ago is still a file the
+  // agent plausibly knows.
+  digestDays: 60,
 } as const;
 
 function envNumber(name: string): number | undefined {
@@ -74,10 +81,53 @@ function resolveGcOptions(options: GcOptions = {}): Required<Omit<GcOptions, 'no
       options.commandRunCapPerScope ??
       envNumber('CORTEX_GC_COMMAND_RUN_CAP') ??
       DEFAULTS.commandRunCapPerScope,
+    // `envDays`, not `envNumber`: the neighbouring helper parses with
+    // `Number.parseInt`, which succeeds on a PREFIX. Measured against a 30-day
+    // old row, `CORTEX_GC_DIGEST_DAYS=1e9` — the natural way to disable pruning
+    // — became a **1-day** window and wiped nearly the whole ledger, and `6e1`
+    // became 6. This is the third time the repo has paid for `parseInt` on a
+    // `CORTEX_*` number (`CORTEX_WAL_MAX_BYTES`, `CORTEX_DIGEST_MAX_BYTES`).
+    // The existing callers keep `envNumber` so this change stays scoped.
+    digestDays: normalizeDays(options.digestDays) ?? envDays('CORTEX_GC_DIGEST_DAYS') ?? DEFAULTS.digestDays,
     dryRun: options.dryRun ?? true,
     vacuum: options.vacuum ?? 'auto',
     now: options.now ?? new Date(),
   };
+}
+
+/**
+ * A retention window that is a whole, non-negative, finite number of days.
+ *
+ * Guards two measured hazards that `envNumber` does not: a negative value puts
+ * the cutoff in the *future* and prunes everything (blocked for the env var but
+ * not for a programmatic `GcOptions`), and `NaN` throws
+ * `RangeError: Invalid time value` out of `isoDaysAgo`.
+ */
+function normalizeDays(value: number | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+  // Clamped, because the cutoff is computed as a Date. `1e9` days is ~2.7
+  // million years, which overflows JS's date range and makes `toISOString`
+  // throw `RangeError: Invalid time value` out of GC — measured. 100,000 days
+  // is 274 years: any value at or beyond it means "never prune" in practice,
+  // and it stays a representable date.
+  return Math.min(Math.floor(value), MAX_RETENTION_DAYS);
+}
+
+/** ~274 years. Beyond this a retention window is not a date any more. */
+const MAX_RETENTION_DAYS = 100_000;
+
+/** Like `envNumber`, but with `Number` so `1e9` is a billion and not one. */
+function envDays(name: string): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim().length === 0) {
+    return undefined;
+  }
+  return normalizeDays(Number(raw.trim()));
 }
 
 function isoDaysAgo(now: Date, days: number): string {
@@ -170,6 +220,39 @@ function rollupLedger(
   return { candidates, deleted };
 }
 
+/**
+ * Prune content digests that have not been re-read within the window.
+ *
+ * `content_digests` shipped in Story 3.1 with **no** GC rule at all — one row
+ * per path per scope, and every branch ever checked out mints a scope, so it
+ * grew monotonically for the life of a project. That matters more than an
+ * ordinary table because the flat index (AD-3) is a projection of it and the
+ * hot path greps that index on every read, so unbounded growth here is a
+ * latency problem, not just a footprint one.
+ *
+ * Keyed on `recorded_at`, which the upsert refreshes on every read, so an
+ * actively-used file is never pruned however old its first read was. A pruned
+ * row costs exactly one re-read to re-earn and can never lose user-authored
+ * memory — which is why this is a plain delete and not the ledger's rollup.
+ */
+function pruneContentDigests(
+  db: Database.Database,
+  cutoff: string,
+  dryRun: boolean,
+): GcCategoryReport {
+  const countRow = db
+    .prepare('SELECT COUNT(*) as count FROM content_digests WHERE recorded_at < ?')
+    .get(cutoff) as { count: number };
+  const candidates = countRow.count;
+  if (dryRun || candidates === 0) {
+    return { candidates, deleted: 0 };
+  }
+  const result = db
+    .prepare('DELETE FROM content_digests WHERE recorded_at < ?')
+    .run(cutoff);
+  return { candidates, deleted: result.changes };
+}
+
 function freelistRatio(db: Database.Database): number {
   const freelist = db.pragma('freelist_count', { simple: true }) as number;
   const pages = db.pragma('page_count', { simple: true }) as number;
@@ -222,6 +305,12 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
     dryRun,
   );
 
+  const digests = pruneContentDigests(
+    db,
+    isoDaysAgo(now, resolved.digestDays),
+    dryRun,
+  );
+
   const ratio = freelistRatio(db);
   let vacuumed = false;
   if (!dryRun && resolved.vacuum !== 'never') {
@@ -254,6 +343,7 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
     memory_corrections: corrections,
     archived_memory_items: archived,
     command_run_items: commandRuns,
+    content_digests: digests,
     freelist_ratio: Number(ratio.toFixed(4)),
     vacuumed,
   };

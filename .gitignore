@@ -11,3 +11,5 @@ dist/
 .claude/
 .codex/
 .refcertify/
+.cortex.index
+.cortex.index.tmp-*

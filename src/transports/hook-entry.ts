@@ -17,6 +17,7 @@ import { maybeCheckpointWal, UnopenableStoreError } from '../db/schema.js';
 import { reflectMemory, type ReflexEvent } from '../query/reflex.js';
 import { suggestNotes } from '../query/suggest-notes.js';
 import { flushSpool } from '../capture/spool.js';
+import { writeDigestIndex } from '../capture/digest-index.js';
 import { ensureScopedSession, type ScopeSessionOptions } from '../scope/runtime.js';
 import { configureEngagementPath, readEngagement, writeEngagement } from './mcp.js';
 
@@ -272,6 +273,9 @@ function postToolUse(
     const file = extractFile(input);
     if (file) {
       handleReadEvent(store, sessionId, { file });
+      // Same reason as the CLI path: this cold path records a digest the spool
+      // flush will never see, and the flush gate cannot notice it.
+      writeDigestIndex(store, cwd);
     }
     return;
   }

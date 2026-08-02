@@ -97,7 +97,7 @@ development_status:
   # Epic 3 — Read Ledger and Token P&L (FR-5..FR-9; 3.2 carries AD-3, no FR)
   epic-3: in-progress
   3-1-capture-content-digests-on-read: done
-  3-2-build-the-flat-digest-index: backlog
+  3-2-build-the-flat-digest-index: done
   3-3-answer-the-read-ledger-question: backlog
   3-4-surface-the-read-ledger-in-the-session-brief: backlog
   3-5-account-for-tokens-injected-and-saved: backlog
@@ -150,11 +150,11 @@ action_items:
   - epic: 3
     action: "content_digests has no GC rule (certify_refs: zero hits in src/db/gc.ts). One row per path per scope and every branch mints a scope, so it grows monotonically. Fold into Story 4.6, which owns GC and bounds."
     owner: "create-story (Story 4.6)"
-    status: open
+    status: done  # Story 3.2 added pruneContentDigests (CORTEX_GC_DIGEST_DAYS, default 60, dry-run by default); 4.6 inherits a rule rather than a table that never had one
   - epic: 3
     action: "AC #5 (<=400 bytes/file) holds to p90 but FAILS for this repo's longest real paths (135ch -> 417.8 with a real 74-char scope key). Fix is storing the path relative to the scope root; adopt in Story 3.2 when the flat index format is defined (AD-3)."
     owner: "create-story (Story 3.2)"
-    status: open
+    status: done  # 3.2 stores scope-root-relative keys: 135ch now 376.8 PASS, first breach moved 130 -> 152. STILL breached at 135 when agent_id is populated (subagent reads); reducing further means shortening scope_key, a scope-layer change
   - epic: 3
     action: "Under the P-5 refusal the spool never drains and the capture hook keeps backgrounding a no-op flush-spool past 256 KiB — an N-4 violation in exactly the state P-5 creates. Decide whether to park the spool or mark the project refused."
     owner: "ShuromiU + Amelia"
@@ -166,4 +166,12 @@ action_items:
   - epic: 3
     action: "openProjectStore refuses a newer store AFTER resolveProjectStore has already run the legacy VACUUM INTO, so the copy lands without root_commit_oid or migration provenance. Narrow but real; reorder the version check ahead of migration."
     owner: "Amelia (Developer)"
+    status: open
+  - epic: 3
+    action: "AC #5 remains breached for SUBAGENT reads of the longest paths: agent_id shares the row budget, so first breach is 135ch with a 17-char agent id — exactly this repo's maximum. Pinned by test. Fixing it means shortening scope_key (scope-layer change), not the digest table."
+    owner: "Winston (Architect) + ShuromiU"
+    status: open
+  - epic: 3
+    action: "B-4a (<=100 ms) is unmet on this platform independently of Cortex: measured spawn floor ~39-42 ms, jq alone ~81 ms, a plausible 4.5 sequence 214.8 ms. Story 3.2 reports its lookup cost (41-100 ms over 1k-200k records) but does NOT claim the budget met. Blocks 4.5 with the existing B-4 amendment."
+    owner: "ShuromiU (PRD decision)"
     status: open

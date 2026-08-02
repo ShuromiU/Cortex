@@ -227,6 +227,14 @@ function recordReadDigest(store: CortexStore, sessionId: string, args: ReadArgs)
       // AD-16: lets the upsert keep an ancestor's recorded read rather than
       // letting this session's read erase it.
       readerParentSessionId: session.parent_session_id,
+      // Deliberately NOT `session.worktree_path`. The store resolves the scope
+      // root itself, and the write and the read must use the *same* rule or
+      // they derive different keys. Measured with two worktrees sharing one
+      // scope_key: the write keyed relative to the reader's own worktree while
+      // the read keyed relative to the newest session's, so a file was written
+      // under one key and looked up under another — and two distinct files
+      // collapsed onto one row. Passing the per-session root here is what made
+      // the two sides disagree.
     });
   } catch {
     // AD-12: capture is ambient. A ledger failure must never break the user's

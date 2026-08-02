@@ -963,7 +963,7 @@ describe('line endings', () => {
 });
 
 describe('the ignore list', () => {
-  it('is exactly the seven runtime artifacts, by literal', () => {
+  it('is exactly the nine runtime artifacts, by literal', () => {
     // Not `for (entry of IGNORE_ENTRIES) expect(text).toContain(entry)` —
     // that can never fail for a missing entry, because the loop is over the
     // same constant the code used.
@@ -975,6 +975,13 @@ describe('the ignore list', () => {
       '.cortex.spool.jsonl.processing',
       '.cortex.state',
       '.cortex.agent-used',
+      // Story 3.2's flat digest index. In the project root for the same reason
+      // the spool is — the hot path resolves it in pure bash from $CWD and
+      // cannot hash a store path per tool call.
+      '.cortex.index',
+      // And its atomic-write temp file, for the same reason
+      // `.cortex.spool.jsonl.processing` is listed beside the spool.
+      '.cortex.index.tmp-*',
     ]);
   });
 

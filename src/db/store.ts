@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { deriveProjectScopeKey, normalizeFilePathKey } from '../scope/keys.js';
+import { deriveProjectScopeKey, toScopeRelativeKey } from '../scope/keys.js';
 import {
   buildBranchSnapshotMemoryText,
   buildCommandMemoryText,
@@ -255,6 +255,12 @@ export interface UpsertContentDigestOpts {
    * `upsertContentDigest`.
    */
   readerParentSessionId?: string | null;
+  /**
+   * The scope's worktree root. Paths under it are stored relative to it — the
+   * repo prefix is redundant with `scope_key`, and carrying it twice breached
+   * Story 3.1's 400 byte/file ceiling. Omit only when genuinely unknown.
+   */
+  scopeRoot?: string | null;
 }
 
 export interface CurrentAppGraphRow {
@@ -3108,12 +3114,54 @@ export class CortexStore {
    * An unrelated newer session still takes over, which is correct: it is not a
    * descendant, so nothing stronger is being discarded.
    */
+  /**
+   * The worktree root recorded for a scope, memoized.
+   *
+   * The store derives the digest key itself — relative to this root — on both
+   * write and read, so a caller cannot supply one and forget the other. That
+   * asymmetry is silent and total: the write would key `src/a.ts` while the
+   * read looked up `c:/repo/src/a.ts`, and the ledger would answer "unread" for
+   * every file it had just recorded. Memoized because a flush resolves the same
+   * scope for hundreds of entries, the same reason `sessionByAgent` exists.
+   */
+  private readonly scopeRootCache = new Map<string, string | null>();
+
+  private scopeRootFor(scopeKey: string): string | null {
+    const cached = this.scopeRootCache.get(scopeKey);
+    if (cached !== undefined && cached !== null) {
+      return cached;
+    }
+    const row = this.db
+      .prepare(
+        `SELECT worktree_path
+           FROM sessions
+          WHERE scope_key = ? AND worktree_path IS NOT NULL
+          ORDER BY started_at DESC
+          LIMIT 1`,
+      )
+      .get(scopeKey) as { worktree_path: string } | undefined;
+    const root = row?.worktree_path ?? null;
+    // A resolved root is stable and memoized. A `null` is deliberately NOT
+    // memoized: it means no session has recorded a worktree for this scope
+    // *yet*, and caching it would freeze that answer for the life of the
+    // process. Measured consequence — a key written while the root was unknown
+    // is stored absolute, and a fresh store in another process resolves the
+    // root, looks up the relative form, and answers "unread" for a file it had
+    // just recorded. That is precisely the write/read asymmetry this method
+    // exists to make impossible, reintroduced at process granularity.
+    if (root !== null) {
+      this.scopeRootCache.set(scopeKey, root);
+    }
+    return root;
+  }
+
   upsertContentDigest(opts: UpsertContentDigestOpts): ParsedContentDigest {
     const recordedAt = opts.recordedAt ?? new Date().toISOString();
-    // Normalized here rather than at the call sites, so the write and every
-    // future read derive the key the same way by construction. Callers passing
-    // a raw path are correct; a caller cannot get this wrong.
-    const key = normalizeFilePathKey(opts.path);
+    // Derived here rather than at the call sites, so the write and every future
+    // read produce the same key by construction. `scopeRoot` is an optimization
+    // for callers that already hold it; omitting it resolves the same value.
+    const scopeRoot = opts.scopeRoot ?? this.scopeRootFor(opts.scopeKey);
+    const key = toScopeRelativeKey(opts.path, scopeRoot);
 
     // RETURNING rather than a follow-up SELECT: the read-back was a second
     // statement compiled and executed per read entry, inside the flush's write
@@ -3159,10 +3207,15 @@ export class CortexStore {
     return parseContentDigestRow(row);
   }
 
-  getContentDigest(scopeKey: string, filePath: string): ParsedContentDigest | undefined {
+  getContentDigest(
+    scopeKey: string,
+    filePath: string,
+    scopeRoot?: string | null,
+  ): ParsedContentDigest | undefined {
+    const root = scopeRoot ?? this.scopeRootFor(scopeKey);
     const row = this.db
       .prepare('SELECT * FROM content_digests WHERE scope_key = ? AND path = ?')
-      .get(scopeKey, normalizeFilePathKey(filePath)) as ContentDigestRow | undefined;
+      .get(scopeKey, toScopeRelativeKey(filePath, root)) as ContentDigestRow | undefined;
     return row ? parseContentDigestRow(row) : undefined;
   }
 }

@@ -23,6 +23,7 @@ import {
 } from '../capture/hooks.js';
 import { flushSpool } from '../capture/spool.js';
 import { runGc, shouldAutoGc } from '../db/gc.js';
+import { writeDigestIndex } from '../capture/digest-index.js';
 import {
   consolidateLevel1,
   renderCompressed,
@@ -709,6 +710,11 @@ export function createProgram(): Command {
       const { store } = openCortexDb(process.cwd());
       const sessionId = ensureSession(store, process.cwd());
       handleReadEvent(store, sessionId, { file: opts.file, lines: opts.lines });
+      // A read recorded outside the spool must still reach the index, or the
+      // module's "rebuilt in full from the table on the next cold-path run"
+      // is false for this path: `processed === 0` and the index exists, so the
+      // flush gate never fires and the digest is permanently absent.
+      writeDigestIndex(store, process.cwd());
     });
 
   log
@@ -828,7 +834,13 @@ export function createProgram(): Command {
           // repair only overwrites a recorded path that no longer exists.
           const { db: gcDb } = openProjectStore(process.cwd());
           if (shouldAutoGc(gcDb)) {
-            runGc(gcDb, { dryRun: false });
+            const gcReport = runGc(gcDb, { dryRun: false });
+            // GC deletes content_digests rows, and the flat index is a
+            // projection of that table — leaving it naming pruned files, which
+            // the hot path would then trust. Rebuild whenever rows actually went.
+            if (gcReport.content_digests.deleted > 0) {
+              writeDigestIndex(new CortexStore(gcDb), process.cwd());
+            }
           }
           gcDb.close();
         } catch {
@@ -1166,6 +1178,11 @@ export function createProgram(): Command {
       const vacuum =
         opts.vacuum === 'always' || opts.vacuum === 'never' ? opts.vacuum : 'auto';
       const report = runGc(db, { dryRun: !opts.apply, vacuum });
+      // Same reason as the ambient path: a pruned digest must not survive in
+      // the index the hot path greps.
+      if (report.content_digests.deleted > 0) {
+        writeDigestIndex(new CortexStore(db), process.cwd());
+      }
       db.close();
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     });

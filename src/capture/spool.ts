@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import type { CortexStore } from '../db/store.js';
 import { resolveAgentSessionId } from '../scope/runtime.js';
 import { createDigestCache, type DigestCache, type DigestDeps } from './digest.js';
+import { digestIndexExists, writeDigestIndex } from './digest-index.js';
 import {
   handleAgentEvent,
   handleCmdEvent,
@@ -314,6 +315,14 @@ export function flushSpool(
     const fresh = processClaimFile(store, sessionId, claimPath, deps);
     processed += fresh.processed;
     skipped += fresh.skipped;
+  }
+
+  // Rebuild the flat index AFTER the replay transactions have committed, so it
+  // can never describe rows a rollback discarded. Also rebuilt when the file is
+  // simply missing, which is what makes it regenerable rather than accumulated
+  // (AD-3): the index is a projection of the table, not a log of batches.
+  if (processed > 0 || !digestIndexExists(dir)) {
+    writeDigestIndex(store, dir);
   }
 
   return { processed, skipped };

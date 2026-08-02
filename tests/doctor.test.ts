@@ -231,6 +231,11 @@ describe('runDoctor on a healthy installation', () => {
       [
         'capture-matcher',
         'database',
+        // Story 3.2: the flat index has three silent-by-design failure modes
+        // (a rename that could not complete, a project root matching no scope,
+        // a prune outrunning the rebuild). Reporting-only — it never rebuilds,
+        // because a diagnostic must not repair what it observes.
+        'digest-index',
         'engagement',
         'hook-currency',
         'hook-interpreter',

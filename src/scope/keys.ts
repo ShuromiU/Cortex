@@ -51,6 +51,93 @@ export function normalizeFilePathKey(rawPath: string): string {
   return caseInsensitive ? resolved.toLowerCase() : resolved;
 }
 
+/**
+ * The stored form of a read-ledger path: relative to the scope root when the
+ * file lives under it, absolute otherwise.
+ *
+ * The repository prefix is exactly what is redundant with `scope_key`, and
+ * carrying it twice is what breached Story 3.1's AC #5 — 417.8 bytes/file for a
+ * 135-character absolute path against a 400-byte ceiling. Stripping it also
+ * shrinks the flat index the hot path greps on every read.
+ *
+ * The two forms stay distinguishable without a flag: a relative key never
+ * starts with `/` and never carries a `<drive>:` prefix, which is asserted by
+ * test rather than assumed. A file outside the scope root (a system header, a
+ * file in a sibling checkout) keeps its absolute key and is still correct —
+ * just larger, which is the right trade for the rare case.
+ */
+export function toScopeRelativeKey(rawPath: string, scopeRoot: string | null | undefined): string {
+  // An input that is ALREADY relative is already a stored key, and must not be
+  // resolved: `path.resolve` would anchor it to `process.cwd()`, which is
+  // whatever directory the flush, CLI or MCP server happens to run in. Measured
+  // — re-running the migration turned `src/kept.ts` into
+  // `c:/claude code/cortex/src/kept.ts`, silently relocating every key to the
+  // process's cwd and orphaning the rows it had just repaired. Normalize its
+  // separators and case only.
+  if (!isAbsoluteFileKey(rawPath.replace(/\\/g, '/'))) {
+    return normalizeRelativeKey(rawPath);
+  }
+
+  const key = normalizeFilePathKey(rawPath);
+  if (!scopeRoot) {
+    return key;
+  }
+  const root = normalizeFilePathKey(scopeRoot).replace(/\/+$/, '');
+  if (root.length === 0) {
+    return key;
+  }
+  // Boundary-aware: `/repo-two/a.ts` must not match a root of `/repo`, which a
+  // bare `startsWith` would accept and then slice into a corrupt key.
+  if (key === root) {
+    return key;
+  }
+  if (!key.startsWith(`${root}/`)) {
+    return key;
+  }
+  const relative = key.slice(root.length + 1);
+  // Defensive: an empty result would key every row identically.
+  return relative.length > 0 ? relative : key;
+}
+
+/** True when a stored key is already absolute (POSIX root or a Windows drive). */
+export function isAbsoluteFileKey(key: string): boolean {
+  return key.startsWith('/') || /^[a-z]:\//i.test(key);
+}
+
+/**
+ * Normalize a key that is already scope-relative, without resolving it against
+ * the current working directory — see `toScopeRelativeKey` for why that matters.
+ */
+function normalizeRelativeKey(rawPath: string): string {
+  const cleaned = rawPath.replace(/\\/g, '/').replace(/\/+/g, '/');
+
+  // Collapse `.` and `..` the way the absolute branch does via `path.resolve`.
+  // Without this, `src/./a.ts` and `src/../src/a.ts` each became their own key
+  // for a file the absolute branch stores once as `src/a.ts` — one file, three
+  // ledger rows. Done textually rather than with `path.normalize` so the result
+  // stays POSIX-separated on win32 and never touches the filesystem.
+  const segments: string[] = [];
+  for (const segment of cleaned.split('/')) {
+    if (segment === '' || segment === '.') {
+      continue;
+    }
+    if (segment === '..' && segments.length > 0 && segments[segments.length - 1] !== '..') {
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  // An empty result would key every such row identically — the same guard the
+  // absolute branch already carries. `''`, `'.'` and `'./'` all mean "the scope
+  // root itself" and collapse to one non-empty sentinel rather than to `''`,
+  // which would be indistinguishable from a missing key.
+  const joined = segments.join('/');
+  const result = joined.length > 0 ? joined : '.';
+  const caseInsensitive = process.platform === 'win32' || process.platform === 'darwin';
+  return caseInsensitive ? result.toLowerCase() : result;
+}
+
 export function deriveProjectScopeKey(rootPath: string): string {
   return `project:${normalizeScopePath(rootPath)}`;
 }
