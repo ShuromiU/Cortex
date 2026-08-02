@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { deriveProjectScopeKey } from '../scope/keys.js';
+import { deriveProjectScopeKey, normalizeFilePathKey } from '../scope/keys.js';
 import {
   buildBranchSnapshotMemoryText,
   buildCommandMemoryText,
@@ -194,6 +194,67 @@ export interface MemoryItemSemanticRow {
   embedding_json: string;
   source_hash: string;
   updated_at: string;
+}
+
+// ── Content digests (read ledger, FR-5) ──────────────────────────────────────
+
+export interface ContentDigestRow {
+  scope_key: string;
+  path: string;
+  sha256: string | null;
+  byte_size: number;
+  mtime: string | null;
+  session_id: string;
+  agent_id: string | null;
+  oversize: number;
+  read_count: number;
+  recorded_at: string;
+}
+
+export interface ParsedContentDigest {
+  scopeKey: string;
+  path: string;
+  sha256: string | null;
+  byteSize: number;
+  mtime: string | null;
+  sessionId: string;
+  agentId: string | null;
+  oversize: boolean;
+  readCount: number;
+  recordedAt: string;
+}
+
+export function parseContentDigestRow(row: ContentDigestRow): ParsedContentDigest {
+  return {
+    scopeKey: row.scope_key,
+    path: row.path,
+    sha256: row.sha256,
+    byteSize: row.byte_size,
+    mtime: row.mtime,
+    sessionId: row.session_id,
+    agentId: row.agent_id,
+    oversize: row.oversize === 1,
+    readCount: row.read_count,
+    recordedAt: row.recorded_at,
+  };
+}
+
+export interface UpsertContentDigestOpts {
+  scopeKey: string;
+  path: string;
+  sha256: string | null;
+  byteSize: number;
+  mtime?: string | null;
+  sessionId: string;
+  agentId?: string | null;
+  oversize?: boolean;
+  recordedAt?: string;
+  /**
+   * The reading session's parent, when it has one. Used to protect an
+   * ancestor's recorded read from being erased by its own descendant — see
+   * `upsertContentDigest`.
+   */
+  readerParentSessionId?: string | null;
 }
 
 export interface CurrentAppGraphRow {
@@ -572,6 +633,7 @@ export interface TableCounts {
   memory_references: number;
   retrieval_log: number;
   file_renames: number;
+  content_digests: number;
 }
 
 // ── Helper functions ──────────────────────────────────────────────────
@@ -1316,6 +1378,7 @@ export class CortexStore {
       memory_references: count('memory_references'),
       retrieval_log: count('retrieval_log'),
       file_renames: count('file_renames'),
+      content_digests: count('content_digests'),
     };
   }
 
@@ -3016,5 +3079,90 @@ export class CortexStore {
    */
   runInImmediateTransaction<T>(fn: () => T): T {
     return this.db.transaction(fn).immediate();
+  }
+
+  // ── Content digests (read ledger, FR-5) ────────────────────────────────────
+
+  /**
+   * Record what a file's bytes were when a session read it.
+   *
+   * Keyed by `(scope_key, path)`, so a re-read overwrites rather than appending
+   * — the ledger answers "has this changed since I read it", which needs the
+   * latest digest, not a history. `read_count` accumulates across the upsert
+   * because Story 3.4 orders its brief line by read frequency and a keyed row
+   * cannot recover that number afterwards.
+   *
+   * `session_id`/`agent_id` record the reader, and the update is **not**
+   * unconditional last-writer-wins. AD-16 asks whether the requesting session
+   * *or an ancestor* read the file, so a descendant overwriting its ancestor
+   * destroys the stronger claim: measured, a parent read followed by its own
+   * subagent reading the same file left zero rows attributable to the parent,
+   * and the parent would later be told a subagent read a file it read itself.
+   * Under-crediting is tolerable (SM-C3); misattributing an ancestor's read to
+   * its descendant is not.
+   *
+   * So when the existing recorder is the incoming reader's parent, the existing
+   * reader is kept while the content columns still update. Sessions nest exactly
+   * one level — Epic 0 creates child sessions directly under the active primary
+   * — so "ancestor" is the parent, and this is a comparison rather than a walk.
+   * An unrelated newer session still takes over, which is correct: it is not a
+   * descendant, so nothing stronger is being discarded.
+   */
+  upsertContentDigest(opts: UpsertContentDigestOpts): ParsedContentDigest {
+    const recordedAt = opts.recordedAt ?? new Date().toISOString();
+    // Normalized here rather than at the call sites, so the write and every
+    // future read derive the key the same way by construction. Callers passing
+    // a raw path are correct; a caller cannot get this wrong.
+    const key = normalizeFilePathKey(opts.path);
+
+    // RETURNING rather than a follow-up SELECT: the read-back was a second
+    // statement compiled and executed per read entry, inside the flush's write
+    // transaction, and every caller either ignores it or wants exactly this row.
+    const row = this.db
+      .prepare(
+        `INSERT INTO content_digests (
+           scope_key, path, sha256, byte_size, mtime,
+           session_id, agent_id, oversize, read_count, recorded_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+         ON CONFLICT(scope_key, path) DO UPDATE SET
+           sha256 = excluded.sha256,
+           byte_size = excluded.byte_size,
+           mtime = excluded.mtime,
+           session_id = CASE WHEN content_digests.session_id = :parent
+                             THEN content_digests.session_id
+                             ELSE excluded.session_id END,
+           agent_id   = CASE WHEN content_digests.session_id = :parent
+                             THEN content_digests.agent_id
+                             ELSE excluded.agent_id END,
+           oversize = excluded.oversize,
+           read_count = content_digests.read_count + 1,
+           recorded_at = excluded.recorded_at
+         RETURNING *`,
+      )
+      .get(
+        opts.scopeKey,
+        key,
+        opts.sha256,
+        opts.byteSize,
+        opts.mtime ?? null,
+        opts.sessionId,
+        opts.agentId ?? null,
+        opts.oversize ? 1 : 0,
+        recordedAt,
+        // Named so the CASE can reference it twice from one binding. A session
+        // with no parent binds null, which never equals a session_id, so the
+        // ancestor branch simply never fires for a primary session.
+        { parent: opts.readerParentSessionId ?? null },
+      ) as ContentDigestRow;
+
+    return parseContentDigestRow(row);
+  }
+
+  getContentDigest(scopeKey: string, filePath: string): ParsedContentDigest | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM content_digests WHERE scope_key = ? AND path = ?')
+      .get(scopeKey, normalizeFilePathKey(filePath)) as ContentDigestRow | undefined;
+    return row ? parseContentDigestRow(row) : undefined;
   }
 }

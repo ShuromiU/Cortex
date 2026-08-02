@@ -11,6 +11,7 @@ import {
   databaseSizeBytes,
   maybeCheckpointWal,
   walSizeBytes,
+  UnopenableStoreError,
 } from '../db/schema.js';
 import { CortexStore } from '../db/store.js';
 import {
@@ -110,6 +111,27 @@ function findDbPath(startDir: string): string {
 function openCortexDb(startDir: string): { store: CortexStore; dbPath: string } {
   const { db, dbPath } = openProjectStore(startDir);
   return { store: new CortexStore(db), dbPath };
+}
+
+/**
+ * Open for a command that runs as a hook, not as something a user typed.
+ *
+ * `inject-header` (SessionStart), `flush-spool` (backgrounded by PostToolUse)
+ * and `reflect` are ambient. AD-12 binds them to silence, so a store refused
+ * under P-5 yields `null` and the command becomes a no-op instead of printing
+ * and exiting non-zero. User-invoked commands keep the loud refusal — that is
+ * the whole point of "refuses clearly" — and `cortex doctor` reports it with a
+ * fix, unaffected because it opens read-only.
+ */
+function openCortexDbAmbient(startDir: string): { store: CortexStore; dbPath: string } | null {
+  try {
+    return openCortexDb(startDir);
+  } catch (err) {
+    if (err instanceof UnopenableStoreError) {
+      return null;
+    }
+    throw err;
+  }
 }
 
 function ensureSession(store: CortexStore, cwd: string): string {
@@ -744,7 +766,12 @@ export function createProgram(): Command {
     .option('--quiet', 'Engage capture without printing the working-memory header')
     .action((opts: { quiet?: boolean }) => {
       configureEngagementPath(process.cwd());
-      const { store } = openCortexDb(process.cwd());
+      const opened = openCortexDbAmbient(process.cwd());
+      if (!opened) {
+        // Newer store, refused under P-5. SessionStart stays silent (N-1).
+        return;
+      }
+      const { store } = opened;
 
       // Replay leftover spooled capture into the session it belongs to,
       // before that session is consolidated and ended.
@@ -855,7 +882,12 @@ export function createProgram(): Command {
         return;
       }
 
-      const { store } = openCortexDb(process.cwd());
+      const opened = openCortexDbAmbient(process.cwd());
+      if (!opened) {
+        // Newer store, refused under P-5. The reflex is silent by default.
+        return;
+      }
+      const { store } = opened;
       const session = ensureScopedSession(store, process.cwd());
       refreshCurrentGraphQuietly(store, process.cwd());
       const output = reflectMemory(store, {
@@ -1045,7 +1077,13 @@ export function createProgram(): Command {
     .command('flush-spool')
     .description('Replay spooled hook capture (.cortex.spool.jsonl) into the store')
     .action(() => {
-      const { store, dbPath } = openCortexDb(process.cwd());
+      const opened = openCortexDbAmbient(process.cwd());
+      if (!opened) {
+        // Newer store, refused under P-5. PostToolUse backgrounds this and
+        // never reads its output; capture simply stays spooled.
+        return;
+      }
+      const { store, dbPath } = opened;
       const session = ensureScopedSession(store, process.cwd());
       const result = flushSpool(store, process.cwd(), session.id);
       // The batch flush is the other place a Node process is already running

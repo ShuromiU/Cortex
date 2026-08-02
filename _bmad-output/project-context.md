@@ -47,7 +47,7 @@ _Critical rules and patterns for implementing code in Cortex. Unobvious details 
 - **Layer direction is strict and one-way:** `transports/` → `query/` → `memory/` + `scope/` → `db/`. `db/` imports from `memory/` for text shaping only. Never import a transport from a query, or a query from the store.
 - **`memory_items` is the canonical retrieval layer.** New durable content must be projected into `memory_items` (with `scope_type`, `scope_key`, `kind`, `state`, `importance`) or it is invisible to recall, brief, state, and reflex.
 - **Everything is scope-keyed.** Any new table holding per-project data carries `scope_key TEXT NOT NULL`. Scope is branch/worktree-aware — see `src/scope/keys.ts`.
-- **Adding a schema table requires four coordinated edits** in `src/db/schema.ts`: bump `SCHEMA_VERSION`, add a `V<n>_TABLES` DDL constant, add a `backfill*` function if existing rows need projection, and wire both into `ensureCortexSchema`. Migrations are additive and idempotent (`CREATE TABLE IF NOT EXISTS`, `ensureColumn`); never destructive.
+- **Adding a schema table does NOT bump `SCHEMA_VERSION`.** AD-11 gives a release *one* increment, and R1 already spent it: Story 2.2 took 4 → 5 and created `V5_TABLES`. Every later table **appends to that constant and leaves the version alone** — safe because `applySchema` runs the DDL unconditionally with `CREATE TABLE IF NOT EXISTS`, so a store already marked v5 still receives tables appended later. The edits are: append the DDL to `V5_TABLES`, add a `backfill*` function *only if* existing rows need projection (a lookup table needs none — see AD-4), and wire any new index into `INDEXES`. Migrations are additive and idempotent; never destructive. Bumping the version because a story's AC text says so is the single worst available mistake here — it marks every shipped store as newer-than-binary, which now refuses to open.
 - **Kind weighting has one source of truth:** `src/memory/kind-weights.ts`. Do not inline kind scores in retrieval or hotness.
 - **Every user-facing output surface is token-budgeted** and drops lower-priority content from the bottom. New surfaces take a `budget` option and honor it.
 - Hook scripts in `hooks/claude/*.sh` are **templates**: `__CORTEX_NODE__`, `__CORTEX_CLI__`, `__CORTEX_HOOK_ENTRY__` are substituted at `cortex install-hooks` time. Never hardcode paths there.
@@ -76,7 +76,7 @@ Any change touching ranking, scoring, tokenization, reference validation, or out
 npm run gate
 ```
 
-**It fails on:** any negative `top1_hit` delta, any negative `recall_at_3` delta, any positive `output_tokens` delta, any fixture whose own assertions fail, a suite with no baseline, a baseline with no suite, a baseline missing a metric, a suite that asserts nothing, and any registered `memory_items` kind no suite exercises (AD-5). `noise_count` and `stale_count` are reported, not gated. Suites are `budget`, `kind-ordering`, `rename-moved`, `stale-label`, `stemming`; CI runs the gate on every push.
+**It fails on:** any negative `top1_hit` delta, any negative `recall_at_3` delta, any positive `output_tokens` delta, any fixture whose own assertions fail, a suite with no baseline, a baseline with no suite, a baseline missing a metric, a suite that asserts nothing, and any registered `memory_items` kind no suite exercises (AD-5). `noise_count` and `stale_count` are reported, not gated. The eight suites are `alternatives`, `budget`, `contested`, `kind-ordering`, `rename-moved`, `stale-label`, `stemming`, `superseded-history`; CI runs the gate on every push. **Known coverage gap:** the suites read `top1_hit`/`recall_at_3`/`output_tokens` straight off retrieval, so the SessionStart brief and `cortex_state` header surfaces are **not** gated — a regression there will not go red. Adding header/full_state assertion hooks is an open Epic-1 action item; until it lands, do not offer a green gate as evidence about those surfaces.
 
 `evaluate --suite … --compare …` still exists as the single-suite human view. **It always exits 0 and is not a gate** — do not use it as one.
 
@@ -120,7 +120,7 @@ Two schema columns are written but never read. They are deliberate capacity, not
 - `notes.conflict INTEGER` — contradiction detection between a new note and prior decisions on the same subject.
 - `notes.alternatives TEXT` (JSON) — populated by `cortex_note`, surfaced almost nowhere. Intended to show *already-rejected* options in recall.
 
-Similarly, `token_ledger` is written but never reported on.
+`token_ledger` is a different case and the note that used to sit here was **false**: it is written *and* reported. `cortex stats` prints `Spent / Saved / Net / Efficiency` today (`src/transports/cli.ts`, the `stats` command). What is actually missing is the **read ledger** — evidence-backed credit for reads that were avoided — which is Epic 3's subject. Run `cortex stats` before writing anything about this; reading the schema alone is what produced the wrong claim.
 
 ---
 

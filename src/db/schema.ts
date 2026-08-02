@@ -11,6 +11,99 @@ import { extractMemoryReferences } from '../memory/references.js';
 
 export const SCHEMA_VERSION = 5;
 
+/**
+ * P-5: an older binary opening a store written by a newer one must refuse
+ * clearly rather than corrupt it.
+ *
+ * A distinct class rather than a bare `Error` because the ambient paths have to
+ * tell this apart from an ordinary open failure: AD-12 says a hook degrades to
+ * silence, but a user running `cortex status` deserves the message. Callers
+ * discriminate with `instanceof`, so the wording can change without breaking
+ * them.
+ *
+ * The fix deliberately never says "run a cortex command" — that is what
+ * `doctor` already refuses to say for this case, because the command that
+ * "fixes" it is the one that rewrites the version down.
+ */
+/**
+ * A store this build must not operate on. The ambient paths catch this base
+ * class, not each subclass, so a new unopenable condition degrades to hook
+ * silence automatically instead of escaping as an unhandled throw the first
+ * time it fires (AD-12).
+ */
+export class UnopenableStoreError extends Error {}
+
+/**
+ * The stored `schema_version` is present but not a version.
+ *
+ * Refusing rather than repairing, because `getSchemaVersion` parses with
+ * `Number.parseInt` and reports an unparseable value as `0` — indistinguishable
+ * from a fresh store. Measured: a store holding `schema_version = 'v6'` was
+ * opened, rewritten to `'5'`, run through the v1→v2 migration path, and had its
+ * `created_at` overwritten. That is exactly the "silently rewrote it down,
+ * destroying the evidence" outcome `NewerSchemaError` exists to prevent,
+ * reached through a corrupt value instead of a newer one. An *absent* row still
+ * means a fresh store and still opens.
+ */
+export class CorruptSchemaVersionError extends UnopenableStoreError {
+  readonly rawValue: string;
+
+  constructor(rawValue: string) {
+    super(
+      `This Cortex store records an unreadable schema_version (${JSON.stringify(rawValue)}). ` +
+        `Refusing to open it rather than overwrite it, because this build cannot tell whether ` +
+        `the store is older or newer than it is. Run \`cortex doctor\` for the store path, and ` +
+        `move the file aside only if you accept losing the memory it holds.`,
+    );
+    this.name = 'CorruptSchemaVersionError';
+    this.rawValue = rawValue;
+  }
+}
+
+/**
+ * Whether the store's recorded version is absent (a fresh store), a clean
+ * integer, or garbage. `getSchemaVersion` deliberately keeps its `number`
+ * contract — many callers depend on `0` meaning "no version yet" — so the
+ * distinction that matters for refusing lives here.
+ */
+function readStoredSchemaVersion(
+  db: Database.Database,
+): { kind: 'absent' } | { kind: 'ok'; version: number } | { kind: 'corrupt'; raw: string } {
+  if (!tableExists(db, 'meta')) {
+    return { kind: 'absent' };
+  }
+  const row = db
+    .prepare('SELECT value FROM meta WHERE key = ?')
+    .get('schema_version') as { value: string } | undefined;
+  if (!row) {
+    return { kind: 'absent' };
+  }
+  const raw = String(row.value).trim();
+  // Strict: a whole non-negative decimal integer and nothing else. `parseInt`
+  // accepts a prefix, which is how 'v6' became 0 and '1e3' became 1.
+  if (!/^\d+$/.test(raw)) {
+    return { kind: 'corrupt', raw: String(row.value) };
+  }
+  return { kind: 'ok', version: Number(raw) };
+}
+
+export class NewerSchemaError extends UnopenableStoreError {
+  readonly storeVersion: number;
+  readonly binaryVersion: number;
+
+  constructor(storeVersion: number, binaryVersion: number) {
+    super(
+      `This Cortex store was written by a newer version (schema_version ${storeVersion}; ` +
+        `this build expects ${binaryVersion}). Refusing to open it, because migrations are ` +
+        `additive only and cannot downgrade a store. Upgrade the package ` +
+        `(\`npm install -g cortex-memory\`) to read this memory.`,
+    );
+    this.name = 'NewerSchemaError';
+    this.storeVersion = storeVersion;
+    this.binaryVersion = binaryVersion;
+  }
+}
+
 const CORE_TABLES = `
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
@@ -225,6 +318,59 @@ CREATE TABLE IF NOT EXISTS memory_corrections (
   prior_subject  TEXT,
   created_at     TEXT NOT NULL
 );
+
+-- FR-5's read ledger (Story 3.1). A LOOKUP STRUCTURE, not knowledge: per AD-4
+-- content digests deliberately do NOT project into memory_items, so there is
+-- no backfill and no new retrieval kind. Keyed by (scope_key, path) — one row
+-- per file per scope, upserted on each read, never one row per read.
+--
+-- session_id AND agent_id are both recorded because AD-16 makes refund
+-- eligibility per-session with ancestor rules: a digest recorded by a sibling
+-- or descendant session is a valid change-detection fact but is not
+-- refund-eligible. A row that knows only its scope cannot answer that.
+--
+-- sha256 is NULL exactly when oversize is 1: past the ceiling the bytes are
+-- never read, so there is nothing to hash. read_count exists because Story
+-- 3.4 orders its brief line by read frequency, which a keyed upsert cannot
+-- reconstruct after the fact.
+-- WITHOUT ROWID, and (scope_key, path) is the real PRIMARY KEY rather than a
+-- surrogate id. Both are footprint decisions forced by AC #5's 400 byte/file
+-- ceiling, and both were measured rather than estimated: a UUID id plus a
+-- separate unique index cost 639 bytes/file, which FAILS the AC. Dropping the
+-- surrogate and folding the row into the stated key gives 376.8 bytes/file for
+-- a 130-char absolute Windows path and 278.5 for a typical repo-relative one.
+--
+-- AC #5 is met for typical content and BREACHED AT THE TAIL, which is recorded
+-- here rather than rounded off. Cost is a page-granularity STEP function of the
+-- whole row (scope_key + path + sha256 + mtime + agent_id), not a linear
+-- function of path length. Measured with this branch's real 74-char scope key:
+--
+--   path 44 (this repo's median read) 303.1   PASS
+--   path 122 (p90)                    376.8   PASS
+--   path 135 (max)                    417.8   FAIL
+--   path 145 (repo-b's max)        417.8   FAIL
+--
+-- So the ceiling holds through the 90th percentile of real reads and fails on
+-- the longest ones, and fails earlier when agent_id is populated or the branch
+-- name is long. The fix is to store the path RELATIVE to the scope root — the
+-- repo prefix is exactly what is redundant with scope_key — which Story 3.2
+-- should adopt when it defines the flat index format, per AD-3.
+--
+-- The architecture already specified the key ("Digests keyed by (scope_key,
+-- path)"), so this makes the storage match the stated key instead of adding one.
+CREATE TABLE IF NOT EXISTS content_digests (
+  scope_key   TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  sha256      TEXT,
+  byte_size   INTEGER NOT NULL,
+  mtime       TEXT,
+  session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  agent_id    TEXT,
+  oversize    INTEGER NOT NULL DEFAULT 0,
+  read_count  INTEGER NOT NULL DEFAULT 1,
+  recorded_at TEXT NOT NULL,
+  PRIMARY KEY (scope_key, path)
+) WITHOUT ROWID;
 `;
 
 const V2_FTS = `
@@ -607,6 +753,19 @@ export function ensureCortexSchema(
   db: Database.Database,
   rootPath: string,
 ): EnsureSchemaResult {
+  // P-5: refuse a store from a newer build BEFORE applySchema touches it.
+  // Migrations are additive-only and this binary does not know the newer
+  // build's invariants, so operating on it is corruption, not compatibility.
+  // Checked first because applySchema would otherwise run its DDL against a
+  // schema it cannot reason about.
+  const stored = readStoredSchemaVersion(db);
+  if (stored.kind === 'corrupt') {
+    throw new CorruptSchemaVersionError(stored.raw);
+  }
+  if (stored.kind === 'ok' && stored.version > SCHEMA_VERSION) {
+    throw new NewerSchemaError(stored.version, SCHEMA_VERSION);
+  }
+
   applySchema(db);
 
   const previousVersion = getSchemaVersion(db);
@@ -631,7 +790,17 @@ export function ensureCortexSchema(
 
   backfillV2Artifacts(db, rootPath);
 
-  if (currentVersion !== SCHEMA_VERSION) {
+  // Upgrade-only. This was `!==`, which fires in both directions and silently
+  // rewrote a newer store *down* to this build's version — destroying the only
+  // evidence a downgrade happened, which is why `doctor`'s fix for a newer
+  // store refuses to say "run any cortex command".
+  //
+  // Stated honestly: the refusal above is what actually prevents that now, so
+  // this branch is unreachable for a newer store and `<` is belt-and-braces
+  // rather than the fix. A mutation restoring `!==` therefore cannot be killed
+  // by any test, and that survivor is expected — it is kept because it states
+  // the intended direction and holds if the refusal is ever moved or relaxed.
+  if (currentVersion < SCHEMA_VERSION) {
     setMetaValue(db, 'schema_version', String(SCHEMA_VERSION));
     currentVersion = SCHEMA_VERSION;
   }

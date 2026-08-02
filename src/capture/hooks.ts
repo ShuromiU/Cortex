@@ -1,6 +1,7 @@
 import type { CortexStore } from '../db/store.js';
 import { syncBranchSnapshotForSession } from '../scope/runtime.js';
 import { consolidateLevel1, renderCompressed } from './consolidate.js';
+import { computeFileDigest, type DigestCache } from './digest.js';
 import {
   captureOutputTail,
   classifyCommand,
@@ -14,6 +15,11 @@ import {
 export interface ReadArgs {
   file: string;
   lines?: string;
+  /**
+   * Per-batch digest memo. Supplied by the spool flush so one file is hashed
+   * once per batch; absent for one-off calls, which hash directly.
+   */
+  digestCache?: DigestCache;
 }
 
 export interface EditArgs {
@@ -177,7 +183,55 @@ export function handleReadEvent(
     target: args.file,
     ...(Object.keys(range).length > 0 ? { metadata: range } : {}),
   });
+  recordReadDigest(store, sessionId, args);
   syncBranchSnapshotForSession(store, sessionId);
+}
+
+/**
+ * Record the read ledger's digest for a file this session just read (FR-5).
+ *
+ * Runs on the cold path only — every caller of `handleReadEvent` is either the
+ * spool flush, a CLI command, or the `hook-entry` bridge, all of which already
+ * have Node running. The bash PostToolUse hook never reaches here (N-4).
+ *
+ * `scope_key` and `agent_id` come from the *resolved* session rather than from
+ * cwd or the raw payload, so a subagent's read is attributed to the subagent —
+ * which is the fact AD-16 needs to refuse "you read it" for a sibling session.
+ */
+function recordReadDigest(store: CortexStore, sessionId: string, args: ReadArgs): void {
+  try {
+    const session = store.getSession(sessionId);
+    // A session with no scope cannot be keyed, and a scope-less digest would
+    // collide across branches.
+    if (!session?.scope_key) {
+      return;
+    }
+
+    const digest = args.digestCache
+      ? args.digestCache(args.file)
+      : computeFileDigest(args.file);
+    if (!digest) {
+      return;
+    }
+
+    store.upsertContentDigest({
+      scopeKey: session.scope_key,
+      // Raw: the store normalizes the key on write and read alike.
+      path: args.file,
+      sha256: digest.sha256,
+      byteSize: digest.byteSize,
+      mtime: digest.mtime,
+      sessionId,
+      agentId: session.agent_id ?? null,
+      oversize: digest.oversize,
+      // AD-16: lets the upsert keep an ancestor's recorded read rather than
+      // letting this session's read erase it.
+      readerParentSessionId: session.parent_session_id,
+    });
+  } catch {
+    // AD-12: capture is ambient. A ledger failure must never break the user's
+    // turn or abort the surrounding spool batch, which carries real events.
+  }
 }
 
 /**

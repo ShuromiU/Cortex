@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { CortexStore } from '../db/store.js';
 import { resolveAgentSessionId } from '../scope/runtime.js';
+import { createDigestCache, type DigestCache, type DigestDeps } from './digest.js';
 import {
   handleAgentEvent,
   handleCmdEvent,
@@ -112,13 +113,19 @@ function isReplayable(entry: SpoolEntry): boolean {
   }
 }
 
-function replayEntry(store: CortexStore, sessionId: string, entry: SpoolEntry): boolean {
+function replayEntry(
+  store: CortexStore,
+  sessionId: string,
+  entry: SpoolEntry,
+  digestCache: DigestCache,
+): boolean {
   switch (entry.tool) {
     case 'read':
       if (!entry.file) return false;
       handleReadEvent(store, sessionId, {
         file: entry.file,
         ...(entry.lines ? { lines: entry.lines } : {}),
+        digestCache,
       });
       return true;
     case 'edit':
@@ -217,6 +224,7 @@ function processClaimFile(
   store: CortexStore,
   sessionId: string,
   claimPath: string,
+  deps?: DigestDeps,
 ): SpoolFlushResult {
   let raw: string;
   try {
@@ -240,6 +248,11 @@ function processClaimFile(
       // A 256 KiB batch can hold hundreds of entries from one subagent; resolve
       // each distinct agent once rather than per entry.
       const sessionByAgent = new Map<string, ResolvedAgent>();
+      // Likewise for digests: every read in one batch describes the same
+      // on-disk state, so a path is hashed once per flush. Created here and
+      // discarded with the batch — a module-level cache would let a long-lived
+      // MCP process serve a stale hash indefinitely.
+      const digestCache = createDigestCache(undefined, deps);
 
       for (const entry of entries) {
         if (!isReplayable(entry)) {
@@ -247,7 +260,7 @@ function processClaimFile(
           continue;
         }
         const target = resolveEntrySession(store, sessionId, entry, sessionByAgent);
-        if (replayEntry(store, target, entry)) {
+        if (replayEntry(store, target, entry, digestCache)) {
           processed++;
         } else {
           skipped++;
@@ -277,6 +290,8 @@ export function flushSpool(
   store: CortexStore,
   dir: string,
   sessionId: string,
+  /** Test seam only; see `computeFileDigest`. Production omits it. */
+  deps?: DigestDeps,
 ): SpoolFlushResult {
   const spoolPath = deriveSpoolPath(dir);
   const claimPath = `${spoolPath}.processing`;
@@ -284,7 +299,7 @@ export function flushSpool(
   let skipped = 0;
 
   if (fs.existsSync(claimPath)) {
-    const orphan = processClaimFile(store, sessionId, claimPath);
+    const orphan = processClaimFile(store, sessionId, claimPath, deps);
     processed += orphan.processed;
     skipped += orphan.skipped;
   }
@@ -296,7 +311,7 @@ export function flushSpool(
       // A concurrent flush claimed it; nothing left to do.
       return { processed, skipped };
     }
-    const fresh = processClaimFile(store, sessionId, claimPath);
+    const fresh = processClaimFile(store, sessionId, claimPath, deps);
     processed += fresh.processed;
     skipped += fresh.skipped;
   }

@@ -13,7 +13,7 @@ import {
   openProjectStore,
   resolveProjectStore,
 } from '../scope/store-migration.js';
-import { maybeCheckpointWal } from '../db/schema.js';
+import { maybeCheckpointWal, UnopenableStoreError } from '../db/schema.js';
 import { reflectMemory, type ReflexEvent } from '../query/reflex.js';
 import { suggestNotes } from '../query/suggest-notes.js';
 import { flushSpool } from '../capture/spool.js';
@@ -516,7 +516,23 @@ async function main(): Promise<void> {
   const raw = await readStdin();
   const payload = parsePayload(raw);
   const cwd = stringValue(payload['cwd']) ?? process.cwd();
-  const store = openCortexDb(cwd);
+
+  let store;
+  try {
+    store = openCortexDb(cwd);
+  } catch (err) {
+    // AD-12: every hook path degrades to silence. A store written by a newer
+    // build is refused (P-5), and this is the one place that refusal must NOT
+    // be spoken: `reflect-pre` fires on every Edit and Write, so surfacing it
+    // would print a stack trace on every tool call and exit non-zero. The user
+    // learns about it from `cortex doctor`, which is built to report it and is
+    // unaffected because it opens read-only.
+    if (err instanceof UnopenableStoreError) {
+      return;
+    }
+    throw err;
+  }
+
   const output = handleHookPayload(store, action, raw, cwd);
   if (output) {
     process.stdout.write(`${output}\n`);
