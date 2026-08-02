@@ -19,6 +19,12 @@ describe('formatTokens', () => {
   it('formats values below 1000 as plain number', () => {
     expect(formatTokens(500)).toBe('500');
     expect(formatTokens(0)).toBe('0');
+    // `Net` was structurally positive until FR-8 withdrew the counterfactual
+    // credit. With no negative branch, `-45827` printed raw on a screen of
+    // `45.8k`s — and it is now the number a reader looks at hardest.
+    expect(formatTokens(-45827)).toBe('-45.8k');
+    expect(formatTokens(-500)).toBe('-500');
+    expect(formatTokens(-2000)).toBe('-2k');
     expect(formatTokens(999)).toBe('999');
   });
 
@@ -136,7 +142,9 @@ describe('buildHeader - token savings', () => {
   it('includes savings when saved tokens > 0', () => {
     const store = makeStore();
     const session = store.createSession();
-    store.insertLedgerEntry({ sessionId: session.id, type: 'consolidation', direction: 'saved', tokens: 1500 });
+    // 1500 tokens needs at least 6000 bytes of evidence behind it: a credit may
+    // not claim more tokens than the avoided content can account for.
+    store.insertLedgerEntry({ sessionId: session.id, type: 'substitution:read', direction: 'saved', tokens: 1500, evidence: { kind: 'read', ref: 'src/evidence.ts', size: 8192 } });
     store.endSession(session.id);
     store.insertState({ sessionId: session.id, layer: 'session', content: 'Done.' });
 

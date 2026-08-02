@@ -394,11 +394,72 @@ export function normalizeReadLedgerPaths(raw: unknown): string[] {
   return list.filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
 }
 
+/**
+ * Tool names whose own case already books an `injected` row.
+ *
+ * These book *inside* the case because they hold a session handle there and
+ * their row carries a specific `type`. The boundary skips them rather than
+ * double-counting.
+ */
+const SELF_BOOKING_TOOLS = new Set([
+  'cortex_state',
+  'cortex_recall',
+  'cortex_brief',
+  'cortex_read_ledger',
+]);
+
+/**
+ * Every tool's rendered output, booked as `injected` — at the DISPATCH
+ * BOUNDARY, not per case.
+ *
+ * AC #1 says *any* Cortex output surface books what it injected. Written per
+ * case it was true of four tools out of twelve: `cortex_route`, `cortex_note`,
+ * `cortex_resolve`, `cortex_suggest_notes`, `cortex_validate_memory`,
+ * `cortex_disengage` and — most pointedly — `cortex_summarize`, which injects a
+ * whole session summary and was the *only* prior producer on the credit side,
+ * all rendered into the agent's context and recorded nothing. Measured on a
+ * 120-note store: 2017 unbooked tokens against 866 booked, so ~70% of what
+ * Cortex costs was invisible to the P&L that judges whether Cortex is worth it.
+ *
+ * Booking here makes the property structural: a tool added later cannot forget,
+ * because it does not get a choice. That is the difference between an AC that
+ * holds today and one that keeps holding.
+ */
 export function handleToolCall(
   store: CortexStore,
   toolName: string,
   args: Record<string, unknown>,
   cwd: string = process.cwd(),
+): string {
+  // **AD-8: the ledger row shares the operation's transaction, so a failed
+  // operation records nothing.** Measured before this: six of seven ledger
+  // writes committed in autocommit with no transaction open, and a failure
+  // after the write left the row behind — `db.inTransaction` was `false` at
+  // every site except the spool flush, which is inside a transaction that
+  // pre-dates this story and exists for AC #5. `runInTransaction` covers the
+  // render and the booking together: if the render throws, nothing is written.
+  return store.runInTransaction(() => {
+    const output = dispatchToolCall(store, toolName, args, cwd);
+    if (!SELF_BOOKING_TOOLS.has(toolName)) {
+      const session = store.getCurrentSession();
+      if (session && output.length > 0) {
+        store.insertLedgerEntry({
+          sessionId: session.id,
+          type: toolName.replace(/^cortex_/, ''),
+          direction: 'injected',
+          tokens: estimateTokens(output),
+        });
+      }
+    }
+    return output;
+  });
+}
+
+function dispatchToolCall(
+  store: CortexStore,
+  toolName: string,
+  args: Record<string, unknown>,
+  cwd: string,
 ): string {
   configureEngagementPath(cwd);
 
@@ -419,7 +480,7 @@ export function handleToolCall(
       store.insertLedgerEntry({
         sessionId: session.id,
         type: 'state',
-        direction: 'spent',
+        direction: 'injected',
         tokens: estimateTokens(output),
       });
       return output;
@@ -578,7 +639,7 @@ export function handleToolCall(
       store.insertLedgerEntry({
         sessionId: session.id,
         type: 'recall',
-        direction: 'spent',
+        direction: 'injected',
         tokens: estimateTokens(output),
       });
       return output;
@@ -596,7 +657,7 @@ export function handleToolCall(
       store.insertLedgerEntry({
         sessionId: session.id,
         type: 'brief',
-        direction: 'spent',
+        direction: 'injected',
         tokens: estimateTokens(output),
       });
       return output;
@@ -630,6 +691,9 @@ export function handleToolCall(
       const results = queryReadLedger(store, {
         paths: requested.map(p => resolveOnDiskPath(p, cwd)),
         sessionId: session.id,
+        // This is the surface where Cortex actually tells an agent it already
+        // has a file's content, so this is where an offer exists to decline.
+        recordOffers: true,
       });
       // Report the paths as asked, not as resolved: an absolute path burns the
       // per-file token budget on a prefix the caller already knows.
@@ -637,7 +701,17 @@ export function handleToolCall(
         ...result,
         path: requested[index] ?? result.path,
       }));
-      return renderReadLedger(labeled, requested.length);
+      const output = renderReadLedger(labeled, requested.length);
+      // AC #1: every output surface books what it injected. This one was
+      // missing it — Story 3.3 added a rendering surface and no ledger row, so
+      // the tool's own cost was invisible to the P&L that judges it.
+      store.insertLedgerEntry({
+        sessionId: session.id,
+        type: 'read_ledger',
+        direction: 'injected',
+        tokens: estimateTokens(output),
+      });
+      return output;
     }
 
     case 'cortex_engage': {
@@ -650,7 +724,7 @@ export function handleToolCall(
       store.insertLedgerEntry({
         sessionId: session.id,
         type: 'state',
-        direction: 'spent',
+        direction: 'injected',
         tokens: estimateTokens(output),
       });
       return output;

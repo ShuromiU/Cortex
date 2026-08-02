@@ -151,8 +151,12 @@ describe('Schema', () => {
     // version-gated migration — that is what this test pins. The version does
     // now advance to 5, but for an unrelated reason: R1's single AD-11 bump,
     // which Story 2.2 spent on `memory_corrections`.
+    // Adding a COLUMN does not bump the version — an older binary that does not
+    // select it is unaffected. (The version is 6 for Story 3.5's rewrite of
+    // `token_ledger.direction` VALUES, which an older binary does read and then
+    // misreports; that is the P-5 case a bump exists to make loud.)
     expect(getSchemaVersion(db)).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(5);
+    expect(SCHEMA_VERSION).toBe(6);
     // Pre-existing rows survive and default to primary (no agent identity).
     expect(
       (db.prepare('SELECT agent_id FROM sessions WHERE id = ?').get('legacy-1') as {
@@ -441,8 +445,8 @@ describe('memory_corrections table', () => {
 
     ensureCortexSchema(db, '/repo');
 
-    expect(getSchemaVersion(db)).toBe(5);
-    expect(SCHEMA_VERSION).toBe(5);
+    expect(getSchemaVersion(db)).toBe(SCHEMA_VERSION);
+    expect(SCHEMA_VERSION).toBe(6);
     expect(db.prepare('SELECT id FROM memory_items WHERE id = ?').get('keep-me')).toBeTruthy();
   });
 

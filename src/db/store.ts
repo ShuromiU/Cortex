@@ -453,11 +453,95 @@ export interface InsertStateOpts {
   content: string;
 }
 
+/**
+ * What a ledger row records (FR-8).
+ *
+ * `injected` is what Cortex put into the context; it was stored as `'spent'`
+ * until Story 3.5 and is migrated. `saved` is credit for an action that did not
+ * happen, and may only be written with evidence. `unrealized` is an offer the
+ * agent declined — capability that existed and was not taken — which AC #6
+ * requires be visible *separately* from savings rather than folded into them.
+ * `estimated` is the retired, evidence-free consolidation credit: kept for
+ * history, never counted as a saving.
+ */
+export type LedgerDirection = 'injected' | 'saved' | 'unrealized' | 'estimated';
+
+/**
+ * The evidence a `saved` or `unrealized` row must carry (AC #2).
+ *
+ * `size` is bytes for an avoided read, output size for an avoided command, and
+ * result count for an avoided search — the three shapes the AC names. `ref`
+ * identifies the thing avoided (a path, a command, a query).
+ */
+export interface LedgerEvidence {
+  kind: 'read' | 'command' | 'search';
+  ref: string;
+  size: number;
+}
+
 export interface InsertLedgerOpts {
   sessionId: string;
   type: string;
-  direction: 'spent' | 'saved';
+  direction: LedgerDirection;
   tokens: number;
+  evidence?: LedgerEvidence;
+  /**
+   * A caller-supplied stable id, so replaying the same fact is a no-op instead
+   * of a second row. Used by the spool's credit replay; omitted elsewhere, in
+   * which case a UUID is minted.
+   */
+  id?: string;
+}
+
+const LEDGER_DIRECTIONS: ReadonlySet<string> = new Set([
+  'injected',
+  'saved',
+  'unrealized',
+  'estimated',
+]);
+
+/**
+ * A credit must be evidenced, and its AMOUNT must be consistent with that
+ * evidence.
+ *
+ * Requiring an evidence object to merely *exist* was not enough. Measured: a
+ * spool credit line claiming 1,000,000 tokens against `does/not/exist.ts` with
+ * `size: 0` was accepted, and two such lines produced `Saved: 2.0M`. The spool
+ * is a plain JSONL file in the project root appended by a bash hook, so that is
+ * a reachable input, and "credit that cannot be checked" is the one thing FR-8
+ * exists to eliminate — an unchecked amount reintroduces it through the door
+ * the evidence requirement was meant to close.
+ *
+ * The bound for a read or a command is arithmetic: you cannot save more tokens
+ * than the avoided content contains, and `ceil(bytes / 4)` is the same ratio
+ * `estimateTokens` uses. A search's evidence is a *result count*, not bytes, so
+ * no such bound exists and only the reference is required — stated rather than
+ * papered over with a fake ceiling.
+ */
+function assertCreditIsEvidenced(opts: InsertLedgerOpts): void {
+  const { evidence, direction } = opts;
+  if (!evidence) {
+    throw new Error(
+      `${direction} ledger row requires evidence (AC #3: no modeled or counterfactual credit)`,
+    );
+  }
+  if (typeof evidence.ref !== 'string' || evidence.ref.trim().length === 0) {
+    throw new Error(`${direction} ledger row requires a non-empty evidence ref`);
+  }
+  if (!Number.isSafeInteger(evidence.size) || evidence.size < 0) {
+    throw new Error(`${direction} ledger row requires a whole non-negative evidence size`);
+  }
+  if (!Number.isSafeInteger(opts.tokens) || opts.tokens < 0) {
+    throw new Error(`${direction} ledger row requires a whole non-negative token count`);
+  }
+  if (evidence.kind !== 'search') {
+    const ceiling = Math.ceil(evidence.size / 4);
+    if (opts.tokens > ceiling) {
+      throw new Error(
+        `${direction} ledger row claims ${opts.tokens} tokens against ${evidence.size} bytes of evidence (max ${ceiling})`,
+      );
+    }
+  }
 }
 
 export interface InsertCommandRunOpts {
@@ -2910,15 +2994,163 @@ export class CortexStore {
 
   // ── Token Ledger ──────────────────────────────────────────────────
 
+  /**
+   * Write one ledger row.
+   *
+   * **A credit without evidence is refused, not silently written** (AC #3).
+   * Before Story 3.5 the only `saved` producer in the codebase was
+   * `writeSessionSummary`, computing
+   * `estimateTokens(JSON.stringify(events)) - estimateTokens(summary)` — the
+   * difference between a summary and pasting every captured event as raw JSON,
+   * against a baseline no one would ever have paid. That single line was the
+   * whole of the 657.6k "Saved" and the 93% "Efficiency" the product displayed.
+   * A ledger whose credit side cannot be checked is worse than no ledger,
+   * because it is quoted.
+   *
+   * Enforced here rather than by a table CHECK: this method is the single write
+   * path (seven call sites, all through it), and adding a CHECK to a populated
+   * table means a full rebuild in SQLite. Stated because it is a real
+   * trade-off — a hand-written INSERT bypasses this guard, and nothing at the
+   * storage layer would stop it.
+   */
   insertLedgerEntry(opts: InsertLedgerOpts): void {
-    const id = crypto.randomUUID();
+    // Validated for EVERY direction, not just credit. `injected` was unguarded,
+    // so `tokens: Infinity` was accepted and then made `Net` and `Efficiency`
+    // both `NaN` in `cortex stats` — a guard asymmetry with no reason behind it.
+    if (!LEDGER_DIRECTIONS.has(opts.direction)) {
+      // A direction outside the four contributes to none of `getTotalTokens`'
+      // four sums while still sitting in the table and being rolled up by GC,
+      // so the P&L silently stops reconciling against `SUM(tokens)`.
+      throw new Error(`unknown ledger direction '${opts.direction}'`);
+    }
+    if (!Number.isSafeInteger(opts.tokens) || opts.tokens < 0) {
+      throw new Error(`ledger row requires a whole non-negative token count, got ${opts.tokens}`);
+    }
+    if (opts.direction === 'saved' || opts.direction === 'unrealized') {
+      assertCreditIsEvidenced(opts);
+    }
+    const id = opts.id ?? crypto.randomUUID();
     const now = new Date().toISOString();
     this.db
       .prepare(
-        `INSERT INTO token_ledger (id, session_id, type, direction, tokens, timestamp)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO token_ledger
+           (id, session_id, type, direction, tokens, timestamp,
+            evidence_kind, evidence_ref, evidence_size)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, opts.sessionId, opts.type, opts.direction, opts.tokens, now);
+      .run(
+        id,
+        opts.sessionId,
+        opts.type,
+        opts.direction,
+        opts.tokens,
+        now,
+        opts.evidence?.kind ?? null,
+        opts.evidence?.ref ?? null,
+        opts.evidence?.size ?? null,
+      );
+  }
+
+  /**
+   * Record that Cortex told a session it already has this file's content.
+   *
+   * **An offer is pending state, not an accounting fact, and that distinction
+   * is the whole of AC #6.** Written into `token_ledger` as an `unrealized`
+   * row — as this did briefly — an offer counted as adoption failure the
+   * instant it was *made*: an agent that adopted every offer scored identically
+   * to one that ignored every offer, and the figure rendered "offered, not
+   * taken" actually meant "offered". It also forced a DELETE on consumption,
+   * against AD-8's "every ledger row is append-only".
+   *
+   * Keyed on `(session_id, scope_key, path)` and upserted, so asking the same
+   * question five times leaves one offer rather than five — otherwise following
+   * the documented best practice ("ask before re-reading") would monotonically
+   * inflate the adoption-failure metric.
+   */
+  upsertReadOffer(opts: {
+    sessionId: string;
+    scopeKey: string;
+    path: string;
+    byteSize: number;
+    tokens: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO read_offers (session_id, scope_key, path, byte_size, tokens, offered_at)
+         VALUES (:sessionId, :scopeKey, :path, :byteSize, :tokens, :offeredAt)
+         ON CONFLICT(session_id, scope_key, path) DO UPDATE SET
+           byte_size  = excluded.byte_size,
+           tokens     = excluded.tokens,
+           offered_at = excluded.offered_at`,
+      )
+      .run({
+        sessionId: opts.sessionId,
+        scopeKey: opts.scopeKey,
+        path: opts.path,
+        byteSize: opts.byteSize,
+        tokens: opts.tokens,
+        offeredAt: new Date().toISOString(),
+      });
+  }
+
+  /**
+   * Consume an open offer for this file and book the decline, atomically.
+   *
+   * Returns the `unrealized` row's evidence, or null when no offer was open —
+   * in which case nothing is recorded, because a read Cortex never offered to
+   * save is not a declined offer.
+   *
+   * **The consume and the booking are one transaction.** As two statements, a
+   * failure between them destroyed the offer and recorded nothing — silently
+   * losing the exact fact AC #6 exists to capture. This runs on `hook-entry
+   * post` and `cli log read`, where nothing else wraps it.
+   *
+   * **Matched across the session's ancestry, not just the exact session.** The
+   * offer is made to whichever session called the tool — always the primary,
+   * since `cortex_read_ledger` resolves without an agent id — while a
+   * subagent's Read replays under its own child session. Filtering on equality
+   * meant a delegated read could never be seen as a decline, and delegated work
+   * is the majority of tool calls. The ancestry rule is AD-16's, reused: a read
+   * by you or by a descendant answers an offer made to you.
+   */
+  consumeReadOffer(
+    sessionId: string,
+    scopeKey: string,
+    filePath: string,
+    withinMs = 60 * 60 * 1000,
+  ): { path: string; byteSize: number; tokens: number } | null {
+    const key = toScopeRelativeKey(filePath, this.scopeRootFor(scopeKey));
+    const since = new Date(Date.now() - withinMs).toISOString();
+    const ancestry = this.getSessionAncestorIds(sessionId);
+    const placeholders = ancestry.map(() => '?').join(', ');
+
+    return this.runInImmediateTransaction(() => {
+      const row = this.db
+        .prepare(
+          `SELECT session_id, path, byte_size, tokens
+             FROM read_offers
+            WHERE session_id IN (${placeholders})
+              AND scope_key = ? AND path = ? AND offered_at >= ?
+            ORDER BY offered_at DESC
+            LIMIT 1`,
+        )
+        .get(...ancestry, scopeKey, key, since) as
+        | { session_id: string; path: string; byte_size: number; tokens: number }
+        | undefined;
+      if (!row) {
+        return null;
+      }
+      this.db
+        .prepare('DELETE FROM read_offers WHERE session_id = ? AND scope_key = ? AND path = ?')
+        .run(row.session_id, scopeKey, row.path);
+      return { path: row.path, byteSize: row.byte_size, tokens: row.tokens };
+    });
+  }
+
+  /** Offers that expired unconsumed. Never counted — an unread offer is not a decline. */
+  pruneExpiredReadOffers(withinMs = 60 * 60 * 1000): number {
+    const since = new Date(Date.now() - withinMs).toISOString();
+    return this.db.prepare('DELETE FROM read_offers WHERE offered_at < ?').run(since).changes;
   }
 
   getLedgerBySession(sessionId: string): LedgerRow[] {
@@ -2927,16 +3159,37 @@ export class CortexStore {
       .all(sessionId) as LedgerRow[];
   }
 
-  getTotalTokens(): { spent: number; saved: number } {
+  /**
+   * Ledger totals, by direction.
+   *
+   * `spent` is retained as the field name for `injected` so existing readers
+   * keep compiling; `estimated` and `unrealized` are reported separately and
+   * are deliberately **not** folded into `saved`. Folding them is the whole
+   * failure this story corrects — a credit that cannot be evidenced, added to
+   * one that can, produces a headline number nobody can check.
+   */
+  getTotalTokens(): { spent: number; saved: number; unrealized: number; estimated: number } {
     const row = this.db
       .prepare(
         `SELECT
-           SUM(CASE WHEN direction = 'spent' THEN tokens ELSE 0 END) as spent,
-           SUM(CASE WHEN direction = 'saved' THEN tokens ELSE 0 END) as saved
+           SUM(CASE WHEN direction = 'injected'   THEN tokens ELSE 0 END) as spent,
+           SUM(CASE WHEN direction = 'saved'      THEN tokens ELSE 0 END) as saved,
+           SUM(CASE WHEN direction = 'unrealized' THEN tokens ELSE 0 END) as unrealized,
+           SUM(CASE WHEN direction = 'estimated'  THEN tokens ELSE 0 END) as estimated
          FROM token_ledger`,
       )
-      .get() as { spent: number | null; saved: number | null };
-    return { spent: row.spent ?? 0, saved: row.saved ?? 0 };
+      .get() as {
+      spent: number | null;
+      saved: number | null;
+      unrealized: number | null;
+      estimated: number | null;
+    };
+    return {
+      spent: row.spent ?? 0,
+      saved: row.saved ?? 0,
+      unrealized: row.unrealized ?? 0,
+      estimated: row.estimated ?? 0,
+    };
   }
 
   getLedgerStats(): { spent: number; saved: number; byType: Record<string, { spent: number; saved: number }> } {
@@ -2954,7 +3207,7 @@ export class CortexStore {
       if (!byType[row.type]) {
         byType[row.type] = { spent: 0, saved: 0 };
       }
-      if (row.direction === 'spent') {
+      if (row.direction === 'injected') {
         byType[row.type]!.spent = row.total;
       } else if (row.direction === 'saved') {
         byType[row.type]!.saved = row.total;

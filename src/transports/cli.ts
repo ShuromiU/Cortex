@@ -864,7 +864,7 @@ export function createProgram(): Command {
               store.insertLedgerEntry({
                 sessionId: scoped.id,
                 type: 'session_brief',
-                direction: 'spent',
+                direction: 'injected',
                 tokens: estimateTokens(sessionBrief),
               });
             } catch {
@@ -956,17 +956,50 @@ export function createProgram(): Command {
 
       const sessionCount = store.getSessionCount();
       const activeNotes = store.getActiveNotes();
-      const { spent, saved } = store.getTotalTokens();
+      const { spent, saved, unrealized, estimated } = store.getTotalTokens();
       const net = saved - spent;
       const efficiency = spent > 0 ? Math.round((saved / (spent + saved)) * 100) : 0;
 
       process.stdout.write(`Focus:         ${focus}\n`);
       process.stdout.write(`Sessions:      ${sessionCount}\n`);
       process.stdout.write(`Active notes:  ${activeNotes.length}\n`);
-      process.stdout.write(`Spent:         ${formatTokens(spent)}\n`);
+      process.stdout.write(`Injected:      ${formatTokens(spent)}\n`);
       process.stdout.write(`Saved:         ${formatTokens(saved)}\n`);
       process.stdout.write(`Net:           ${formatTokens(net)}\n`);
       process.stdout.write(`Efficiency:    ${efficiency}%\n`);
+      if (unrealized > 0) {
+        // AC #6: separate from savings, so the capability-versus-adoption gap
+        // is visible rather than folded into a number that looks like success
+        // either way.
+        process.stdout.write(`Unrealized:    ${formatTokens(unrealized)} (offered, not taken)\n`);
+      }
+      if (estimated > 0) {
+        process.stdout.write(
+          `Estimated:     ${formatTokens(estimated)} (retired consolidation estimate, not counted)\n`,
+        );
+      }
+      // **`Saved: 0` is the honest state, and saying so is part of the fix.**
+      // Until Story 3.5 this line read `Saved: 657.6k / Efficiency: 93%` off a
+      // single counterfactual — the difference between a session summary and
+      // pasting every captured event as raw JSON. That credit is withdrawn, and
+      // the mechanism that produces evidence-backed credit (verified read
+      // substitution, Story 4.5) has not shipped. A bare `Net: -45827` would
+      // mislead in the opposite direction, so the reason is printed rather than
+      // left for the reader to infer that Cortex simply returns nothing.
+      if (saved === 0) {
+        // Not gated on `spent > 0`: a store with no spend yet would otherwise
+        // print a bare `Efficiency: 0%` with no explanation, which reads as a
+        // measured verdict rather than an absence of measurement. And the
+        // reason names the missing MECHANISM, not just the missing evidence —
+        // without that a reader concludes Cortex returns nothing, when the
+        // truth is that the meter is not installed yet.
+        process.stdout.write(
+          `               no verified savings yet: credit needs recorded evidence, and the\n`,
+        );
+        process.stdout.write(
+          `               mechanism that produces it (verified read substitution) is not shipped\n`,
+        );
+      }
 
       // AC #3: named separately, because "footprint" that folds them together
       // hides the thing FR-25 is about — a WAL parked at its high-water mark

@@ -31,12 +31,18 @@ const DEFERRED_TOOL_DISCOVERY_GUIDANCE =
   'Deferred schema discovery: use ToolSearch/tool_search by callable name (`cortex_recall`, `cortex_state`, `cortex_route`) or server name (`Cortex`). Canonical `select:mcp__cortex__...` selectors may return 0 on current Codex app-server builds and are not proof Cortex is unavailable.';
 
 export function formatTokens(n: number): string {
-  if (n >= 1000) {
-    const k = n / 1000;
+  // Negatives take the same abbreviation. `Net` was structurally positive until
+  // FR-8 withdrew the counterfactual credit; the `n >= 1000` branch then left
+  // `-45827` as the one raw figure on a screen of `45.8k`s — and it is the
+  // number a reader looks at hardest, precisely because it is now negative.
+  const sign = n < 0 ? '-' : '';
+  const magnitude = Math.abs(n);
+  if (magnitude >= 1000) {
+    const k = magnitude / 1000;
     const formatted = k % 1 === 0 ? String(k) : k.toFixed(1).replace(/\.0$/, '');
-    return `${formatted}k`;
+    return `${sign}${formatted}k`;
   }
-  return String(n);
+  return `${sign}${magnitude}`;
 }
 
 function trimSummary(summary: string, maxLines: number = 3): string {

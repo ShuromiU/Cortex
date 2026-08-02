@@ -1154,7 +1154,7 @@ describe('CortexStore — token ledger', () => {
     store.insertLedgerEntry({
       sessionId,
       type: 'tool_call',
-      direction: 'spent',
+      direction: 'injected',
       tokens: 150,
     });
 
@@ -1162,7 +1162,7 @@ describe('CortexStore — token ledger', () => {
     expect(entries.length).toBe(1);
     expect(entries[0]!.session_id).toBe(sessionId);
     expect(entries[0]!.type).toBe('tool_call');
-    expect(entries[0]!.direction).toBe('spent');
+    expect(entries[0]!.direction).toBe('injected');
     expect(entries[0]!.tokens).toBe(150);
     expect(entries[0]!.id).toBeTruthy();
     expect(entries[0]!.timestamp).toBeTruthy();
@@ -1171,9 +1171,9 @@ describe('CortexStore — token ledger', () => {
   it('computes total tokens spent and saved', () => {
     const session2 = store.createSession();
 
-    store.insertLedgerEntry({ sessionId, type: 'tool_call', direction: 'spent', tokens: 100 });
-    store.insertLedgerEntry({ sessionId, type: 'cache', direction: 'saved', tokens: 300 });
-    store.insertLedgerEntry({ sessionId: session2.id, type: 'tool_call', direction: 'spent', tokens: 50 });
+    store.insertLedgerEntry({ sessionId, type: 'tool_call', direction: 'injected', tokens: 100 });
+    store.insertLedgerEntry({ sessionId, type: 'cache', direction: 'saved', tokens: 300, evidence: { kind: 'read', ref: 'src/evidence.ts', size: 4096 } });
+    store.insertLedgerEntry({ sessionId: session2.id, type: 'tool_call', direction: 'injected', tokens: 50 });
 
     const totals = store.getTotalTokens();
     expect(totals.spent).toBe(150);
@@ -1187,10 +1187,10 @@ describe('CortexStore — token ledger', () => {
   });
 
   it('computes ledger stats with per-type breakdown', () => {
-    store.insertLedgerEntry({ sessionId, type: 'tool_call', direction: 'spent', tokens: 100 });
-    store.insertLedgerEntry({ sessionId, type: 'tool_call', direction: 'spent', tokens: 50 });
-    store.insertLedgerEntry({ sessionId, type: 'cache', direction: 'saved', tokens: 400 });
-    store.insertLedgerEntry({ sessionId, type: 'prompt', direction: 'spent', tokens: 200 });
+    store.insertLedgerEntry({ sessionId, type: 'tool_call', direction: 'injected', tokens: 100 });
+    store.insertLedgerEntry({ sessionId, type: 'tool_call', direction: 'injected', tokens: 50 });
+    store.insertLedgerEntry({ sessionId, type: 'cache', direction: 'saved', tokens: 400, evidence: { kind: 'read', ref: 'src/evidence.ts', size: 4096 } });
+    store.insertLedgerEntry({ sessionId, type: 'prompt', direction: 'injected', tokens: 200 });
 
     const stats = store.getLedgerStats();
     expect(stats.spent).toBe(350);

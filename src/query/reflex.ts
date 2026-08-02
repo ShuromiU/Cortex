@@ -189,7 +189,7 @@ export function reflectMemory(store: CortexStore, options: ReflexOptions): strin
     store.insertLedgerEntry({
       sessionId: options.sessionId,
       type: 'reflex',
-      direction: 'spent',
+      direction: 'injected',
       tokens: estimateTokens(additionalContext),
     });
   }

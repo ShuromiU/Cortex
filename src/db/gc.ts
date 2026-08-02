@@ -20,6 +20,8 @@ export interface GcOptions {
   commandRunCapPerScope?: number;
   /** Delete content digests not re-read within this many days (FR-5, AD-3). */
   digestDays?: number;
+  /** Delete unconsumed read offers older than this many days (FR-8). */
+  offerDays?: number;
   dryRun?: boolean;
   vacuum?: 'auto' | 'always' | 'never';
   now?: Date;
@@ -39,6 +41,7 @@ export interface GcReport {
   archived_memory_items: GcCategoryReport;
   command_run_items: GcCategoryReport;
   content_digests: GcCategoryReport;
+  read_offers: GcCategoryReport;
   freelist_ratio: number;
   vacuumed: boolean;
 }
@@ -48,6 +51,9 @@ const DEFAULTS = {
   retrievalLogDays: 30,
   retrievalLogKeep: 2000,
   ledgerDays: 14,
+  // An offer is only meaningful while the read it might excuse could still
+  // happen; a day is generous for that. See `pruneReadOffers`.
+  offerDays: 1,
   correctionDays: 90,
   archivedDays: 90,
   commandRunCapPerScope: 200,
@@ -89,6 +95,7 @@ function resolveGcOptions(options: GcOptions = {}): Required<Omit<GcOptions, 'no
     // `CORTEX_*` number (`CORTEX_WAL_MAX_BYTES`, `CORTEX_DIGEST_MAX_BYTES`).
     // The existing callers keep `envNumber` so this change stays scoped.
     digestDays: normalizeDays(options.digestDays) ?? envDays('CORTEX_GC_DIGEST_DAYS') ?? DEFAULTS.digestDays,
+    offerDays: normalizeDays(options.offerDays) ?? envDays('CORTEX_GC_OFFER_DAYS') ?? DEFAULTS.offerDays,
     dryRun: options.dryRun ?? true,
     vacuum: options.vacuum ?? 'auto',
     now: options.now ?? new Date(),
@@ -203,12 +210,35 @@ function rollupLedger(
 
   let deleted = 0;
   const tx = db.transaction(() => {
+    // **The rollup carries the evidence forward in aggregate, or a verified
+    // saving silently becomes an unverifiable one after 14 days.**
+    //
+    // This is a raw INSERT, so it bypasses `insertLedgerEntry`'s guard that a
+    // `saved` row must carry evidence — exactly the bypass that guard's own
+    // docstring names as its trade-off. Rolling up without the evidence columns
+    // would leave `saved` rows whose backing is gone, which is the shape FR-8
+    // exists to eliminate; over time the whole credit side would decay back
+    // into an unfalsifiable number.
+    //
+    // Per-row evidence cannot survive aggregation, but its *sum* can and is the
+    // meaningful quantity: total bytes of reads actually avoided. So the group
+    // includes `evidence_kind` — a rollup of avoided reads is not
+    // interchangeable with one of avoided commands — and `evidence_ref` records
+    // how many rows were folded in rather than pretending to name one file.
     db.prepare(
-      `INSERT INTO token_ledger (id, session_id, type, direction, tokens, timestamp)
-       SELECT lower(hex(randomblob(16))), session_id, 'rollup', direction, SUM(tokens), MAX(timestamp)
+      `INSERT INTO token_ledger
+         (id, session_id, type, direction, tokens, timestamp,
+          evidence_kind, evidence_ref, evidence_size)
+       SELECT lower(hex(randomblob(16))), session_id, 'rollup', direction,
+              SUM(tokens), MAX(timestamp),
+              evidence_kind,
+              CASE WHEN evidence_kind IS NULL
+                   THEN NULL
+                   ELSE '(' || COUNT(*) || ' rolled up)' END,
+              SUM(evidence_size)
        FROM token_ledger
        WHERE timestamp < ? AND type != 'rollup'
-       GROUP BY session_id, direction`,
+       GROUP BY session_id, direction, evidence_kind`,
     ).run(cutoff);
     const result = db
       .prepare(`DELETE FROM token_ledger WHERE timestamp < ? AND type != 'rollup'`)
@@ -250,6 +280,37 @@ function pruneContentDigests(
   const result = db
     .prepare('DELETE FROM content_digests WHERE recorded_at < ?')
     .run(cutoff);
+  return { candidates, deleted: result.changes };
+}
+
+/**
+ * Drop read offers nobody acted on (FR-8).
+ *
+ * An offer is consumed when it is *declined* — the agent read the file anyway.
+ * The **success** case leaves it untouched: the agent trusted the answer and
+ * never re-read, so nothing consumes the row and nothing deletes it. Keyed on
+ * `(session_id, scope_key, path)`, that grows with distinct files × sessions
+ * forever, and nothing in `src/` deletes a session so the FK cascade never
+ * fires either. `pruneExpiredReadOffers` existed with exactly one caller: a
+ * test.
+ *
+ * The cutoff is deliberately short — an offer is only meaningful while the read
+ * it might excuse could still happen. Anything older is neither a saving nor a
+ * decline; it is just an unanswered question.
+ */
+function pruneReadOffers(
+  db: Database.Database,
+  cutoff: string,
+  dryRun: boolean,
+): GcCategoryReport {
+  const countRow = db
+    .prepare('SELECT COUNT(*) as count FROM read_offers WHERE offered_at < ?')
+    .get(cutoff) as { count: number };
+  const candidates = countRow.count;
+  if (dryRun || candidates === 0) {
+    return { candidates, deleted: 0 };
+  }
+  const result = db.prepare('DELETE FROM read_offers WHERE offered_at < ?').run(cutoff);
   return { candidates, deleted: result.changes };
 }
 
@@ -311,6 +372,8 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
     dryRun,
   );
 
+  const readOffers = pruneReadOffers(db, isoDaysAgo(now, resolved.offerDays), dryRun);
+
   const ratio = freelistRatio(db);
   let vacuumed = false;
   if (!dryRun && resolved.vacuum !== 'never') {
@@ -344,6 +407,7 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
     archived_memory_items: archived,
     command_run_items: commandRuns,
     content_digests: digests,
+    read_offers: readOffers,
     freelist_ratio: Number(ratio.toFixed(4)),
     vacuumed,
   };

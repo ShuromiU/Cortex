@@ -70,6 +70,12 @@ export interface ReadLedgerResult {
   refundEligible: boolean;
   /** Present only when NOT refund-eligible — who actually read it. */
   recordedBy?: ReadLedgerRecorder;
+  /**
+   * The recorded size of the file, when a digest exists. This is the *evidence*
+   * an FR-8 credit is anchored to — the actual size of the actual file, which
+   * is what separates a real saving from a counterfactual.
+   */
+  byteSize?: number;
 }
 
 export interface ReadLedgerQuery {
@@ -95,6 +101,18 @@ export interface ReadLedgerQuery {
    * evaluate false because no row carries an empty `session_id`.
    */
   skipAttribution?: boolean;
+  /**
+   * Record an `offer:read` for every refund-eligible `unchanged-since`, so a
+   * later read of that file books an *unrealized* saving (AC #6).
+   *
+   * **Opt-in, and off by default.** The agent-facing surfaces set it, because
+   * those are the calls where Cortex actually tells an agent it already has the
+   * content. Cortex's own internal probing — `knownUnchangedFiles`, which the
+   * session brief runs on every SessionStart — must not, or the product would
+   * manufacture offers to itself and then count the agent as having declined
+   * them, inflating the exact number this exists to make honest.
+   */
+  recordOffers?: boolean;
 }
 
 /**
@@ -399,6 +417,55 @@ export interface ReadLedgerDeps {
   createDigestCache: typeof createDigestCache;
 }
 
+/**
+ * Record that Cortex offered a file as unchanged, so a later read of it can be
+ * booked as an *unrealized* saving (FR-8 AC #6).
+ *
+ * Only refund-eligible `unchanged-since` answers are offers: those are the ones
+ * where Cortex told the asking session it already has the content. A
+ * `changed-since` or a sibling's read is information, not an offer, and
+ * declining it costs nothing.
+ *
+ * `tokens` is the read this would have avoided, estimated from the recorded
+ * byte size — the one place a token count here is derived rather than measured,
+ * because the read did not happen so there is nothing to measure. It is
+ * anchored to *recorded evidence* (the actual size of the actual file), which
+ * is what separates it from the counterfactual AC #3 forbids.
+ */
+function recordReadOffers(
+  store: CortexStore,
+  sessionId: string,
+  scopeKey: string | null,
+  results: ReadLedgerResult[],
+): void {
+  for (const result of results) {
+    if (result.verdict !== 'unchanged-since' || !result.refundEligible || !result.key) {
+      continue;
+    }
+    try {
+      const size = result.byteSize ?? 0;
+      if (size <= 0 || !scopeKey) {
+        continue;
+      }
+      store.upsertReadOffer({
+        sessionId,
+        scopeKey,
+        path: result.key,
+        byteSize: size,
+        // `ceil(bytes / 4)`, which is an UPPER BOUND on the tokens, not an
+        // equality. `estimateTokens` counts characters; this counts bytes on
+        // disk, and UTF-8 makes those differ — measured 2× on a 2000-character
+        // file of two-byte characters. Reading the file to count characters
+        // would cost the read this is accounting for the avoidance of, so the
+        // bound is taken deliberately and named rather than claimed to agree.
+        tokens: Math.ceil(size / 4),
+      });
+    } catch {
+      // Accounting never breaks the answer.
+    }
+  }
+}
+
 export function queryReadLedger(
   store: CortexStore,
   query: ReadLedgerQuery,
@@ -441,7 +508,7 @@ export function queryReadLedger(
   // process, which is the one thing re-hashing exists to prevent.
   const digests = query.digestCache ?? deps.createDigestCache();
 
-  return paths.map(inputPath => {
+  const results = paths.map(inputPath => {
     const digest = store.getContentDigest(scopeKey, inputPath);
     if (!digest) {
       return {
@@ -459,6 +526,7 @@ export function queryReadLedger(
       key: digest.path,
       recordedAt: digest.recordedAt,
       refundEligible,
+      byteSize: digest.byteSize,
       ...(refundEligible || query.skipAttribution
         ? {}
         : { recordedBy: recorderOf(store, digest) }),
@@ -524,6 +592,11 @@ export function queryReadLedger(
 
     return { ...base, verdict: 'changed-since' as const };
   });
+
+  if (query.recordOffers) {
+    recordReadOffers(store, query.sessionId, scopeKey, results);
+  }
+  return results;
 }
 
 /** Written when a recorder's display name sanitizes away to nothing. */

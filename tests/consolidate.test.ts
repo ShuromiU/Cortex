@@ -350,16 +350,49 @@ describe('writeSessionSummary', () => {
     expect(pending).toHaveLength(0);
   });
 
-  it('records a consolidation saved ledger entry from compression', () => {
+  it('books NO credit for consolidation — the baseline was a counterfactual (FR-8 AC #3)', () => {
     const { store, sessionId } = makeStore();
     store.insertEvent({ sessionId, type: 'read', target: 'a.ts' });
     store.insertEvent({ sessionId, type: 'edit', target: 'b.ts' });
 
     writeSessionSummary(store, sessionId, 'short');
 
+    // This used to write `estimateTokens(JSON.stringify(events)) -
+    // estimateTokens(summary)` as a saving: the difference between this summary
+    // and pasting every captured event into the context as raw JSON. No agent
+    // would ever have done that, so there was no avoided action and no evidence
+    // — and on this repo's live store that single line was the whole of
+    // `Saved: 657.6k` and `Efficiency: 93%`.
+    //
+    // Consolidation does real work and probably does save tokens. What it
+    // cannot do is *evidence* how many, and AC #3 admits no modeled or
+    // counterfactual credit. The summary must still be written; only the credit
+    // goes.
     const stats = store.getLedgerStats();
-    expect(stats.saved).toBeGreaterThan(0);
-    expect(stats.byType['consolidation']?.saved ?? 0).toBeGreaterThan(0);
+    expect(stats.saved).toBe(0);
+    expect(stats.byType['consolidation']).toBeUndefined();
+    expect(store.getEpisodesBySession(sessionId).some(e => e.kind === 'session_summary')).toBe(true);
+  });
+
+  it('refuses a saved row that carries no evidence', () => {
+    const { store, sessionId } = makeStore();
+    // The guard that makes AC #3 enforceable rather than aspirational. Without
+    // it, any future caller can reintroduce exactly the credit just removed.
+    expect(() =>
+      store.insertLedgerEntry({ sessionId, type: 'anything', direction: 'saved', tokens: 500 }),
+    ).toThrow(/requires evidence/);
+    expect(() =>
+      store.insertLedgerEntry({ sessionId, type: 'anything', direction: 'unrealized', tokens: 500 }),
+    ).toThrow(/requires evidence/);
+    // With evidence it is accepted.
+    store.insertLedgerEntry({
+      sessionId,
+      type: 'substitution:read',
+      direction: 'saved',
+      tokens: 500,
+      evidence: { kind: 'read', ref: 'src/a.ts', size: 2000 },
+    });
+    expect(store.getLedgerStats().saved).toBe(500);
   });
 });
 

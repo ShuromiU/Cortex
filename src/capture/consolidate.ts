@@ -233,11 +233,6 @@ export function writeSessionSummary(
   sessionId: string,
   summary: string,
 ): void {
-  const events = store.getEventsBySession(sessionId);
-  const savedTokens = Math.max(
-    0,
-    estimateTokens(JSON.stringify(events)) - estimateTokens(summary),
-  );
   const stateId = store.insertState({ sessionId, layer: 'session', content: summary });
   store.insertEpisode({
     id: stateId,
@@ -247,14 +242,33 @@ export function writeSessionSummary(
     sourceStateId: stateId,
   });
   store.deleteEventsBySession(sessionId);
-  if (savedTokens > 0) {
-    store.insertLedgerEntry({
-      sessionId,
-      type: 'consolidation',
-      direction: 'saved',
-      tokens: savedTokens,
-    });
-  }
+  // **No consolidation credit is booked, and its removal is the point of FR-8.**
+  //
+  // This wrote `estimateTokens(JSON.stringify(events)) - estimateTokens(summary)`
+  // as `direction: 'saved'` — the difference between this summary and pasting
+  // every captured event into the context as raw JSON. No agent would ever have
+  // done that, so the baseline is a counterfactual and the credit is against an
+  // action that was never going to be taken. AC #3: "an avoided action whose
+  // cost cannot be identified from recorded evidence … no `saved` row is
+  // written. There is no modeled or counterfactual credit."
+  //
+  // **The deeper reason, which matters more than the bad measurement:** the
+  // quantity was never a token saving at all. `events` is internal capture. It
+  // is never injected into a context window — the surfaces that inject
+  // (`cortex_state`, `cortex_recall`, the brief, the reflex) render *memory
+  // items*, not raw events. So consolidation compresses the DATABASE, and this
+  // is a *token* ledger. Measuring the pruned bytes more carefully would have
+  // produced a precise number for the wrong quantity; there is no better
+  // estimator to reach for, because the thing being estimated does not belong
+  // in this account. `cortex stats` reports database and WAL footprint
+  // separately, which is where compression of storage legitimately shows up.
+  //
+  // Measured before removal on this repo's live store, that one line was the
+  // whole of `Saved: 657.6k` and `Efficiency: 93%`. Consolidation does real
+  // work; what it does not do is save context tokens, and a number that cannot
+  // be checked is exactly what this story exists
+  // to stop quoting. Existing rows are migrated to `estimated` rather than
+  // deleted, so the history survives without counting.
 }
 
 /**

@@ -752,11 +752,33 @@ describe('content digests: storage footprint (AC #5)', () => {
 // ── AC #6 (corrected) / #7 / #8 — migration discipline ──────────────────────
 
 describe('content digests: migration discipline (AC #6-corrected, #7, #8)', () => {
-  it('does NOT change SCHEMA_VERSION — 2.2 spent the release bump (AD-11)', () => {
-    // The AC text says this story bumps 4 -> 5. It is stale: Story 2.2 took
-    // the single bump and created V5_TABLES, and this story appends to it.
-    // Pinned as a test because prose in a replan cannot fail a build.
-    expect(SCHEMA_VERSION).toBe(5);
+  it('adds content_digests WITHOUT its own version bump — additive DDL does not bump (AD-11)', () => {
+    // Story 3.1's AC text said it bumps 4 -> 5. That was stale: Story 2.2 took
+    // R1's increment and created V5_TABLES, and 3.1 appends to it. Pinned as a
+    // test because prose in a replan cannot fail a build.
+    //
+    // The rule this pins is about *additive* DDL, and it still holds: a table
+    // an older binary does not know about is a table it does not read, so
+    // adding one costs no compatibility. The version has since moved to 6 for a
+    // different class of change — Story 3.5 rewrote the MEANING of existing
+    // `token_ledger.direction` values, which makes a pre-3.5 binary report
+    // `Spent 0 / Saved 0` instead of failing. That is the P-5 case, and only a
+    // bump makes `NewerSchemaError` reachable for it.
+    //
+    // So the assertion is not "the version never moves"; it is that adding a
+    // table is not a reason to move it.
+    const tablesAddedWithoutABump = ['content_digests', 'read_offers'];
+    const db = new Database(':memory:');
+    applySchema(db);
+    for (const name of tablesAddedWithoutABump) {
+      expect(
+        db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name),
+      ).toBeDefined();
+    }
+    db.close();
+    // 6 is Story 3.5's value-semantics migration, not a per-table increment:
+    // two tables landed since the last bump and neither moved it.
+    expect(SCHEMA_VERSION).toBe(6);
   });
 
   it('creates content_digests as part of V5_TABLES, keyed by (scope_key, path)', () => {

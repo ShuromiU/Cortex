@@ -9,7 +9,30 @@ import {
 } from '../memory/items.js';
 import { extractMemoryReferences } from '../memory/references.js';
 
-export const SCHEMA_VERSION = 5;
+/**
+ * **6, and this is the deliberate exception to AD-11's one-bump-per-release.**
+ *
+ * That rule governs *additive* DDL: Story 2.2 took R1's increment, and 3.1
+ * appended `content_digests` to `V5_TABLES` without touching the version,
+ * because a table an older binary does not know about is a table it does not
+ * read. Story 3.5 is a different class of change — it **rewrites the meaning of
+ * existing values**. `direction` moves from `'spent'|'saved'` to
+ * `'injected'|'saved'|'unrealized'|'estimated'`, and a pre-3.5 binary filtering
+ * on `direction = 'spent'` then reports `Spent 0 / Saved 0 / Efficiency 0%`:
+ * measured, and confidently wrong rather than absent.
+ *
+ * That is exactly the condition P-5's guard exists for, and this repository's
+ * standing position is that a wrong answer is worse than a refusal — the same
+ * argument that narrowed the downgrade guard to `<` so an old binary can never
+ * silently rewrite a newer store. Without the bump, `NewerSchemaError` cannot
+ * fire and the protection is unreachable for the one change that needs it.
+ *
+ * Cost, stated: any binary built before this story now refuses a store that has
+ * been opened by it — loudly for user commands, silently and exit-0 for hooks
+ * (AD-12). On this machine that is the `dist/`-lags-a-branch-switch case the
+ * project docs already warn about, and a refusal there is the outcome we want.
+ */
+export const SCHEMA_VERSION = 6;
 
 /**
  * P-5: an older binary opening a store written by a newer one must refuse
@@ -162,10 +185,46 @@ CREATE TABLE IF NOT EXISTS token_ledger (
   type       TEXT NOT NULL,
   direction  TEXT NOT NULL,
   tokens     INTEGER NOT NULL,
-  timestamp  TEXT NOT NULL
+  timestamp  TEXT NOT NULL,
+  evidence_kind TEXT,
+  evidence_ref  TEXT,
+  evidence_size INTEGER
 );
 `;
 
+/**
+ * `token_ledger.evidence_*` (FR-8, Story 3.5) — documented here rather than as
+ * an inline SQL comment, for two reasons that both bit.
+ *
+ * Null for an `injected` row, which records what Cortex put into the context
+ * and has nothing to evidence. Required for `saved` and `unrealized`, enforced
+ * by `insertLedgerEntry` rather than by a CHECK, because adding a CHECK to a
+ * populated table means a full rebuild in SQLite. Declared both here and in
+ * `migrateTokenLedger`: the migration upgrades existing stores, this definition
+ * is what a fresh store gets, and only one of the two runs for any database.
+ *
+ * **Why not an inline `--` comment in the DDL — and the rule is narrower and
+ * stranger than "comments are unsafe".** SQLite stores the original `CREATE
+ * TABLE` text and re-parses it during `ALTER TABLE … DROP COLUMN`. Measured on
+ * 3.51.3, isolated one character at a time:
+ *
+ *     -- a plain note about the column        DROP COLUMN succeeds
+ *     -- a note (with parens) and a; semicolon  succeeds
+ *     -- a note, with a comma                 THROWS "incomplete input"
+ *
+ * **A comma inside the comment is the whole trigger** — the re-parse splits the
+ * column list on commas without honouring comment boundaries, so the comment's
+ * comma reads as a column separator and the definition ends mid-clause. Parens,
+ * quotes, semicolons and periods are all fine. An earlier version of this note
+ * claimed comments in general were fatal, which is false and was rightly
+ * challenged; a reviewer who tested comment shapes *without* commas could not
+ * reproduce it at all. Prose in a comment naturally contains commas, so the
+ * practical rule stands even though the mechanism is narrow: column
+ * documentation belongs in TypeScript, where a comma is just a comma.
+ *
+ * (Backticks are separately fatal here — the DDL lives in a template literal,
+ * which Story 3.1 already paid to learn.)
+ */
 const V2_TABLES = `
 CREATE TABLE IF NOT EXISTS command_runs (
   id                TEXT PRIMARY KEY,
@@ -374,6 +433,16 @@ CREATE TABLE IF NOT EXISTS content_digests (
   read_count  INTEGER NOT NULL DEFAULT 1,
   recorded_at TEXT NOT NULL,
   PRIMARY KEY (scope_key, path)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS read_offers (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  scope_key  TEXT NOT NULL,
+  path       TEXT NOT NULL,
+  byte_size  INTEGER NOT NULL,
+  tokens     INTEGER NOT NULL,
+  offered_at TEXT NOT NULL,
+  PRIMARY KEY (session_id, scope_key, path)
 ) WITHOUT ROWID;
 `;
 
@@ -859,6 +928,59 @@ function ensureMemoryReferenceColumns(db: Database.Database): void {
 }
 
 /**
+ * FR-8 evidence columns, and the `spent` → `injected` rename (Story 3.5).
+ *
+ * Added by `ALTER TABLE` rather than in `V1_TABLES`, because `token_ledger`
+ * predates this release and every existing store already has the table. All
+ * three are nullable: an `injected` row records what Cortex put into the
+ * context and has nothing to evidence.
+ *
+ * **The rename is a data migration, not a schema-version change.** `direction`
+ * carries no CHECK constraint, so the values are just text — and AC #1 names
+ * `injected` while Story 3.6 must *report* it. Two vocabularies for one concept
+ * is the drift that produced this epic's Story 2.7 error.
+ *
+ * `type = 'rollup'` rows are migrated too, and that is load-bearing: `cortex gc`
+ * aggregates the ledger with `GROUP BY session_id, direction`, so a rollup left
+ * on the old value would silently form a second, parallel total that no query
+ * adds up.
+ *
+ * The consolidation credit moves to `estimated` rather than being deleted. It
+ * is evidence-free — the difference between a summary and pasting every
+ * captured event as raw JSON — so AC #3 forbids it counting as a saving, but
+ * destroying audit history is not this repo's answer to a bad number.
+ */
+function migrateTokenLedger(db: Database.Database): void {
+  if (!tableExists(db, 'token_ledger')) {
+    return;
+  }
+  ensureColumn(db, 'token_ledger', 'evidence_kind', 'evidence_kind TEXT');
+  ensureColumn(db, 'token_ledger', 'evidence_ref', 'evidence_ref TEXT');
+  ensureColumn(db, 'token_ledger', 'evidence_size', 'evidence_size INTEGER');
+
+  db.transaction(() => {
+    // Order matters: reclassify the evidence-free credit FIRST, then rename the
+    // cost side. Renaming first is harmless here, but doing the credit pass on
+    // `direction = 'saved'` after any future rename would silently match
+    // nothing — and a migration that quietly does nothing is the failure mode
+    // this file has already paid for once.
+    db.prepare(
+      `UPDATE token_ledger SET direction = 'estimated'
+        WHERE direction = 'saved' AND evidence_kind IS NULL`,
+    ).run();
+    db.prepare(`UPDATE token_ledger SET direction = 'injected' WHERE direction = 'spent'`).run();
+    // A pending OFFER is not an accounting fact and never belonged in the
+    // ledger. Written there briefly during development, it counted as
+    // `unrealized` the moment it was made — so an agent that adopted every
+    // offer scored identically to one that ignored every offer, and the figure
+    // labelled "offered, not taken" actually meant "offered". Offers now live
+    // in `read_offers`; any that reached a store are removed rather than left
+    // inflating the number this story exists to make honest.
+    db.prepare(`DELETE FROM token_ledger WHERE type = 'offer:read'`).run();
+  })();
+}
+
+/**
  * Unique on the AD-9 identity, partial so primary sessions (agent_id NULL) are
  * unconstrained. Uniqueness is the race guard: hook processes are independent
  * and resolve a child by read-then-insert, so without it two concurrent tool
@@ -1034,6 +1156,7 @@ function migrateContentDigestPaths(db: Database.Database): void {
 function backfillV2Artifacts(db: Database.Database, rootPath: string): void {
   backfillSessionScopes(db, rootPath);
   migrateContentDigestPaths(db);
+  migrateTokenLedger(db);
   backfillCommandRuns(db);
   backfillEpisodes(db);
   backfillProjectSnapshots(db, rootPath);

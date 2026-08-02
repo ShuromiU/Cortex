@@ -57,9 +57,9 @@ describe('gc', () => {
   it('rolls up old ledger rows into one row per session and direction', () => {
     const { db, store } = createDb();
     const session = store.createSession({ scopeType: 'project', scopeKey: 'project:/gc/root' });
-    store.insertLedgerEntry({ sessionId: session.id, type: 'recall', direction: 'spent', tokens: 100 });
-    store.insertLedgerEntry({ sessionId: session.id, type: 'state', direction: 'spent', tokens: 50 });
-    store.insertLedgerEntry({ sessionId: session.id, type: 'consolidation', direction: 'saved', tokens: 300 });
+    store.insertLedgerEntry({ sessionId: session.id, type: 'recall', direction: 'injected', tokens: 100 });
+    store.insertLedgerEntry({ sessionId: session.id, type: 'state', direction: 'injected', tokens: 50 });
+    store.insertLedgerEntry({ sessionId: session.id, type: 'consolidation', direction: 'saved', tokens: 300, evidence: { kind: 'read', ref: 'src/evidence.ts', size: 4096 } });
     db.prepare('UPDATE token_ledger SET timestamp = ?').run(isoDaysAgo(20));
 
     const before = store.getTotalTokens();
@@ -69,10 +69,75 @@ describe('gc', () => {
     expect(report.token_ledger.candidates).toBe(3);
     expect(report.token_ledger.deleted).toBe(3);
     expect(after).toEqual(before);
-    const rows = db.prepare(`SELECT type, direction, tokens FROM token_ledger ORDER BY direction`).all();
+    const rows = db
+      .prepare(
+        `SELECT type, direction, tokens, evidence_kind, evidence_ref, evidence_size
+           FROM token_ledger ORDER BY direction`,
+      )
+      .all();
+    // The rollup is a raw INSERT, so it bypasses `insertLedgerEntry`'s guard
+    // that a saved row carries evidence. Dropping the evidence columns here
+    // would turn every verified saving into an unverifiable one after 14 days
+    // — the credit side decaying back into exactly the unfalsifiable number
+    // FR-8 exists to retire. Per-row evidence cannot survive aggregation, but
+    // its sum is the meaningful quantity: total bytes actually avoided.
     expect(rows).toEqual([
-      { type: 'rollup', direction: 'saved', tokens: 300 },
-      { type: 'rollup', direction: 'spent', tokens: 150 },
+      {
+        type: 'rollup',
+        direction: 'injected',
+        tokens: 150,
+        evidence_kind: null,
+        evidence_ref: null,
+        evidence_size: null,
+      },
+      {
+        type: 'rollup',
+        direction: 'saved',
+        tokens: 300,
+        evidence_kind: 'read',
+        evidence_ref: '(1 rolled up)',
+        evidence_size: 4096,
+      },
+    ]);
+  });
+
+  it('keeps avoided-read and avoided-command credit in separate rollups', () => {
+    const { db, store } = createDb();
+    const session = store.createSession({ scopeType: 'project', scopeKey: 'project:/gc/root' });
+    store.insertLedgerEntry({
+      sessionId: session.id, type: 'substitution:read', direction: 'saved', tokens: 100,
+      evidence: { kind: 'read', ref: 'src/a.ts', size: 400 },
+    });
+    store.insertLedgerEntry({
+      sessionId: session.id, type: 'substitution:read', direction: 'saved', tokens: 200,
+      evidence: { kind: 'read', ref: 'src/b.ts', size: 800 },
+    });
+    store.insertLedgerEntry({
+      sessionId: session.id, type: 'substitution:command', direction: 'saved', tokens: 50,
+      evidence: { kind: 'command', ref: 'npm test', size: 200 },
+    });
+    db.prepare('UPDATE token_ledger SET timestamp = ?').run(isoDaysAgo(20));
+
+    runGc(db, { dryRun: false, vacuum: 'never' });
+
+    // A rollup of avoided reads is not interchangeable with one of avoided
+    // commands, so `evidence_kind` is part of the grouping. Folding them would
+    // report a byte total spanning two different units.
+    const rows = db
+      .prepare(
+        `SELECT direction, tokens, evidence_kind, evidence_ref, evidence_size
+           FROM token_ledger ORDER BY evidence_kind`,
+      )
+      .all();
+    expect(rows).toEqual([
+      {
+        direction: 'saved', tokens: 50, evidence_kind: 'command',
+        evidence_ref: '(1 rolled up)', evidence_size: 200,
+      },
+      {
+        direction: 'saved', tokens: 300, evidence_kind: 'read',
+        evidence_ref: '(2 rolled up)', evidence_size: 1200,
+      },
     ]);
   });
 

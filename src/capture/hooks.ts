@@ -171,6 +171,51 @@ export function parseLineRange(lines?: string): { line_start?: number; line_end?
 /**
  * Record a file-read event.
  */
+/**
+ * Book an *unrealized* saving: Cortex offered this file as unchanged and the
+ * agent read it anyway (AC #6).
+ *
+ * **This is an observed decline, not an inferred one — and only the decline is
+ * counted.** Both halves are recorded: the offer is a `read_offers` row from a
+ * read-ledger query that answered `unchanged-since` and refund-eligible, and
+ * the read is the event being replayed right now. Nothing is modeled: if no
+ * offer was open, no unrealized row is written, exactly as AC #3 requires of
+ * savings.
+ *
+ * The offer deliberately lives OUTSIDE `token_ledger`. Written there, it
+ * counted as `unrealized` the moment it was *made*, so an agent that adopted
+ * every offer scored identically to one that ignored every offer — the metric
+ * measured Cortex's helpfulness rather than the agent's uptake, under a label
+ * saying the opposite. It also required deleting a ledger row, against AD-8's
+ * append-only rule.
+ *
+ * It is recorded *separately* from savings, because folding the two together
+ * would hide the number this exists to expose — the gap between what Cortex can
+ * do and what the agent actually took. A high unrealized figure is a product
+ * problem, not an accounting one, and it must be visible as itself.
+ */
+function bookUnrealizedIfOffered(
+  store: CortexStore,
+  sessionId: string,
+  scopeKey: string | null,
+  filePath: string,
+): void {
+  if (!scopeKey) {
+    return;
+  }
+  const offer = store.consumeReadOffer(sessionId, scopeKey, filePath);
+  if (!offer) {
+    return;
+  }
+  store.insertLedgerEntry({
+    sessionId,
+    type: 'unrealized:read',
+    direction: 'unrealized',
+    tokens: offer.tokens,
+    evidence: { kind: 'read', ref: offer.path, size: offer.byteSize },
+  });
+}
+
 export function handleReadEvent(
   store: CortexStore,
   sessionId: string,
@@ -183,6 +228,17 @@ export function handleReadEvent(
     target: args.file,
     ...(Object.keys(range).length > 0 ? { metadata: range } : {}),
   });
+  // BEFORE the digest is recorded. `recordReadDigest` upserts the row this
+  // read is about, and the offer lookup keys on that row's path — so running it
+  // afterwards would compare the offer against a record the same read had just
+  // refreshed. Order matters for the same reason it did in the read ledger's
+  // edit check: the evidence has to describe the state the decision was made in.
+  try {
+    const session = store.getSession(sessionId);
+    bookUnrealizedIfOffered(store, sessionId, session?.scope_key ?? null, args.file);
+  } catch {
+    // Accounting must never break capture (AD-12).
+  }
   recordReadDigest(store, sessionId, args);
   syncBranchSnapshotForSession(store, sessionId);
 }
