@@ -4,7 +4,7 @@ baseline_commit: f273de4
 
 # Story 2.7: Reposition the docs
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
