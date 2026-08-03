@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { deriveSpoolPath } from '../capture/spool.js';
+import { deriveSpoolPath, SCAN_STATUS_KEY } from '../capture/spool.js';
 import { DIGEST_INDEX_FILENAME, parseIndexLine } from '../capture/digest-index.js';
 import {
   SCHEMA_VERSION,
@@ -1140,6 +1140,8 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
   // copy of their memory.
   let migratedFrom: string | null = null;
   let migrationFailure: string | null = null;
+  let outcomeScan: string | null = null;
+  let commandsRecorded = 0;
   if (storeExists) {
     try {
       const db = openDatabaseReadOnly(identity.dbPath);
@@ -1147,11 +1149,64 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
         migratedFrom = getMetaValue(db, MIGRATED_FROM_KEY) ?? null;
         const failed = getMetaValue(db, MIGRATION_FAILED_KEY) ?? '';
         migrationFailure = failed.length > 0 ? failed : null;
+        const scan = getMetaValue(db, SCAN_STATUS_KEY) ?? '';
+        outcomeScan = scan.length > 0 ? scan : null;
+        try {
+          const row = db.prepare('SELECT COUNT(*) AS n FROM command_runs').get() as
+            | { n?: number }
+            | undefined;
+          commandsRecorded = typeof row?.n === 'number' ? row.n : 0;
+        } catch {
+          // A store predating the table answers "no activity", which is the
+          // conservative reading and keeps this row silent.
+        }
       } finally {
         db.close();
       }
     } catch {
       // An unreadable store is the `database` check's business, not this one's.
+    }
+  }
+
+  // ── Command outcomes (FR-14) ────────────────────────────────────────
+  //
+  // This capability exists BECAUSE a shipped feature can be wired, running and
+  // dead with nothing saying so: `command_failure` and `test_cycle` episodes had
+  // never fired once across 4,881 recorded commands, and no surface reported it.
+  // Shipping the fix without a surface of its own would repeat the mistake one
+  // layer down — a host that renames `transcript_path`, stops emitting
+  // `is_error`, or moves the file produces silence that reads as "nothing
+  // failed". So the last scan says what it actually saw, and says it out loud.
+  //
+  // **Conditional, like `store-legacy` and `store-adoption`.** A project where
+  // nothing has run yet has nothing to report, and a row that warns on every
+  // fresh install is noise that gets tuned out — which would cost exactly the
+  // attention this check exists to buy. It appears once there is either a scan
+  // to describe or recorded commands whose outcomes went unscanned.
+  if (storeExists && (outcomeScan !== null || commandsRecorded > 0)) {
+    if (outcomeScan === null) {
+      add({
+        id: 'command-outcomes',
+        label: 'Command outcomes',
+        status: 'warn',
+        detail: `${commandsRecorded} commands recorded, but no transcript scan ever ran — pass/fail is not being captured`,
+        fix: 'Re-run `cortex install` so the Stop hook is wired, then end a turn and re-run `cortex doctor`.',
+      });
+    } else if (outcomeScan.includes(' unavailable:')) {
+      add({
+        id: 'command-outcomes',
+        label: 'Command outcomes',
+        status: 'warn',
+        detail: `last scan found no usable transcript — ${outcomeScan}`,
+        fix: 'The host passes `transcript_path` to the Stop hook; if this persists, re-run `cortex install` and confirm the host still writes a session transcript.',
+      });
+    } else {
+      add({
+        id: 'command-outcomes',
+        label: 'Command outcomes',
+        status: 'pass',
+        detail: outcomeScan,
+      });
     }
   }
 

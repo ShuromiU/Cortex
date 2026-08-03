@@ -106,7 +106,7 @@ describe('spool', () => {
   it('flushing an empty or missing spool is a no-op', () => {
     const root = tempRoot();
     const { store, sessionId } = createStore(root);
-    expect(flushSpool(store, root, sessionId)).toEqual({ processed: 0, skipped: 0 });
+    expect(flushSpool(store, root, sessionId)).toEqual({ processed: 0, skipped: 0, synthesized: 0 });
   });
 
   it('attributes each entry in a mixed batch to the session matching its agent_id', () => {
@@ -127,7 +127,7 @@ describe('spool', () => {
       agent_id: 'agent-1',
     });
 
-    expect(flushSpool(store, root, sessionId)).toEqual({ processed: 4, skipped: 0 });
+    expect(flushSpool(store, root, sessionId)).toEqual({ processed: 4, skipped: 0, synthesized: 0 });
 
     const children = store.getChildSessions(sessionId);
     expect(children).toHaveLength(2);
@@ -260,7 +260,7 @@ describe('spool', () => {
     // A tool kind this build does not know — e.g. a newer hook against older dist.
     appendSpoolEntry(root, { tool: 'todo', ts: '2026-06-10T10:00:00Z', seq: 1, agent_id: 'ghost' });
 
-    expect(flushSpool(store, root, sessionId)).toEqual({ processed: 0, skipped: 1 });
+    expect(flushSpool(store, root, sessionId)).toEqual({ processed: 0, skipped: 1, synthesized: 0 });
     expect(store.getChildSessions(sessionId)).toHaveLength(0);
   });
 
@@ -376,7 +376,7 @@ describe('spool', () => {
     );
 
     const first = flushSpool(store, root, sessionId);
-    expect(first).toEqual({ processed: 2, skipped: 0 });
+    expect(first).toEqual({ processed: 2, skipped: 0, synthesized: 0 });
     expect(store.getEventsBySession(sessionId).map(event => event.target)).toEqual([
       'src/legacy-a.ts',
       'src/legacy-b.ts',

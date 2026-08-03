@@ -8,6 +8,7 @@ import { applySchema, initializeMeta, SCHEMA_VERSION } from '../src/db/schema.js
 import { resolveStoreIdentity } from '../src/scope/identity.js';
 import type { GitCommandRunner } from '../src/scope/git.js';
 import { deriveEngagementPath } from '../src/transports/mcp.js';
+import { SCAN_STATUS_KEY } from '../src/capture/spool.js';
 import {
   HOOK_SCRIPTS,
   REQUIRED_WIRING,
@@ -584,6 +585,79 @@ describe('read substitution row (FR-6, Story 4.5)', () => {
     const fixture = buildFixture();
     fs.mkdirSync(path.join(fixture.projectDir, '.cortex.substitution'));
     expect(statusOf(doctor(fixture), 'substitution')).toBe('pass');
+  });
+});
+
+describe('command outcomes row (FR-14, Story 4.4)', () => {
+  // This whole capability exists because a feature was wired, running and dead
+  // with nothing saying so — `command_failure` and `test_cycle` had never fired
+  // across 4,881 recorded commands. Shipping it without a surface of its own
+  // would repeat that one layer down.
+  const seedMeta = (fixture: Fixture, value: string): void => {
+    const db = new Database(fixture.dbPath);
+    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(SCAN_STATUS_KEY, value);
+    db.close();
+  };
+
+  const seedCommandRun = (fixture: Fixture): void => {
+    const db = new Database(fixture.dbPath);
+    db.prepare('INSERT INTO sessions (id, started_at, worktree_path, scope_type, scope_key) VALUES (?,?,?,?,?)').run(
+      's-cmd',
+      '2026-08-03T12:00:00Z',
+      fixture.projectDir,
+      'project',
+      `project:${fixture.projectDir}`,
+    );
+    db.prepare('INSERT INTO command_runs (id, session_id, timestamp, command_summary) VALUES (?,?,?,?)').run(
+      'c-1',
+      's-cmd',
+      '2026-08-03T12:00:00Z',
+      'npm test',
+    );
+    db.close();
+  };
+
+  it('says nothing at all on a project where nothing has run', () => {
+    // Conditional like `store-legacy`: a row that warns on every fresh install
+    // is noise that gets tuned out, which costs exactly the attention this
+    // check exists to buy.
+    const report = doctor(buildFixture());
+    expect(report.checks.find(check => check.id === 'command-outcomes')).toBeUndefined();
+  });
+
+  it('reports what the last scan actually saw', () => {
+    const fixture = buildFixture();
+    seedMeta(fixture, '2026-08-03T12:00:00Z ok outcomes=12 failures=2 truncated=no synthesized=2');
+    const report = doctor(fixture);
+    expect(statusOf(report, 'command-outcomes')).toBe('pass');
+    expect(detailOf(report, 'command-outcomes')).toContain('outcomes=12 failures=2');
+  });
+
+  it('warns when the scan found no usable transcript', () => {
+    // The AD-12 case: a host that renames `transcript_path` or moves the file
+    // produces silence indistinguishable from "nothing failed".
+    const fixture = buildFixture();
+    seedMeta(fixture, '2026-08-03T12:00:00Z unavailable:missing synthesized=0');
+    const report = doctor(fixture);
+    expect(statusOf(report, 'command-outcomes')).toBe('warn');
+    expect(detailOf(report, 'command-outcomes')).toContain('missing');
+    expect(report.checks.find(check => check.id === 'command-outcomes')?.fix).toContain('cortex install');
+  });
+
+  it('warns when commands were recorded but no scan ever ran', () => {
+    // The exact shape of the original outage: activity in the store, no
+    // outcomes, and nothing anywhere reporting the gap.
+    const fixture = buildFixture();
+    seedCommandRun(fixture);
+    const report = doctor(fixture);
+    expect(statusOf(report, 'command-outcomes')).toBe('warn');
+    expect(detailOf(report, 'command-outcomes')).toContain('1 commands recorded');
+  });
+
+  it('never fails the run — a scan gap is not a broken installation', () => {
+    const fixture = buildFixture();
+    seedMeta(fixture, '2026-08-03T12:00:00Z unavailable:no-path synthesized=0');
+    expect(doctor(fixture).ok).toBe(true);
   });
 });
 

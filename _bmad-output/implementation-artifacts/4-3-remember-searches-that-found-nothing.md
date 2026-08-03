@@ -466,7 +466,9 @@ same commit; the four-command verification block plus the gate when retrieval is
 
 ## Story completion status
 
-Status: **review** (dev complete 2026-08-03). Created and developed the same day against `4ae5ac8`.
+Status: **done** (created, developed, reviewed and committed 2026-08-03 against `4ae5ac8`; landed as
+`3a46d12`). Three-layer review reconciled in full before the commit; the live payload probe and the
+two end-to-end proofs are recorded below.
 
 ## Dev Agent Record
 

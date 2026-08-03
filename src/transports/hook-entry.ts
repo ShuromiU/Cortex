@@ -381,7 +381,17 @@ function endOfTurn(
 
   // Replay this turn's spooled capture first so suggestions see fresh evidence.
   try {
-    flushSpool(store, cwd, resolveSessionId(store, cwd, options));
+    // `transcript_path` is the ONLY channel through which a command pass/fail
+    // is observable (FR-14): measured 2026-08-03, the Bash PostToolUse payload
+    // carries no exit code at all, and a host-failed command fires no
+    // PostToolUse whatsoever. Passed straight from the payload rather than
+    // derived — a path reconstructed by mangling the cwd would be a guess, and
+    // this is the one hook that already receives the real value. A host that
+    // provides none simply attaches no outcomes.
+    const transcriptPath = stringValue(payload['transcript_path']) ?? null;
+    flushSpool(store, cwd, resolveSessionId(store, cwd, options), undefined, {
+      transcriptPath,
+    });
   } catch {
     // Spool replay is best-effort at turn end; next flush picks it up.
   }

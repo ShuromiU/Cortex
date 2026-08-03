@@ -5,6 +5,15 @@ import type { CortexStore } from '../db/store.js';
 import { isAbsoluteFileKey, normalizeFilePathKey } from '../scope/keys.js';
 import { resolveAgentSessionId } from '../scope/runtime.js';
 import { createDigestCache, type DigestCache, type DigestDeps } from './digest.js';
+import {
+  describeScan,
+  failedOutcomes,
+  outcomeExitCode,
+  outcomesByCommand,
+  scanTranscriptTail,
+  type CommandOutcomeMap,
+  type TranscriptOutcome,
+} from './transcript.js';
 import { digestIndexExists, writeDigestIndex } from './digest-index.js';
 import {
   createSearchCaptureCache,
@@ -102,6 +111,12 @@ export interface SpoolEntry {
 export interface SpoolFlushResult {
   processed: number;
   skipped: number;
+  /**
+   * Failed commands recorded from the transcript because no hook ever saw them
+   * (FR-14). Reported rather than silent: the synthesis loop is bounded, and a
+   * bound nobody can observe is how a cap becomes a lie about coverage.
+   */
+  synthesized: number;
 }
 
 const SPOOL_FILENAME = '.cortex.spool.jsonl';
@@ -454,6 +469,7 @@ function replayEntry(
   readEligible: boolean,
   searchCertified: boolean,
   searchCache?: SearchCaptureCache,
+  outcomes?: CommandOutcomeMap,
 ): boolean {
   switch (entry.tool) {
     case 'read':
@@ -477,15 +493,50 @@ function replayEntry(
       if (!entry.file) return false;
       handleWriteEvent(store, sessionId, { file: entry.file });
       return true;
-    case 'cmd':
+    case 'cmd': {
       if (!entry.cmd) return false;
+      // The outcome the hook could not carry (FR-14). Attached by exact command
+      // text, and only when the window is UNAMBIGUOUS about it — the same text
+      // twice with different outcomes attaches nothing rather than guessing.
+      //
+      // **Two spool lines must never take an outcome from this transcript**,
+      // and both were measured writing wrong data before this guard existed:
+      //
+      // - `bg`: PostToolUse fires at LAUNCH for a backgrounded command, and the
+      //   host's own result for the launch is a success ("Command running in
+      //   background with ID: …"). A backgrounded `npm test` therefore stored
+      //   `exit 0` — which is exactly the gate `writeCommandEpisodes` reads to
+      //   emit a `test_cycle`, i.e. "tests passed", for a process that had not
+      //   finished. That is the worst failure this product can produce, arrived
+      //   at from the one direction nothing else in this story could reach.
+      // - `agent_id`: a subagent's turns are written to its OWN transcript
+      //   (measured: 0 sidechain entries in 2,733 real Bash calls), so a
+      //   subagent's run is invisible here and the `ambiguous` guard cannot
+      //   fire. The parent's verdict for the same text would be stamped onto
+      //   the child's run. The same defeat applies to a second window open on
+      //   the same directory: shared spool file, separate transcripts.
+      //
+      // Both fields are already on the line and already read elsewhere; the
+      // outcome attach simply has to respect them.
+      const attachable =
+        !readJsonFlag(entry.bg) && normalizeAgentId(entry.agent_id) === undefined;
+      const observed = attachable ? outcomes?.get(entry.cmd) : undefined;
+      const evidenced =
+        observed !== undefined && observed !== 'ambiguous' ? outcomeExitCode(observed) : null;
+      const exit =
+        entry.exit !== undefined
+          ? entry.exit
+          : evidenced !== null
+            ? String(evidenced)
+            : undefined;
       handleCmdEvent(store, sessionId, {
         cmd: entry.cmd,
-        ...(entry.exit !== undefined ? { exit: entry.exit } : {}),
+        ...(exit !== undefined ? { exit } : {}),
         ...(entry.stdout !== undefined ? { stdout: entry.stdout } : {}),
         ...(entry.stderr !== undefined ? { stderr: entry.stderr } : {}),
       });
       return true;
+    }
     case 'agent':
       if (!entry.desc) return false;
       handleAgentEvent(store, sessionId, { desc: entry.desc });
@@ -621,24 +672,139 @@ function resolveEntrySession(
   }
 }
 
+/** Meta key holding the `tool_use_id`s already synthesized, newest last. */
+const SYNTH_SEEN_KEY = 'cmd_outcome_synth_seen';
+/**
+ * Meta key holding what the last transcript scan actually saw (FR-14).
+ *
+ * Read by `cortex doctor`. This feature exists because a capability can be
+ * wired, running and dead with nothing anywhere saying so — `command_failure`
+ * and `test_cycle` had never fired across 4,881 recorded commands and no
+ * surface reported it. Shipping the fix with the same blind spot would be the
+ * same mistake one layer down: a host that renames `transcript_path`, stops
+ * emitting `is_error`, or moves the file would produce silence indistinguishable
+ * from "nothing failed".
+ */
+export const SCAN_STATUS_KEY = 'cmd_outcome_scan';
+/**
+ * How many ids the ring remembers. Measured over all 45 transcripts on this
+ * machine: a 2 MiB tail holds 3-94 paired Bash calls and **at most 6 failures**
+ * (20 across 28 transcripts), so 500 is roughly a hundred flushes of headroom
+ * and rollover is unreachable in the real distribution. If it ever did roll
+ * over the cost is one duplicated row, not a wrong one.
+ */
+const SYNTH_SEEN_MAX = 500;
+/**
+ * How many failures one flush may synthesize. The tail is bounded but not
+ * small: an adversarial or pathological transcript can present thousands, and
+ * every synthesized row is an INSERT inside the flush's write transaction —
+ * measured at 6.9 s for 5,000, which holds the write lock long enough to starve
+ * every other writer, the same hazard this file documents for the search census.
+ */
+const SYNTH_PER_FLUSH_MAX = 50;
+
+function readSynthSeen(store: CortexStore): string[] {
+  const raw = store.getMeta(SYNTH_SEEN_KEY);
+  if (raw === undefined) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Record commands the hook never saw at all (FR-14).
+ *
+ * A command the host deems FAILED fires no `PostToolUse`, so it has no spool
+ * line — which is why `command_failure` episodes had never once fired in
+ * production across 4,881 recorded commands. The transcript is the only witness,
+ * so a failure with no matching spool line is recorded from it directly.
+ *
+ * **Written exactly once ever, by `tool_use_id`.** An earlier design bounded
+ * this to a timestamp window instead, and all three review layers reproduced it
+ * writing one failure as two rows or more. Two independent triggers: `flushSpool`
+ * processes an orphaned `.processing` claim *and* the fresh spool, so synthesis
+ * ran twice over one outcome set; and the window's lower bound is a whole-second
+ * comparison, so any later batch stamped in the same second re-admitted a
+ * failure already recorded. The window was also *wrong in the other direction* —
+ * the transcript stamps when the assistant emitted a call while the hook stamps
+ * after the tool finished, so the lower bound systematically excluded the first
+ * failure of a turn, which is the feature's headline case.
+ *
+ * Remembering the host's own id removes all three at once, and it is the same
+ * shape `creditRowId` uses two hundred lines above for the same reason: an
+ * additive insert on a path that can legitimately run twice needs an identity,
+ * not a guard against running twice. This also lets synthesis key off the raw
+ * per-call outcomes rather than the text-collapsed map, so three genuine
+ * failures of one command are three records instead of one.
+ *
+ * Successes are NOT synthesized: a successful command already has a spool line,
+ * and inventing rows for commands outside this session's capture would describe
+ * work Cortex never observed.
+ */
+function recordUnseenFailures(
+  store: CortexStore,
+  sessionId: string,
+  failures: readonly TranscriptOutcome[],
+  spooled: ReadonlySet<string>,
+): number {
+  if (failures.length === 0) return 0;
+  const seen = readSynthSeen(store);
+  const seenIds = new Set(seen);
+  // `spooled` covers EVERY claim file this flush touched, not just one batch:
+  // synthesizing from the orphan claim while the fresh claim holds the matching
+  // spool line would write the same command twice by a different route.
+  const fresh = failures.filter(o => !seenIds.has(o.toolUseId) && !spooled.has(o.command));
+  if (fresh.length === 0) return 0;
+  // Newest first when capped — `failedOutcomes` preserves transcript order, and
+  // the recent failures are the ones a resumed session needs.
+  const batch = fresh.slice(-SYNTH_PER_FLUSH_MAX);
+
+  let written = 0;
+  for (const outcome of batch) {
+    const exit = outcomeExitCode(outcome);
+    if (exit === null) continue;
+    handleCmdEvent(store, sessionId, { cmd: outcome.command, exit: String(exit) });
+    written++;
+  }
+  store.setMeta(
+    SYNTH_SEEN_KEY,
+    JSON.stringify([...seen, ...batch.map(o => o.toolUseId)].slice(-SYNTH_SEEN_MAX)),
+  );
+  return written;
+}
+
 function processClaimFile(
   store: CortexStore,
   sessionId: string,
   claimPath: string,
   dir: string,
   conservativeEligibility: boolean,
-  deps?: DigestDeps,
+  deps: DigestDeps | undefined,
+  outcomes: CommandOutcomeMap | undefined,
+  /**
+   * Every command text this flush has seen a spool line for, across ALL claim
+   * files. Populated even when the batch is skipped as already-processed: those
+   * commands are in the store from an earlier flush, and synthesis must not
+   * record them a second time by the other route.
+   */
+  spooled: Set<string>,
 ): SpoolFlushResult {
   let raw: string;
   try {
     raw = fs.readFileSync(claimPath, 'utf8');
   } catch {
-    return { processed: 0, skipped: 0 };
+    return { processed: 0, skipped: 0, synthesized: 0 };
   }
 
   const contentHash = crypto.createHash('sha1').update(raw).digest('hex');
   const markerKey = `${PROCESSED_MARKER_PREFIX}${contentHash}`;
   const entries = parseSpoolLines(raw);
+  for (const entry of entries) {
+    if (entry.tool === 'cmd' && entry.cmd) spooled.add(entry.cmd);
+  }
   // Peeked per claim, not once per flush: the fresh claim IS the former live
   // spool, so what is live changes between the orphan batch and the fresh one.
   const live = peekLiveSpool(dir);
@@ -684,6 +850,7 @@ function processClaimFile(
             eligibility[index] === true,
             searchEligibility[index] === true,
             searchCache,
+            outcomes,
           )
         ) {
           processed++;
@@ -703,7 +870,7 @@ function processClaimFile(
     // The processed marker protects against re-application.
   }
 
-  return { processed, skipped };
+  return { processed, skipped, synthesized: 0 };
 }
 
 /**
@@ -722,6 +889,17 @@ export interface SpoolFlushOptions {
   conservativeEligibility?: boolean;
   /** Test seam only; see `computeFileDigest`. Production omits it. */
   deps?: DigestDeps;
+  /**
+   * Host transcript for this session (FR-14, Story 4.4).
+   *
+   * The ONLY place a command's pass/fail is observable. Measured 2026-08-03 by
+   * dumping raw hook stdin: the Bash `PostToolUse` payload carries no exit code
+   * in any form, and a command the host deems FAILED fires no `PostToolUse` at
+   * all. Absent means outcomes are simply not attached — never guessed.
+   */
+  transcriptPath?: string | null;
+  /** Test seam for the transcript scan. Production omits it. */
+  scanTranscript?: typeof scanTranscriptTail;
 }
 
 export function flushSpool(
@@ -739,8 +917,27 @@ export function flushSpool(
   const claimPath = `${spoolPath}.processing`;
   const conservative = options.conservativeEligibility === true;
   const effectiveDeps = options.deps ?? deps;
+  // Scanned ONCE per flush, before any claim: the file is the same for both the
+  // orphan and the fresh batch, and it is the only place a command's pass/fail
+  // is observable at all. Never throws — an unavailable transcript yields an
+  // empty map, which attaches nothing.
+  let outcomes: CommandOutcomeMap = new Map();
+  let failures: readonly TranscriptOutcome[] = [];
+  let scanStatus = 'unavailable:not-attempted';
+  try {
+    const scan = (options.scanTranscript ?? scanTranscriptTail)(options.transcriptPath ?? null);
+    outcomes = outcomesByCommand(scan);
+    failures = failedOutcomes(scan);
+    scanStatus = describeScan(scan);
+  } catch {
+    // AD-12: the capture path degrades to silence, never to a broken turn.
+    scanStatus = 'unavailable:threw';
+  }
   let processed = 0;
   let skipped = 0;
+  let synthesized = 0;
+  // Shared across both claim files on purpose — see `recordUnseenFailures`.
+  const spooled = new Set<string>();
 
   if (fs.existsSync(claimPath)) {
     const orphan = processClaimFile(
@@ -750,28 +947,58 @@ export function flushSpool(
       dir,
       conservative,
       effectiveDeps,
+      outcomes,
+      spooled,
     );
     processed += orphan.processed;
     skipped += orphan.skipped;
   }
 
   if (fs.existsSync(spoolPath)) {
+    let claimed = true;
     try {
       fs.renameSync(spoolPath, claimPath);
     } catch {
-      // A concurrent flush claimed it; nothing left to do.
-      return { processed, skipped };
+      // A concurrent flush claimed it; nothing left to replay.
+      claimed = false;
     }
-    const fresh = processClaimFile(
-      store,
-      sessionId,
-      claimPath,
-      dir,
-      conservative,
-      effectiveDeps,
-    );
-    processed += fresh.processed;
-    skipped += fresh.skipped;
+    if (claimed) {
+      const fresh = processClaimFile(
+        store,
+        sessionId,
+        claimPath,
+        dir,
+        conservative,
+        effectiveDeps,
+        outcomes,
+        spooled,
+      );
+      processed += fresh.processed;
+      skipped += fresh.skipped;
+    }
+  }
+
+  // Synthesis runs ONCE per flush, after every claim, in its own transaction.
+  //
+  // Both properties are load-bearing and both were review findings. Running it
+  // per claim file made one failure two rows whenever an orphan claim was
+  // present (an ordinary occurrence here). Running it inside the replay
+  // transaction meant a throw rolled back that batch's real capture AND skipped
+  // the claim-file unlink, so every later flush re-read the same file and threw
+  // again — the exact permanent-silent-outage shape the `credit` handler was
+  // given a guard for.
+  try {
+    store.runInTransaction(() => {
+      synthesized = recordUnseenFailures(store, sessionId, failures, spooled);
+    });
+  } catch {
+    // A failed synthesis loses failures, which is the safe direction. It must
+    // never cost the batch that already committed.
+  }
+  try {
+    store.setMeta(SCAN_STATUS_KEY, `${new Date().toISOString()} ${scanStatus} synthesized=${synthesized}`);
+  } catch {
+    // Observability must not be able to break the thing it observes.
   }
 
   // Rebuild the flat index AFTER the replay transactions have committed, so it
@@ -782,5 +1009,5 @@ export function flushSpool(
     writeDigestIndex(store, dir);
   }
 
-  return { processed, skipped };
+  return { processed, skipped, synthesized };
 }
