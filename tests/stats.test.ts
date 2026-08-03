@@ -12,6 +12,10 @@ import { buildStatsReport, renderStatsReport, MOST_RETRIEVED_LIMIT } from '../sr
 import { createProgram } from '../src/transports/cli.js';
 import { openProjectStore, clearProjectStoreCache } from '../src/scope/store-migration.js';
 import { ensureScopedSession } from '../src/scope/runtime.js';
+import {
+  setSubstitutionEnabled,
+  SUBSTITUTION_FLAG_FILENAME,
+} from '../src/capture/substitution.js';
 
 /**
  * FR-9: report the P&L (Story 3.6).
@@ -828,11 +832,72 @@ describe('cortex stats (CLI)', () => {
     expect(out).toContain('Memory items:');
     expect(out).toContain('Most retrieved (by access count; ties: latest access, then rowid)');
     expect(out).toContain('a retrieved memory');
-    expect(out).toContain('no verified savings yet');
+    // Story 4.5 re-keyed this line: it now states only what the scope can
+    // observe. With substitution off in the fixture project, it names the
+    // mechanism as available-but-disabled rather than asserting a global
+    // "not shipped" fact that would be false in any scope that has booked one.
+    expect(out).toContain('no verified savings in this scope');
+    expect(out).toContain('cortex substitution on');
+    expect(out).not.toContain('is not shipped');
     // D4: Efficiency is replaced by Ratio, not printed alongside it.
     expect(out).not.toContain('Efficiency');
     // FR-25's lines survive.
     expect(out).toContain('Database:');
     expect(out).toContain('WAL:');
+  });
+});
+
+// ── The Saved: 0 explanation, re-keyed by Story 4.5 ──────────────────
+
+describe('the no-savings explanation states only what this scope can observe', () => {
+  function renderWith(projectRoot: string | undefined): string {
+    const fx = createFixture();
+    return renderStatsReport(
+      buildStatsReport(fx.store, projectRoot === undefined ? {} : { projectRoot }),
+    );
+  }
+
+  it('names the mechanism as available-but-disabled when the flag is absent', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-stats-subst-'));
+    const out = renderWith(root);
+    expect(out).toContain('no verified savings in this scope');
+    expect(out).toContain('cortex substitution on');
+  });
+
+  it('drops the enablement hint once substitution is on, and says it is on', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-stats-subst-'));
+    setSubstitutionEnabled(root, true);
+    const out = renderWith(root);
+    expect(out).toContain('substitution is on');
+    expect(out).not.toContain('cortex substitution on');
+  });
+
+  it('an unknown flag state claims nothing about the mechanism in either direction', () => {
+    // Review-found: `unknown` fell into a branch shared with `on`. A caller
+    // that supplied no project root has not established the flag is on, so
+    // the wording may assert neither enabled-ness nor disabled-ness.
+    const out = renderWith(undefined);
+    expect(out).toContain('no verified savings in this scope yet');
+    expect(out).not.toContain('substitution is on');
+    expect(out).not.toContain('cortex substitution on');
+  });
+
+  it('never asserts a GLOBAL fact about the mechanism from scope-local data', () => {
+    // The defect this replaces (a `BINDS STORY 4.5` comment sat on it): the old
+    // wording said the mechanism "is not shipped" — true only until the first
+    // scope anywhere booked a saving, after which every other scope printed a
+    // false statement. No branch may say it again.
+    for (const root of [undefined, fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-stats-subst-'))]) {
+      const out = renderWith(root);
+      expect(out).not.toContain('is not shipped');
+      expect(out).not.toContain('not shipped');
+    }
+  });
+
+  it('reports the flag without creating it — stats only reads', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-stats-subst-'));
+    renderWith(root);
+    expect(fs.existsSync(path.join(root, SUBSTITUTION_FLAG_FILENAME))).toBe(false);
+    expect(fs.readdirSync(root)).toEqual([]);
   });
 });

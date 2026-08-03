@@ -55,7 +55,7 @@
 # story 2-7 (docs repositioning) added.
 
 generated: 2026-07-24
-last_updated: 2026-08-02
+last_updated: 2026-08-03
 project: cortex
 project_key: NOKEY
 tracking_system: file-system
@@ -108,13 +108,15 @@ development_status:
   # EXECUTION ORDER (2026-07-28 replan): 4.5 FIRST, then 4.3 -> 4.4 -> 4.6.
   # Story numbering unchanged (Epic 1 precedent). 4.5 is time-sensitive
   # (platform hook shipped in CC v2.1.121; competitors ship partial mechanisms)
-  # and is BLOCKED on the open B-4 re-base action item before create-story.
-  epic-4: backlog
+  # and was BLOCKED on the B-4 re-base action item before create-story — resolved
+  # by the 2026-08-02 ruling (bc19e92): B-4a split by outcome, miss <=100 ms /
+  # hit <=300 ms p95 through the installed hook. 4.5 create-story ran 2026-08-02.
+  epic-4: in-progress
   # 4-1-derive-file-cards-deterministically: withdrawn from R1 2026-07-28 (FR-10 to roadmap; see replan-r1-2026-07-28.md)
   # 4-2-serve-file-cards-with-a-freshness-verdict: withdrawn from R1 2026-07-28 (FR-11 to roadmap; see replan-r1-2026-07-28.md)
   4-3-remember-searches-that-found-nothing: backlog
   4-4-remember-the-outcome-of-expensive-commands: backlog
-  4-5-refund-redundant-reads-through-verified-substitution: backlog
+  4-5-refund-redundant-reads-through-verified-substitution: review
   4-6-bound-and-evict-the-derived-cache: backlog
   epic-4-retrospective: optional
 
@@ -187,7 +189,11 @@ action_items:
     action: "B-4a (<=100 ms) is unmet on this platform independently of Cortex: measured spawn floor ~39-42 ms, jq alone ~81 ms, a plausible 4.5 sequence 214.8 ms. Story 3.2 reports its lookup cost (41-100 ms over 1k-200k records) but does NOT claim the budget met. Blocks 4.5 with the existing B-4 amendment."
     owner: "ShuromiU (PRD decision)"
     status: done  # 2026-08-02: resolved by the same ruling as the epic-1 B-4 item — B-4a split by outcome (miss <=100 ms / hit <=300 ms p95 through the installed hook). The 214.8 ms measured sequence sits inside the hit budget; the grep-first miss path (41-100 ms) sits inside the miss budget at realistic index sizes.
+  - epic: 4
+    action: "B-4a needs a ruling: as written (miss <=100 ms / hit <=300 ms, p95 END-TO-END through the installed hook) it measures 510.9 / 612.0 / 671.7 ms and is structurally unreachable on the reference platform — one bash spawn (p95 83.9 ms) + one jq (~100 ms) exceeds the miss budget before any Cortex logic runs. Substitution's own marginal is +1.9 ms miss / ~+65 ms hit. Story 4.5's review round retracted its earlier marginal-vs-B-4 reading (PRD section 10 scopes B-4 to the NON-substituting path, so B-4a is the only budget governing Read). Candidate shapes for the ruling: re-base B-4a end-to-end with the structural clause primary (the B-4 precedent); define B-4a as marginal and widen B-4 to cover Read's base cost; or land the three-jq merge (~180 ms/read) first and re-measure. Until ruled, AC #5's latency half is reported NOT met; structural halves met and pinned."
+    owner: "ShuromiU (PRD decision)"
+    status: open
   - epic: 3
     action: "Story 4.5 must revise the stats saved-0 explanation (renderStatsReport, src/query/stats.ts): its wording asserts 'the mechanism ... is not shipped' — a global fact — while its keying is scope-local (scope saved == 0). The day substitution books savings in ANY scope, every other scope prints a false statement. Found by 3.6's review (edge+blind); a BINDS STORY 4.5 comment sits on the branch."
     owner: "create-story (Story 4.5)"
-    status: open
+    status: done  # 2026-08-03: Story 4.5 D9 shipped it. The branch now states only what the reported scope can observe — "read substitution is available but not enabled here (cortex substitution on)" or "no verified savings in this scope yet" — never the global "is not shipped" claim. BINDS comment removed; a test asserts no branch can reintroduce it.

@@ -88,6 +88,15 @@ export const IGNORE_ENTRIES = [
   // is listed beside the spool: a failed rename whose cleanup also fails would
   // otherwise leave an untracked file in the user's checkout.
   '.cortex.index.tmp-*',
+  // Verified read substitution (Story 4.5). Both are project-root files for the
+  // same architectural reason every other entry here is: the hot path resolves
+  // them as `"$CWD/.cortex.*"` in pure bash and cannot hash a store path per
+  // tool call (N-4). The flag is a user preference; the turn marker is cleared
+  // at every Stop. Literals rather than imports, matching `.cortex.index`
+  // above — a test pins them against the exported constants so they cannot
+  // drift apart.
+  '.cortex.substitution',
+  '.cortex.turn-reads',
 ] as const;
 
 // ── Hook script rendering and modification detection ──────────────────

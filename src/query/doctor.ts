@@ -625,6 +625,60 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
     }
   }
 
+  // ── Read substitution (FR-6, Story 4.5) ─────────────────────────────
+  // Off is the DEFAULT and a fully supported state, so it is a pass with a
+  // pointer, never a warn — the FR-23 rule that made disengagement a warn
+  // binds harder here, since nothing has even been declined. What earns a warn
+  // is on-but-inert: the flag armed while `.cortex.state` lacks the facts the
+  // hook needs, which is exactly the silent-dead configuration the review
+  // reproduced (a scope whose root cannot be resolved publishes nothing, and
+  // both user-facing surfaces reported health anyway).
+  {
+    const flagPath = path.join(projectDir, '.cortex.substitution');
+    let flagIsOn = false;
+    try {
+      flagIsOn = fs.statSync(flagPath).isFile();
+    } catch {
+      // Absent: off.
+    }
+    if (!flagIsOn) {
+      add({
+        id: 'substitution',
+        label: 'Read substitution',
+        status: 'pass',
+        detail: 'off (opt-in; enable with `cortex substitution on`)',
+      });
+    } else {
+      let stateText = '';
+      try {
+        stateText = fs.readFileSync(deriveStatePath(projectDir), 'utf8');
+      } catch {
+        // Reported through the facts check below.
+      }
+      const hasFacts =
+        /^session_id=.+$/m.test(stateText) &&
+        /^index_scope=.+$/m.test(stateText) &&
+        /^scope_root=.+$/m.test(stateText);
+      add(
+        hasFacts
+          ? {
+              id: 'substitution',
+              label: 'Read substitution',
+              status: 'pass',
+              detail: 'on; hot-path session facts published',
+            }
+          : {
+              id: 'substitution',
+              label: 'Read substitution',
+              status: 'warn',
+              detail:
+                'on, but `.cortex.state` holds no hot-path session facts — the hook cannot substitute anything',
+              fix: 'Start a session here (SessionStart publishes them), or run `cortex inject-header --quiet`. If it persists, the scope root is unresolvable for this project.',
+            },
+      );
+    }
+  }
+
   // ── Hook wiring ─────────────────────────────────────────────────────
   const missingWiring = REQUIRED_WIRING.filter(
     required =>

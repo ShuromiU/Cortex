@@ -11,7 +11,10 @@ import { deriveEngagementPath } from '../src/transports/mcp.js';
 import { openDatabase, ensureCortexSchema } from '../src/db/schema.js';
 import { resolveStoreIdentity } from '../src/scope/identity.js';
 import { walSizeBytes } from '../src/db/schema.js';
-import { clearProjectStoreCache } from '../src/scope/store-migration.js';
+import { clearProjectStoreCache, openProjectStore } from '../src/scope/store-migration.js';
+import { HOT_PATH_STATE_KEYS, isSubstitutionEnabled } from '../src/capture/substitution.js';
+import { escapeIndexField } from '../src/capture/digest-index.js';
+import { normalizeFilePathKey } from '../src/scope/keys.js';
 import { execFileSync } from 'node:child_process';
 import { CortexStore } from '../src/db/store.js';
 import { handleCmdEvent } from '../src/capture/hooks.js';
@@ -172,6 +175,89 @@ describe('createProgram', () => {
       const engagement = fs.readFileSync(deriveEngagementPath(tempDir), 'utf8');
       expect(engagement).toContain('enabled=true');
       expect(engagement).toContain('state_called=false');
+    } finally {
+      stdoutSpy.mockRestore();
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('inject-header publishes the hot-path facts the substitution hook cannot derive', async () => {
+    // Story 4.5's state bridge, end to end. The hook may not open SQLite
+    // (AD-2) or spawn Node (N-4), so the session id, the escaped scope key and
+    // the scope root have to arrive here or substitution is dead — silently,
+    // because a missing key degrades to a miss.
+    const tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-cli-hotpath-')));
+    const originalCwd = process.cwd();
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    try {
+      process.chdir(tempDir);
+      await createProgram().parseAsync(['node', 'cortex', 'inject-header', '--quiet']);
+
+      const engagement = fs.readFileSync(deriveEngagementPath(tempDir), 'utf8');
+      const facts = new Map(
+        engagement
+          .split('\n')
+          .filter(Boolean)
+          .map(line => {
+            const eq = line.indexOf('=');
+            return [line.slice(0, eq), line.slice(eq + 1)] as [string, string];
+          }),
+      );
+
+      // The engagement gate the hook checks first must still be the FIRST line:
+      // `grep -q '^enabled=true'` is anchored, and every hook exits on it.
+      expect(engagement.startsWith('enabled=true\n')).toBe(true);
+
+      const sessionId = facts.get(HOT_PATH_STATE_KEYS.sessionId);
+      expect(sessionId, 'no session id published').toBeTruthy();
+      // It must be THIS session, not any session: a stale id is the AD-16
+      // false-confidence failure the whole bridge exists to make unreachable.
+      const { db } = openProjectStore(tempDir);
+      const store = new CortexStore(db);
+      expect(store.getCurrentSession()?.id).toBe(sessionId);
+
+      const scopeKey = store.getCurrentSession()!.scope_key!;
+      expect(facts.get(HOT_PATH_STATE_KEYS.indexScope)).toBe(escapeIndexField(scopeKey));
+      expect(facts.get(HOT_PATH_STATE_KEYS.scopeRoot)).toBe(
+        normalizeFilePathKey(store.resolveScopeRoot(scopeKey)!),
+      );
+      expect(facts.get(HOT_PATH_STATE_KEYS.pathFold)).toBe(
+        process.platform === 'win32' || process.platform === 'darwin' ? 'lower' : 'none',
+      );
+    } finally {
+      stdoutSpy.mockRestore();
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('inject-header does not turn substitution on — it is opt-in (AC #6)', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-cli-hotpath-off-'));
+    const originalCwd = process.cwd();
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      process.chdir(tempDir);
+      await createProgram().parseAsync(['node', 'cortex', 'inject-header', '--quiet']);
+      expect(isSubstitutionEnabled(tempDir)).toBe(false);
+    } finally {
+      stdoutSpy.mockRestore();
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('inject-header clears a stale turn marker — a crash must not suppress a whole turn', async () => {
+    // Review-found: only the Stop hook removed `.cortex.turn-reads`, so a
+    // session that died without one carried the marker into the next session
+    // and silently declined every refund for the files it listed. SessionStart
+    // is a new turn by definition.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-cli-marker-'));
+    fs.writeFileSync(path.join(tempDir, '.cortex.turn-reads'), 'src/stale.ts\n');
+    const originalCwd = process.cwd();
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      process.chdir(tempDir);
+      await createProgram().parseAsync(['node', 'cortex', 'inject-header', '--quiet']);
+      expect(fs.existsSync(path.join(tempDir, '.cortex.turn-reads'))).toBe(false);
     } finally {
       stdoutSpy.mockRestore();
       process.chdir(originalCwd);

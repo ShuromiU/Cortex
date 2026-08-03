@@ -426,7 +426,7 @@ function endOfTurn(
       .flatMap(id => suggestNotes(store, id))
       .filter(suggestion => suggestion.confidence >= STOP_NUDGE_CONFIDENCE_THRESHOLD)
       .filter(suggestion => {
-        const key = `${suggestion.kind} ${suggestion.content}`;
+        const key = `${suggestion.kind}\u0000${suggestion.content}`;
         if (seen.has(key)) {
           return false;
         }

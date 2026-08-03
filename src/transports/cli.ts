@@ -22,8 +22,20 @@ import {
   handleAgentEvent,
 } from '../capture/hooks.js';
 import { flushSpool } from '../capture/spool.js';
+import { detectGitScope } from '../scope/git.js';
 import { runGc, shouldAutoGc } from '../db/gc.js';
 import { writeDigestIndex } from '../capture/digest-index.js';
+import {
+  deriveTurnReadsPath,
+  isSubstitutionEnabled,
+  renderHotPathStateLines,
+  resolveSubstMaxBytes,
+  resolveSubstMinBytes,
+  setSubstitutionEnabled,
+  HOT_PATH_STATE_KEYS,
+  DEFAULT_SUBST_MAX_BYTES,
+  DEFAULT_SUBST_MIN_BYTES,
+} from '../capture/substitution.js';
 import {
   consolidateLevel1,
   renderCompressed,
@@ -791,7 +803,13 @@ export function createProgram(): Command {
       const previous = store.getCurrentSession();
       if (previous) {
         try {
-          flushSpool(store, process.cwd(), previous.id);
+          // Conservative eligibility: these lines are an earlier session's
+          // leftovers and the digests are being computed a session boundary
+          // after the reads they describe — nothing can attest what those
+          // reads returned (Story 4.5 review round).
+          flushSpool(store, process.cwd(), previous.id, undefined, {
+            conservativeEligibility: true,
+          });
         } catch {
           // Leftovers stay in the spool for the next flush.
         }
@@ -817,7 +835,11 @@ export function createProgram(): Command {
       const scopedSession = ensureScopedSession(store, process.cwd());
       if (!previous) {
         try {
-          flushSpool(store, process.cwd(), scopedSession.id);
+          // Same reasoning as the leftover flush above: on a cold start these
+          // are lines from before any session this build knows about.
+          flushSpool(store, process.cwd(), scopedSession.id, undefined, {
+            conservativeEligibility: true,
+          });
         } catch {
           // Leftovers stay in the spool for the next flush.
         }
@@ -826,9 +848,33 @@ export function createProgram(): Command {
 
       const engPath = deriveEngagementPath(process.cwd());
       try {
-        fs.writeFileSync(engPath, 'enabled=true\nstate_called=false\n');
+        // The hot path (Story 4.5) cannot resolve Cortex's session id, the
+        // escaped scope key or the scope root for itself — it may not open
+        // SQLite (AD-2) or spawn Node (N-4). They are published here, in the
+        // same wholesale rewrite that marks the session engaged, so the facts
+        // and the session that produced them can never drift apart. An empty
+        // result is the AD-6 answer: without them the hook misses, which costs
+        // a refund and can never grant a false one.
+        const hotPath = renderHotPathStateLines({
+          sessionId: scopedSession.id,
+          scopeKey: scopedSession.scope_key ?? '',
+          scopeRoot: scopedSession.scope_key
+            ? store.resolveScopeRoot(scopedSession.scope_key)
+            : null,
+        });
+        fs.writeFileSync(engPath, `enabled=true\nstate_called=false\n${hotPath}`);
       } catch {
         // Non-fatal.
+      }
+
+      // A session that died without its Stop hook leaves the turn marker
+      // behind, and a surviving marker silently declines every refund for the
+      // files it lists (Story 4.5 review round). SessionStart is a new turn by
+      // definition, so the marker cannot describe this one.
+      try {
+        fs.rmSync(deriveTurnReadsPath(process.cwd()), { force: true });
+      } catch {
+        // Non-fatal; a stale marker suppresses refunds, never grants them.
       }
 
       // Opt-in automatic GC, at most once per 24h.
@@ -965,7 +1011,9 @@ export function createProgram(): Command {
       // in the query layer so the B-6 budget is measured in-process; this
       // action stays open → build → render. The honest `Saved: 0` explanation
       // and the AC #3 unrealized separation live in `renderStatsReport`.
-      process.stdout.write(`${renderStatsReport(buildStatsReport(store))}\n`);
+      process.stdout.write(
+        `${renderStatsReport(buildStatsReport(store, { projectRoot: process.cwd() }))}\n`,
+      );
 
       // AC #3: named separately, because "footprint" that folds them together
       // hides the thing FR-25 is about — a WAL parked at its high-water mark
@@ -1190,6 +1238,92 @@ export function createProgram(): Command {
       }
       db.close();
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    });
+
+  program
+    .command('substitution')
+    .argument('[mode]', 'on | off | status (default: status)')
+    .description(
+      'Verified read substitution: refund a re-read whose content is provably unchanged. Off until turned on.',
+    )
+    .action((mode: string | undefined) => {
+      // The git toplevel, not the shell's cwd. The hook resolves the flag as
+      // `"$CWD/.cortex.substitution"` from the payload's project directory —
+      // which is the checkout root — so a flag armed from `src/` lands where
+      // no hook will ever look, while `status` cheerfully reports it on
+      // (measured by review). Outside a repository the cwd is the only
+      // candidate and is used as-is.
+      const scope = detectGitScope(process.cwd());
+      const root = scope.worktreePath ?? process.cwd();
+      const requested = mode ?? 'status';
+
+      if (requested !== 'on' && requested !== 'off' && requested !== 'status') {
+        // Validated against the closed set rather than falling back, the rule
+        // `install --scope` established: a typo that silently means something
+        // else is worse than a refusal.
+        process.stderr.write(`Unknown mode "${requested}". Use: on | off | status\n`);
+        process.exitCode = 1;
+        return;
+      }
+
+      // The gates the hook will actually enforce, not the compiled defaults.
+      const minBytes = resolveSubstMinBytes();
+      const maxBytes = resolveSubstMaxBytes();
+      const boundsNote =
+        minBytes !== DEFAULT_SUBST_MIN_BYTES || maxBytes !== DEFAULT_SUBST_MAX_BYTES
+          ? ' (env override active)'
+          : '';
+
+      if (requested === 'status') {
+        const enabled = isSubstitutionEnabled(root);
+        // Substitution is dead without the facts inject-header publishes, and
+        // this command is where a user would look first. Read-only peek.
+        let hotPathFacts = false;
+        try {
+          const state = fs.readFileSync(path.join(root, '.cortex.state'), 'utf8');
+          hotPathFacts =
+            state.includes(`${HOT_PATH_STATE_KEYS.sessionId}=`) &&
+            state.includes(`${HOT_PATH_STATE_KEYS.indexScope}=`) &&
+            state.includes(`${HOT_PATH_STATE_KEYS.scopeRoot}=`);
+        } catch {
+          // Absent state file: reported below.
+        }
+        process.stdout.write(
+          `Substitution: ${enabled ? 'on' : 'off'}\n` +
+            `  scope     : ${root}\n` +
+            `  size gate : ${minBytes}..${maxBytes} bytes${boundsNote} ` +
+            `(CORTEX_SUBST_MIN_BYTES / CORTEX_SUBST_MAX_BYTES)\n` +
+            (enabled && !hotPathFacts
+              ? '  WARNING   : no hot-path session facts in .cortex.state — substitution\n' +
+                '              cannot fire until a session starts here (SessionStart\n' +
+                '              publishes them), or the scope root is unresolvable.\n'
+              : '') +
+            (enabled
+              ? ''
+              : '  Turn it on with `cortex substitution on`. Requires the current hooks: `cortex install`.\n'),
+        );
+        return;
+      }
+
+      const enable = requested === 'on';
+      let changed: boolean;
+      try {
+        changed = setSubstitutionEnabled(root, enable);
+      } catch (error) {
+        process.stderr.write(
+          `Could not turn substitution ${requested}: ${(error as Error).message}\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      // Report what actually happened, never what was requested — the rule
+      // `install` learned when `existsSync` was read after the write.
+      process.stdout.write(
+        changed
+          ? `Substitution: ${requested}\n`
+          : `Substitution: already ${requested}, nothing changed\n`,
+      );
     });
 
   program

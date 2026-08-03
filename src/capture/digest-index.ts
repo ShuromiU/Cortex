@@ -192,11 +192,19 @@ export function collectIndexRecords(
     return [];
   }
   const placeholders = scopes.map(() => '?').join(', ');
+  // `refund_eligible = 1` — the index's ONLY reader is the substitution hook
+  // (AD-3: "read only by the hot path"), and an ineligible record exists for
+  // change detection, which the ledger reads from the TABLE. Publishing it
+  // here would hand the hook a digest describing bytes the recorded read never
+  // returned; the hook cannot see eligibility, so the filter is the writer's
+  // to enforce. This makes the index a partial projection on purpose — of what
+  // its one consumer may act on, not of everything the authority knows.
   const rows = store.db
     .prepare(
       `SELECT scope_key, path, sha256, byte_size, session_id, agent_id
          FROM content_digests
         WHERE scope_key IN (${placeholders})
+          AND refund_eligible = 1
         ORDER BY scope_key, path`,
     )
     .all(...scopes) as {

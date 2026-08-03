@@ -244,23 +244,82 @@ describe('cortex-capture.sh — no process per tool call (N-4)', () => {
 
     // Per-region counts, not a whole-file total: a global count stays green if
     // one branch gains a jq while another loses one, which is the regression
-    // this test exists to catch. Setup reads tool_name and cwd; each of the
-    // three event branches builds its line with exactly one jq.
-    const branchStarts = ['  Read|Edit|Write)', '  Bash)', '  Agent)'];
+    // this test exists to catch. Setup reads tool_name and cwd; each event
+    // branch builds its line with exactly one jq. Story 4.5 split `Read` out of
+    // the former `Read|Edit|Write` branch because it needs extra fields — it
+    // still gets exactly one.
+    const branchStarts = ['  Read)', '  Edit|Write)', '  Bash)', '  Agent)'];
     const boundaries = branchStarts.map(marker => {
       const index = lines.findIndex(line => line.startsWith(marker));
       expect(index, `branch ${marker} not found`).toBeGreaterThan(-1);
       return index;
     });
     const esacIndex = lines.findIndex(line => line.startsWith('esac'));
-    expect(esacIndex).toBeGreaterThan(boundaries[2]!);
+    expect(esacIndex).toBeGreaterThan(boundaries[3]!);
 
     const countJq = (from: number, to: number): number =>
-      (lines.slice(from, to).join('\n').match(/\|\s*jq\s+-|\$\(\s*jq\s|<<<|xargs/g) ?? []).length;
+      (lines.slice(from, to).join('\n').match(/\|\s*jq\s+-|\$\(\s*jq\s/g) ?? []).length;
 
     expect(countJq(0, boundaries[0]!)).toBe(2); // setup: tool_name, cwd
     expect(countJq(boundaries[0]!, boundaries[1]!)).toBe(1);
     expect(countJq(boundaries[1]!, boundaries[2]!)).toBe(1);
-    expect(countJq(boundaries[2]!, esacIndex)).toBe(1);
+    expect(countJq(boundaries[2]!, boundaries[3]!)).toBe(1);
+    expect(countJq(boundaries[3]!, esacIndex)).toBe(1);
+
+    // `xargs` was folded into the old counter's alternation; keep it banned
+    // outright rather than losing the guard when the counter narrowed to jq.
+    expect(script).not.toMatch(/\bxargs\b/);
+  });
+
+  it('the substitution path spawns at most three processes, hash strictly after lookup', () => {
+    // This is B-4a expressed structurally rather than as a timing hope. The
+    // MISS path is the unconditional tax on every Read, so it may spend exactly
+    // one process (the index lookup); the HIT path may spend two more — `wc -c`
+    // to prove the recorded size still describes the disk (the review measured
+    // a 6 KB record pulling a 300 MB file into ~1.3 s of doomed hashing without
+    // it), then the verification hash. Everything else — state parsing, key
+    // derivation, the per-turn marker, JSON escaping — is a bash builtin.
+    // Split on `\r?\n`: this template ships CRLF in the checkout (the other two
+    // ship LF), so an exact `line === '}'` compare against a `\n`-split silently
+    // never matches. `install` normalizes to LF on the way out, which is why
+    // nothing downstream notices.
+    const script = fs.readFileSync(SCRIPT, 'utf8');
+    const lines = script.split(/\r?\n/);
+
+    const start = lines.findIndex(line => line.startsWith('try_substitute() {'));
+    expect(start, 'try_substitute not found').toBeGreaterThan(-1);
+    const end = lines.findIndex((line, index) => index > start && line === '}');
+    expect(end).toBeGreaterThan(start);
+
+    const body = lines
+      .slice(start, end)
+      .filter(line => !line.trim().startsWith('#'));
+
+    // Command substitutions are the only way this function can fork. The
+    // negative lookahead excludes `$(( … ))` arithmetic expansion, which is a
+    // builtin — counting it would inflate the budget with three token
+    // calculations that spawn nothing, and "at most two processes" would then
+    // be measuring the wrong thing entirely.
+    const substitutions = body.join('\n').match(/\$\((?!\()([^)]*)\)/g) ?? [];
+    const commands = substitutions.map(s => s.replace(/^\$\(\s*/, '').trim().split(/\s+/)[0]);
+    expect(commands.sort()).toEqual(['grep', 'sha256sum', 'wc']);
+
+    // No jq, no cut, no stat, no date: AD-3 says the hot path greps a flat
+    // file rather than parsing anything, and each of these would be a whole
+    // extra process on a path that runs for every single Read.
+    for (const banned of ['jq', 'cut ', 'stat ', 'awk', 'sed ', 'tr ']) {
+      expect(body.join('\n'), `substitution path must not spawn ${banned.trim()}`).not.toContain(
+        banned,
+      );
+    }
+
+    const lookupLine = body.findIndex(line => line.includes('grep -F -m1'));
+    const sizeLine = body.findIndex(line => line.includes('wc -c'));
+    const hashLine = body.findIndex(line => line.includes('sha256sum'));
+    expect(lookupLine).toBeGreaterThan(-1);
+    // Lookup → size gate → hash: each stage only runs when the cheaper one
+    // ahead of it passed, so a miss pays for none of the later ones.
+    expect(sizeLine).toBeGreaterThan(lookupLine);
+    expect(hashLine).toBeGreaterThan(sizeLine);
   });
 });

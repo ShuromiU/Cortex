@@ -453,15 +453,28 @@ describe('digest index: regeneration (AC #3)', () => {
 // ── AC #4 — the cold path is the sole writer ────────────────────────────────
 
 describe('digest index: the cold path is the sole writer (AC #4)', () => {
-  it('no shipped hook script writes the index', () => {
+  it('no shipped hook script writes the index — the hot path only reads it', () => {
     // Legitimate as a source check: the claim IS about the scripts' text, it is
     // a negative assertion, and the writing behaviour is covered separately
     // through a real flush.
-    for (const name of ['cortex-capture.sh', 'cortex-reflect.sh', 'cortex-end-of-turn.sh']) {
+    for (const name of ['cortex-reflect.sh', 'cortex-end-of-turn.sh']) {
       const script = fs.readFileSync(path.join('hooks/claude', name), 'utf8');
       expect(script, name).not.toMatch(/\.cortex\.index/);
-      expect(script, name).not.toMatch(/>\s*"?\$CWD\/\.cortex\.index/);
     }
+
+    // `cortex-capture.sh` references the index since Story 4.5, and must:
+    // AD-3's whole point is that the hot path finds a record with `grep` alone.
+    // What stays impossible is a WRITE — the cold path is the sole writer, or
+    // the index stops being a regenerable projection and becomes a second
+    // source of truth that a lost file would take with it.
+    const capture = fs.readFileSync('hooks/claude/cortex-capture.sh', 'utf8');
+    const references = capture
+      .split('\n')
+      .filter(line => line.includes('.cortex.index') && !line.trim().startsWith('#'));
+    expect(references, 'exactly one reference, and it is the lookup').toHaveLength(1);
+    expect(references[0]).toMatch(/grep -F -m1 .*"\$CWD\/\.cortex\.index"/);
+    expect(capture).not.toMatch(/>\s*"?\$CWD\/\.cortex\.index/);
+    expect(capture).not.toMatch(/>>\s*"?\$CWD\/\.cortex\.index/);
   });
 
   it('is written atomically, leaving no torn file for a concurrent reader', () => {

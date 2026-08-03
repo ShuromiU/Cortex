@@ -520,7 +520,14 @@ export function queryReadLedger(
       };
     }
 
-    const refundEligible = ancestry.has(digest.sessionId);
+    // Two conditions, two different questions. Ancestry (AD-16) answers "did
+    // YOU read it"; the record's own eligibility answers "does the digest
+    // describe what that read RETURNED" — false when the read was followed in
+    // its flush batch by an edit of the path or by any command (Story 4.5
+    // review round). An ineligible record still detects change; it must never
+    // ground a refund offer, because consuming one books `unrealized` against
+    // the agent for declining content the record cannot prove it ever had.
+    const refundEligible = ancestry.has(digest.sessionId) && digest.refundEligible;
     const base = {
       path: inputPath,
       key: digest.path,

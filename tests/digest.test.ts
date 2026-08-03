@@ -390,15 +390,40 @@ describe('content digests: the cold path is where this runs (AC #1, #2)', () => 
     expect(second!.sha256).toBe(sha256Of(Buffer.from('original')));
   });
 
-  it('the PostToolUse hook script computes no digest itself (N-4)', () => {
+  it('the PostToolUse hook computes no digest on the capture path (N-4)', () => {
     // A source check is legitimate here only because the claim IS about the
-    // file's text: the shipped hook must contain no hashing invocation. It
-    // would NOT be legitimate as a proxy for "the digest gets recorded" — that
-    // is asserted behaviorally, through the real flush, above.
+    // file's text: it would NOT be legitimate as a proxy for "the digest gets
+    // recorded", which is asserted behaviorally through the real flush above.
+    //
+    // Story 4.5 NARROWED this invariant rather than keeping or dropping it.
+    // Story 3.1's guarantee is that the *recorded* digest is computed at flush
+    // time, so the hook stays a bash append (N-4). Substitution hashes only to
+    // VERIFY a record that already exists, and only after the index lookup has
+    // produced one — so a read that misses still spawns nothing to hash, and
+    // the capture path is untouched. A blanket "no hashing invocation" ban
+    // would now be false; deleting the test would lose the guarantee. Both
+    // halves are pinned: exactly one hash, and it is downstream of the lookup.
     const script = fs.readFileSync('hooks/claude/cortex-capture.sh', 'utf8');
-    expect(script).not.toMatch(/sha256sum|shasum|openssl\s+dgst|md5sum/);
-    // The read line still carries the field the cold path needs.
+    const lines = script.split('\n');
+    const hashLines = lines
+      .map((line, index) => ({ line, index }))
+      .filter(
+        ({ line }) =>
+          /sha256sum|shasum|openssl\s+dgst|md5sum/.test(line) && !line.trim().startsWith('#'),
+      );
+
+    expect(hashLines).toHaveLength(1);
+    const lookupIndex = lines.findIndex(line => line.includes('grep -F -m1'));
+    expect(lookupIndex).toBeGreaterThan(-1);
+    expect(
+      hashLines[0]!.index,
+      'the hash must sit AFTER the index lookup, so a miss never pays for it',
+    ).toBeGreaterThan(lookupIndex);
+
+    // The read line still carries the path and still carries no digest: the
+    // cold path remains the only thing that records one.
     expect(script).toContain('file:(.tool_input.file_path');
+    expect(script).not.toMatch(/sha256\s*:/);
   });
 });
 

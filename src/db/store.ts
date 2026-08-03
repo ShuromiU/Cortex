@@ -209,6 +209,7 @@ export interface ContentDigestRow {
   oversize: number;
   read_count: number;
   recorded_at: string;
+  refund_eligible: number;
 }
 
 export interface ParsedContentDigest {
@@ -222,6 +223,16 @@ export interface ParsedContentDigest {
   oversize: boolean;
   readCount: number;
   recordedAt: string;
+  /**
+   * Whether this digest provably describes the bytes the recorded read
+   * RETURNED (Story 4.5 review round). False when the read was followed in its
+   * flush batch by an edit of the same path or by any command — either can
+   * rewrite the file before the flush hashes it, in which case the digest
+   * describes bytes the reader never saw. A refund (substitution or a read
+   * offer) may only be made from an eligible record; change detection uses the
+   * digest regardless.
+   */
+  refundEligible: boolean;
 }
 
 export function parseContentDigestRow(row: ContentDigestRow): ParsedContentDigest {
@@ -236,6 +247,7 @@ export function parseContentDigestRow(row: ContentDigestRow): ParsedContentDiges
     oversize: row.oversize === 1,
     readCount: row.read_count,
     recordedAt: row.recorded_at,
+    refundEligible: row.refund_eligible === 1,
   };
 }
 
@@ -255,6 +267,15 @@ export interface UpsertContentDigestOpts {
    * `upsertContentDigest`.
    */
   readerParentSessionId?: string | null;
+  /**
+   * See `ParsedContentDigest.refundEligible`. Defaults to TRUE, which is
+   * correct for every direct caller (CLI `log read`, `hook-entry post`): those
+   * compute the digest at event time, so nothing can have rewritten the file
+   * between the read and the hash. The spool flush — the one caller whose
+   * digests are computed a whole turn after the reads they describe — passes
+   * the value its batch pre-pass computed.
+   */
+  refundEligible?: boolean;
   /**
    * The scope's worktree root. Paths under it are stored relative to it — the
    * repo prefix is redundant with `scope_key`, and carrying it twice breached
@@ -3770,9 +3791,10 @@ export class CortexStore {
       .prepare(
         `INSERT INTO content_digests (
            scope_key, path, sha256, byte_size, mtime,
-           session_id, agent_id, oversize, read_count, recorded_at
+           session_id, agent_id, oversize, read_count, recorded_at,
+           refund_eligible
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
          ON CONFLICT(scope_key, path) DO UPDATE SET
            sha256 = excluded.sha256,
            byte_size = excluded.byte_size,
@@ -3787,7 +3809,8 @@ export class CortexStore {
                              ELSE excluded.agent_id END,
            oversize = excluded.oversize,
            read_count = content_digests.read_count + 1,
-           recorded_at = excluded.recorded_at
+           recorded_at = excluded.recorded_at,
+           refund_eligible = excluded.refund_eligible
          RETURNING *`,
       )
       .get(
@@ -3800,6 +3823,10 @@ export class CortexStore {
         opts.agentId ?? null,
         opts.oversize ? 1 : 0,
         recordedAt,
+        // Always the NEW read's assessment, never retained: eligibility
+        // certifies "this digest is what that read returned", and each upsert
+        // rewrites the digest, so a stale bit in either direction lies.
+        opts.refundEligible === false ? 0 : 1,
         // Named so the CASE can reference it twice from one binding. A session
         // with no parent binds null, which never equals a session_id, so the
         // ancestor branch simply never fires for a primary session.

@@ -432,6 +432,7 @@ CREATE TABLE IF NOT EXISTS content_digests (
   oversize    INTEGER NOT NULL DEFAULT 0,
   read_count  INTEGER NOT NULL DEFAULT 1,
   recorded_at TEXT NOT NULL,
+  refund_eligible INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (scope_key, path)
 ) WITHOUT ROWID;
 
@@ -773,8 +774,27 @@ export function applySchema(db: Database.Database): void {
   db.exec(V2_FTS);
   ensureSessionScopeColumns(db);
   ensureMemoryReferenceColumns(db);
+  ensureContentDigestColumns(db);
   db.exec(INDEXES);
   ensureSessionAgentIndex(db);
+}
+
+/**
+ * Story 4.5's review round (2026-08-03). Whether the digest provably describes
+ * the bytes the recorded read RETURNED, not merely the bytes on disk at flush
+ * time — the flush disqualifies a read that was followed in its batch by an
+ * edit of the same path or by any command, because either can rewrite the file
+ * before the digest is computed. Additive per AD-11; DEFAULT 0 so every row
+ * recorded before the column existed is ineligible until refreshed by a clean
+ * read — the safe direction, a missed refund rather than a false one.
+ */
+function ensureContentDigestColumns(db: Database.Database): void {
+  ensureColumn(
+    db,
+    'content_digests',
+    'refund_eligible',
+    'refund_eligible INTEGER NOT NULL DEFAULT 0',
+  );
 }
 
 /**

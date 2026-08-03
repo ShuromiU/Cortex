@@ -10,6 +10,10 @@ import {
   tokenizeCommand,
 } from '../src/query/doctor.js';
 import {
+  SUBSTITUTION_FLAG_FILENAME,
+  TURN_READS_FILENAME,
+} from '../src/capture/substitution.js';
+import {
   IGNORE_ENTRIES,
   classifyInstalledScript,
   installedMatchesTemplate,
@@ -963,7 +967,7 @@ describe('line endings', () => {
 });
 
 describe('the ignore list', () => {
-  it('is exactly the nine runtime artifacts, by literal', () => {
+  it('is exactly the eleven runtime artifacts, by literal', () => {
     // Not `for (entry of IGNORE_ENTRIES) expect(text).toContain(entry)` —
     // that can never fail for a missing entry, because the loop is over the
     // same constant the code used.
@@ -982,7 +986,21 @@ describe('the ignore list', () => {
       // And its atomic-write temp file, for the same reason
       // `.cortex.spool.jsonl.processing` is listed beside the spool.
       '.cortex.index.tmp-*',
+      // Story 4.5. The enable flag is a user preference that must survive
+      // `inject-header`'s wholesale rewrite of `.cortex.state`; the turn marker
+      // is cleared at every Stop. Both sit in the project root because the hot
+      // path resolves them in pure bash from $CWD.
+      '.cortex.substitution',
+      '.cortex.turn-reads',
     ]);
+  });
+
+  it('lists the Story 4.5 artifacts under the names the hot path actually uses', () => {
+    // The literals above are hand-written, and a hand-written literal that
+    // drifts from the constant the hook resolves would leave an untracked file
+    // in every user's checkout — silently, since nothing else compares them.
+    expect([...IGNORE_ENTRIES]).toContain(SUBSTITUTION_FLAG_FILENAME);
+    expect([...IGNORE_ENTRIES]).toContain(TURN_READS_FILENAME);
   });
 
   it('does not begin a new .gitignore with a blank line', () => {

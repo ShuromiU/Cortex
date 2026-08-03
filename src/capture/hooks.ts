@@ -20,6 +20,20 @@ export interface ReadArgs {
    * once per batch; absent for one-off calls, which hash directly.
    */
   digestCache?: DigestCache;
+  /**
+   * The hot path replaced this read's output (Story 4.5). Set only by the spool
+   * replay, from the `subst` field the PostToolUse hook writes onto the read
+   * line. Optional and defaulting to false, so the three other callers —
+   * `cli log read`, `hook-entry postToolUse`, and direct use — are unchanged.
+   */
+  substituted?: boolean;
+  /**
+   * Whether the digest recorded for this read will describe the bytes the read
+   * RETURNED — see `ParsedContentDigest.refundEligible`. Defaults to true,
+   * which is correct for direct callers (digest computed at event time); the
+   * spool flush passes its batch pre-pass verdict.
+   */
+  refundEligible?: boolean;
 }
 
 export interface EditArgs {
@@ -199,6 +213,20 @@ function bookUnrealizedIfOffered(
   sessionId: string,
   scopeKey: string | null,
   filePath: string,
+  /**
+   * True when the hot path replaced this read's output (Story 4.5). The offer
+   * is still **consumed** — leaving it open would let the next read of the same
+   * file book a decline that already did not happen — but nothing is booked.
+   *
+   * A substituted read is the precise opposite of a decline: Cortex offered the
+   * refund and the agent took it. Booking `unrealized` here would charge the
+   * adoption gap against the one turn that closed it, and `unrealized` is
+   * reported separately for exactly the reason that would ruin — it measures
+   * capability-versus-adoption, so inverting its sign on success is worse than
+   * not measuring at all. The saving itself arrives on its own `credit` line
+   * (AD-15) with its own evidence.
+   */
+  substituted = false,
 ): void {
   if (!scopeKey) {
     return;
@@ -211,7 +239,7 @@ function bookUnrealizedIfOffered(
   // make the pair atomic, and those are separate defects.
   store.runInTransaction(() => {
     const offer = store.consumeReadOffer(sessionId, scopeKey, filePath);
-    if (!offer) {
+    if (!offer || substituted) {
       return;
     }
     store.insertLedgerEntry({
@@ -243,7 +271,13 @@ export function handleReadEvent(
   // edit check: the evidence has to describe the state the decision was made in.
   try {
     const session = store.getSession(sessionId);
-    bookUnrealizedIfOffered(store, sessionId, session?.scope_key ?? null, args.file);
+    bookUnrealizedIfOffered(
+      store,
+      sessionId,
+      session?.scope_key ?? null,
+      args.file,
+      args.substituted === true,
+    );
   } catch {
     // Accounting must never break capture (AD-12).
   }
@@ -291,6 +325,7 @@ function recordReadDigest(store: CortexStore, sessionId: string, args: ReadArgs)
       // AD-16: lets the upsert keep an ancestor's recorded read rather than
       // letting this session's read erase it.
       readerParentSessionId: session.parent_session_id,
+      refundEligible: args.refundEligible !== false,
       // Deliberately NOT `session.worktree_path`. The store resolves the scope
       // root itself, and the write and the read must use the *same* rule or
       // they derive different keys. Measured with two worktrees sharing one

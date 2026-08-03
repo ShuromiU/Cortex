@@ -3,6 +3,7 @@ import { LEDGER_DIRECTIONS, foldLedgerDirectionTotals } from '../db/store.js';
 import { isSupersededMemoryItem } from '../memory/items.js';
 import { formatMemoryTimestamp, humanizeMemoryKind, isContested } from './render.js';
 import { formatTokens, resolveWorkingScopeKeys } from './state.js';
+import { isSubstitutionEnabled } from '../capture/substitution.js';
 
 /**
  * FR-9: the P&L report behind `cortex stats` (Story 3.6).
@@ -82,6 +83,24 @@ export interface StatsReport {
     neverRetrieved: number;
     mostRetrieved: StatsMostRetrievedEntry[];
   };
+  /**
+   * Whether verified read substitution is enabled for the project being
+   * reported on (Story 4.5), or `unknown` when no project root was supplied.
+   *
+   * Read-only: a `statSync` on a marker file. `stats` creates nothing and
+   * touches nothing (the FR-21 rule, pinned by a run-twice byte-identical
+   * test), and asking whether a file exists does not change that.
+   */
+  substitution: 'on' | 'off' | 'unknown';
+}
+
+export interface StatsReportOptions {
+  /**
+   * Project root whose substitution flag to report. The CLI passes
+   * `process.cwd()`; omitting it yields `unknown`, which renders a statement
+   * about evidence rather than about the mechanism.
+   */
+  projectRoot?: string;
 }
 
 function withDerived(totals: LedgerDirectionTotals): StatsTokenBlock {
@@ -169,7 +188,7 @@ function renderItemLine(item: ParsedMemoryItem): string {
   return `${item.access_count}× ${humanizeMemoryKind(item.kind)}${stamp}: ${text}${labels} — ${item.id}`;
 }
 
-export function buildStatsReport(store: CortexStore): StatsReport {
+export function buildStatsReport(store: CortexStore, opts: StatsReportOptions = {}): StatsReport {
   const scopeKeys = resolveWorkingScopeKeys(store);
   const primary = resolveCurrentPrimary(store, scopeKeys);
 
@@ -214,6 +233,12 @@ export function buildStatsReport(store: CortexStore): StatsReport {
         line: renderItemLine(item),
       })),
     },
+    substitution:
+      opts.projectRoot === undefined
+        ? 'unknown'
+        : isSubstitutionEnabled(opts.projectRoot)
+          ? 'on'
+          : 'off',
   };
 }
 
@@ -291,16 +316,24 @@ export function renderStatsReport(report: StatsReport): string {
   // otherwise show a bare zero that reads as a measured verdict rather than
   // an absence of measurement.
   //
-  // BINDS STORY 4.5: this wording asserts a global fact ("is not shipped")
-  // from scope-local data. The day substitution books savings in ANY scope,
-  // a scope with none would print a false statement about the mechanism —
-  // the 4.5 story must revise this branch (a sprint action item records the
-  // obligation). Until a producer exists anywhere, wording and keying agree.
+  // Story 4.5 discharged the `BINDS STORY 4.5` obligation that sat here: the
+  // old wording asserted a GLOBAL fact ("the mechanism is not shipped") from
+  // SCOPE-LOCAL data, which became false the moment substitution shipped and
+  // booked a saving in any scope. Every branch below states only what this
+  // scope can observe — and `unknown` gets its own wording, because the review
+  // found it falling into a branch written for a state it is not: a caller
+  // that supplied no project root has NOT established the flag is on.
   if (report.scope.totals.saved === 0) {
-    lines.push(`${' '.repeat(LABEL_WIDTH)}no verified savings yet: credit needs recorded evidence, and the`);
-    lines.push(
-      `${' '.repeat(LABEL_WIDTH)}mechanism that produces it (verified read substitution) is not shipped`,
-    );
+    if (report.substitution === 'off') {
+      lines.push(`${' '.repeat(LABEL_WIDTH)}no verified savings in this scope: read substitution is available`);
+      lines.push(`${' '.repeat(LABEL_WIDTH)}but not enabled here (cortex substitution on)`);
+    } else if (report.substitution === 'on') {
+      lines.push(`${' '.repeat(LABEL_WIDTH)}no verified savings in this scope yet: substitution is on, and`);
+      lines.push(`${' '.repeat(LABEL_WIDTH)}credit requires recorded evidence, never an estimate`);
+    } else {
+      lines.push(`${' '.repeat(LABEL_WIDTH)}no verified savings in this scope yet: credit requires recorded`);
+      lines.push(`${' '.repeat(LABEL_WIDTH)}evidence, never an estimate`);
+    }
   }
 
   const byState = report.items.byState;

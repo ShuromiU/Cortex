@@ -542,6 +542,68 @@ The same flush-time window is the one caveat worth stating plainly: a file chang
 *outside* Cortex between the read and the flush records the changed bytes and will later read as
 `unchanged`. The window is one flush interval, and nothing in the ledger can close it.
 
+## Refunding a redundant read
+
+The ledger answers a question you have to remember to ask. Substitution acts on the same evidence
+without being asked: when a `Read` returns a file you already read in this session and the bytes on
+disk still hash to what Cortex recorded, the PostToolUse hook replaces the tool's output with a
+short line. A four-thousand-token re-read becomes about fifty.
+
+**It is off until you turn it on**, per project:
+
+```bash
+cortex substitution on
+```
+
+`cortex substitution status` reports the current state, and `cortex substitution off` removes it.
+Turning it on needs current hooks — run `cortex install` if `cortex doctor` reports the hook version
+as out of date.
+
+What you see in place of the file:
+
+```text
+[cortex] substituted: src/db/store.ts is byte-identical to the copy already in this session's
+context (verified by sha256 just now). Full content ~4210 tokens. Read it again to get the real text.
+```
+
+That last sentence is load-bearing, not politeness. **Reading the same file a second time in one
+turn is never substituted**, so a re-read is always the way back to the real bytes — which is what
+makes replacing a tool result safe at all.
+
+The conditions are deliberately narrow, and every one of them resolves to *no substitution* when it
+cannot be established:
+
+- **The record must prove what your read actually returned, not just what is on disk.** Digests are
+  recorded when the capture spool flushes — after the turn — so a read that was followed in its
+  turn by an edit of that file, or by *any* command (commands rewrite files invisibly: formatters,
+  codegen, `git pull`), is never certified for refunds. A later clean read re-earns it. This is the
+  guard against the worst failure this feature could have: telling you content is "already in your
+  context" when what you read was different.
+- **The file is re-hashed at the moment of the substitution** and must match the recorded digest —
+  and its current size must match the recorded size before anything is hashed. Not mtime — the
+  bytes. Cortex hashes the file rather than the returned text, because the text arrives with line
+  endings normalised and would never match on a CRLF file.
+- **Only a complete read.** A partial read, or a file long enough that `Read` truncated it, passes
+  through: you hold part of the file and the digest describes all of it.
+- **Only the primary session, in both directions.** The recorded read must be the primary's own,
+  and the requester must be the primary — a subagent always receives real content, because it
+  starts with a fresh context and holds nothing, whatever the parent read. A digest recorded by a
+  subagent is a valid fact about the file but is never a refund.
+- **Only files between 2 KiB and 1 MiB** (`CORTEX_SUBST_MIN_BYTES`, `CORTEX_SUBST_MAX_BYTES`),
+  and only when the refund is worth more than the replacement line itself costs.
+
+Each substitution books a `saved` row in the token ledger carrying its evidence — the file, its
+verified size, and the tokens avoided — so `cortex stats` reports it as a measured number rather
+than an estimate. It is the only mechanism in Cortex that produces credit. One stated limit of that
+evidence: the credit records that a verified substitution payload was *emitted*; the hooks API has
+no acknowledgement channel, so a Claude Code build that silently stopped honouring
+`updatedToolOutput` would receive full files while credits still booked. `cortex doctor` verifies
+the installed script; it cannot verify the host.
+
+The hook does this in pure bash: one `grep` against the flat digest index on a miss, a `wc -c` and
+a `sha256sum` more on a verified hit, no Node process and no database. `cortex doctor` reports the
+substitution state, including the armed-but-inert case where no session facts are published yet.
+
 ## Correcting and deleting memory
 
 `edit-memory` replaces an item's text, re-extracts its file references and re-projects it. A note-backed item is corrected *through its note*, so the projected trailer stays consistent with the columns it mirrors — `inspect-memory` will not start reporting a divergence on an item you just fixed. Access counts and decay state are left alone: a correction is not a new memory, and reheating one as a side effect of fixing a typo would change what retrieval surfaces for a reason you never asked for.

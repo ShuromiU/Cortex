@@ -559,6 +559,190 @@ describe('token ledger: hot-path credit through the spool (AC #5, AD-15)', () =>
   });
 });
 
+describe('refund eligibility: the digest must describe what the read RETURNED', () => {
+  // Story 4.5's review round, the cardinal finding: digests are computed at
+  // FLUSH time (Story 3.1, structural under N-4), a whole turn after the
+  // reads they describe. The flush replays the batch and can SEE the
+  // in-session causes of divergence — an edit of the path, or any command —
+  // so it refuses to certify those records as refund-eligible. The
+  // substitution hook then never sees them (the index projects only eligible
+  // records), and the ledger makes no offer from them. Change detection keeps
+  // the digest either way.
+
+  function digestRow(fx: Fixture, file: string) {
+    return fx.store.getContentDigest(fx.scopeKey, file);
+  }
+
+  function indexHolds(fx: Fixture, relativeNeedle: string): boolean {
+    const indexPath = path.join(fx.root, '.cortex.index');
+    if (!fs.existsSync(indexPath)) return false;
+    return fs.readFileSync(indexPath, 'utf8').includes(`\t${relativeNeedle}\t`);
+  }
+
+  it('a read followed by nothing is eligible and published to the index', () => {
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/clean.ts', 'x'.repeat(4000));
+    appendSpoolEntry(fx.root, { tool: 'read', file });
+    flushSpool(fx.store, fx.root, fx.sessionId);
+
+    expect(digestRow(fx, file)?.refundEligible).toBe(true);
+    expect(indexHolds(fx, 'src/clean.ts')).toBe(true);
+  });
+
+  it('a read followed by an edit of the SAME path is ineligible and unpublished', () => {
+    // The reproduced failure: read A, edit to B, flush hashes B — the record
+    // matches disk while the agent's context holds A. The digest survives for
+    // change detection; nothing may refund from it.
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/edited.ts', 'x'.repeat(4000));
+    appendSpoolEntry(fx.root, { tool: 'read', file, ts: '2026-08-03T10:00:00.000Z' });
+    appendSpoolEntry(fx.root, { tool: 'edit', file, ts: '2026-08-03T10:00:01.000Z' });
+    flushSpool(fx.store, fx.root, fx.sessionId);
+
+    const row = digestRow(fx, file);
+    expect(row).not.toBeNull();
+    expect(row!.refundEligible).toBe(false);
+    expect(indexHolds(fx, 'src/edited.ts')).toBe(false);
+  });
+
+  it('an edit of a DIFFERENT path does not disqualify the read', () => {
+    const fx = createFixture();
+    const read = writeFile(fx, 'src/read.ts', 'x'.repeat(4000));
+    const edited = writeFile(fx, 'src/other.ts', 'y'.repeat(100));
+    appendSpoolEntry(fx.root, { tool: 'read', file: read, ts: '2026-08-03T10:00:00.000Z' });
+    appendSpoolEntry(fx.root, { tool: 'edit', file: edited, ts: '2026-08-03T10:00:01.000Z' });
+    flushSpool(fx.store, fx.root, fx.sessionId);
+
+    expect(digestRow(fx, read)?.refundEligible).toBe(true);
+  });
+
+  it('ANY command after the read disqualifies it — commands rewrite files invisibly', () => {
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/built.ts', 'x'.repeat(4000));
+    appendSpoolEntry(fx.root, { tool: 'read', file, ts: '2026-08-03T10:00:00.000Z' });
+    appendSpoolEntry(fx.root, { tool: 'cmd', cmd: 'npm run format', ts: '2026-08-03T10:00:01.000Z' });
+    flushSpool(fx.store, fx.root, fx.sessionId);
+
+    expect(digestRow(fx, file)?.refundEligible).toBe(false);
+  });
+
+  it('a command BEFORE the read does not disqualify it — order is what matters', () => {
+    // Explicit timestamps: two appends land in the same millisecond routinely,
+    // and same-stamp is deliberately ambiguous (disqualifies). This test is
+    // about ORDER, so the order must be unambiguous — the read-ledger suite
+    // documented exactly this coin flip ("force the clock past the recorded
+    // stamp rather than sleeping").
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/after.ts', 'x'.repeat(4000));
+    appendSpoolEntry(fx.root, { tool: 'cmd', cmd: 'npm test', ts: '2026-08-03T10:00:00.000Z' });
+    appendSpoolEntry(fx.root, { tool: 'read', file, ts: '2026-08-03T10:00:01.000Z' });
+    flushSpool(fx.store, fx.root, fx.sessionId);
+
+    expect(digestRow(fx, file)?.refundEligible).toBe(true);
+  });
+
+  it('a command in the SAME second as the read disqualifies it — ambiguity is a miss', () => {
+    // The hook records at whole-second granularity, so equal stamps carry no
+    // order. `>=`, not `>`: the convenient reading would certify the exact
+    // case that cannot be proven.
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/same-ts.ts', 'x'.repeat(4000));
+    appendSpoolEntry(fx.root, { tool: 'cmd', cmd: 'npm test', ts: '2026-08-03T10:00:00Z' });
+    appendSpoolEntry(fx.root, { tool: 'read', file, ts: '2026-08-03T10:00:00Z' });
+    flushSpool(fx.store, fx.root, fx.sessionId);
+
+    expect(digestRow(fx, file)?.refundEligible).toBe(false);
+  });
+
+  it('a later clean read re-earns eligibility', () => {
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/recover.ts', 'x'.repeat(4000));
+    appendSpoolEntry(fx.root, { tool: 'read', file, ts: '2026-08-03T10:00:00.000Z' });
+    appendSpoolEntry(fx.root, { tool: 'cmd', cmd: 'npm test', ts: '2026-08-03T10:00:01.000Z' });
+    flushSpool(fx.store, fx.root, fx.sessionId);
+    expect(digestRow(fx, file)?.refundEligible).toBe(false);
+
+    appendSpoolEntry(fx.root, { tool: 'read', file, ts: '2026-08-03T10:00:05.000Z' });
+    flushSpool(fx.store, fx.root, fx.sessionId);
+    expect(digestRow(fx, file)?.refundEligible).toBe(true);
+    expect(indexHolds(fx, 'src/recover.ts')).toBe(true);
+  });
+
+  it('a conservative flush (session-start leftovers) certifies nothing', () => {
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/leftover.ts', 'x'.repeat(4000));
+    appendSpoolEntry(fx.root, { tool: 'read', file });
+    flushSpool(fx.store, fx.root, fx.sessionId, undefined, {
+      conservativeEligibility: true,
+    });
+
+    expect(digestRow(fx, file)?.refundEligible).toBe(false);
+  });
+
+  it('events already in the LIVE spool disqualify the batch being flushed', () => {
+    // The backgrounded 256 KiB flush runs while the turn continues: a command
+    // that lands after the claim has already changed the disk this flush is
+    // about to hash. Staged via the orphan-claim path — a `.processing` file
+    // is consumed while fresh lines sit in the live spool.
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/racing.ts', 'x'.repeat(4000));
+    const spoolPath = path.join(fx.root, '.cortex.spool.jsonl');
+    appendSpoolEntry(fx.root, { tool: 'read', file });
+    fs.renameSync(spoolPath, `${spoolPath}.processing`);
+    appendSpoolEntry(fx.root, { tool: 'cmd', cmd: 'concurrent build' });
+    flushSpool(fx.store, fx.root, fx.sessionId);
+
+    expect(digestRow(fx, file)?.refundEligible).toBe(false);
+  });
+
+  it('a direct (non-spool) read is eligible — its digest is computed at event time', () => {
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/direct.ts', 'x'.repeat(4000));
+    handleReadEvent(fx.store, fx.sessionId, { file });
+    expect(digestRow(fx, file)?.refundEligible).toBe(true);
+  });
+
+  it('an entry with no timestamp is never certified', () => {
+    // Ambiguity is a miss (AD-6): with no timestamp there is no order, and
+    // with no order there is no proof nothing followed the read.
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/no-ts.ts', 'x'.repeat(4000));
+    fs.appendFileSync(
+      path.join(fx.root, '.cortex.spool.jsonl'),
+      `${JSON.stringify({ v: 1, tool: 'read', file })}\n`,
+    );
+    flushSpool(fx.store, fx.root, fx.sessionId);
+    expect(digestRow(fx, file)?.refundEligible).toBe(false);
+  });
+
+  it('eligibility survives a store reopen — it is a column, not a memo', () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-elig-')));
+    const dbPath = path.join(root, 'store.db');
+    const scopeKey = `project:${root}`;
+    const file = path.join(root, 'src', 'durable.ts');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'x'.repeat(4000));
+
+    {
+      const db = openDatabase(dbPath);
+      ensureCortexSchema(db, root);
+      const store = new CortexStore(db);
+      const session = store.createSession({ worktreePath: root, scopeType: 'project', scopeKey });
+      appendSpoolEntry(root, { tool: 'read', file, ts: '2026-08-03T10:00:00.000Z' });
+      appendSpoolEntry(root, { tool: 'edit', file, ts: '2026-08-03T10:00:01.000Z' });
+      flushSpool(store, root, session.id);
+      db.close();
+    }
+    {
+      const db = openDatabase(dbPath);
+      ensureCortexSchema(db, root);
+      const store = new CortexStore(db);
+      expect(store.getContentDigest(scopeKey, file)?.refundEligible).toBe(false);
+      db.close();
+    }
+  });
+});
+
 describe('token ledger: unrealized savings (AC #6)', () => {
   it('records a decline when the agent reads a file Cortex offered as unchanged', () => {
     const fx = createFixture();
@@ -612,6 +796,82 @@ describe('token ledger: unrealized savings (AC #6)', () => {
 
     expect(adopts.store.getTotalTokens().unrealized).toBe(0);
     expect(ignores.store.getTotalTokens().unrealized).toBeGreaterThan(0);
+  });
+
+  it('a SUBSTITUTED read consumes the offer without booking a decline (Story 4.5)', () => {
+    // The inversion this prevents: a substituted read is the exact opposite of
+    // a decline — Cortex offered the refund and the agent took it. Booking
+    // `unrealized` here would charge the adoption gap against the one turn that
+    // closed it, on the single figure that exists to measure adoption.
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/a.ts', 'x'.repeat(4000));
+    handleReadEvent(fx.store, fx.sessionId, { file });
+    queryReadLedger(fx.store, { paths: [file], sessionId: fx.sessionId, recordOffers: true });
+
+    handleReadEvent(fx.store, fx.sessionId, { file, substituted: true });
+
+    expect(ledgerRows(fx).filter(r => r.direction === 'unrealized')).toHaveLength(0);
+
+    // ...and the offer is CONSUMED, not merely skipped. Left open, the next
+    // ordinary read of the same file would book a decline for an offer that was
+    // already honoured — the defect deferred by one read rather than fixed.
+    handleReadEvent(fx.store, fx.sessionId, { file });
+    expect(ledgerRows(fx).filter(r => r.direction === 'unrealized')).toHaveLength(0);
+  });
+
+  it('reaches that path from a real spool line, not just a direct call', () => {
+    // `substituted` arrives from the hook as the NUMBER 1 (jq preserves JSON
+    // types), so a boolean-typed field or a truthiness test would silently
+    // never fire in production while a direct-call test stayed green.
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/a.ts', 'x'.repeat(4000));
+    handleReadEvent(fx.store, fx.sessionId, { file });
+    queryReadLedger(fx.store, { paths: [file], sessionId: fx.sessionId, recordOffers: true });
+
+    appendSpoolEntry(fx.root, { tool: 'read', file, subst: 1 });
+    flushSpool(fx.store, fx.root, fx.sessionId);
+
+    expect(ledgerRows(fx).filter(r => r.direction === 'unrealized')).toHaveLength(0);
+  });
+
+  it('an ineligible record grounds no offer, so no unrealized can be booked from it', () => {
+    // The review's cardinal finding, on the ledger's side of it: a digest
+    // recorded at flush time after an edit/cmd describes bytes the read never
+    // returned, and an offer made from it books `unrealized` against the agent
+    // for declining content it provably may not have.
+    const fx = createFixture();
+    const file = writeFile(fx, 'src/a.ts', 'x'.repeat(4000));
+    appendSpoolEntry(fx.root, { tool: 'read', file, ts: '2026-08-03T10:00:00.000Z' });
+    appendSpoolEntry(fx.root, { tool: 'cmd', cmd: 'npm run build', ts: '2026-08-03T10:00:01.000Z' });
+    flushSpool(fx.store, fx.root, fx.sessionId);
+
+    const [answer] = queryReadLedger(fx.store, {
+      paths: [file], sessionId: fx.sessionId, recordOffers: true,
+    });
+    expect(answer!.verdict).toBe('unchanged-since');
+    expect(answer!.refundEligible).toBe(false);
+
+    handleReadEvent(fx.store, fx.sessionId, { file });
+    expect(ledgerRows(fx).filter(r => r.direction === 'unrealized')).toHaveLength(0);
+  });
+
+  it('an unrecognised subst value is treated as an ordinary read', () => {
+    // Anything unrecognised must fall back to pre-4.5 behaviour. Truthiness
+    // would accept `"false"`, `"0"` and `{}` and suppress a real decline.
+    for (const value of ['false', '0', 0, {}, null, 'yes'] as unknown[]) {
+      const fx = createFixture();
+      const file = writeFile(fx, 'src/a.ts', 'x'.repeat(4000));
+      handleReadEvent(fx.store, fx.sessionId, { file });
+      queryReadLedger(fx.store, { paths: [file], sessionId: fx.sessionId, recordOffers: true });
+
+      appendSpoolEntry(fx.root, { tool: 'read', file, subst: value });
+      flushSpool(fx.store, fx.root, fx.sessionId);
+
+      expect(
+        ledgerRows(fx).filter(r => r.direction === 'unrealized'),
+        `subst=${JSON.stringify(value)} must not suppress the decline`,
+      ).toHaveLength(1);
+    }
   });
 
   it('asking the same question repeatedly leaves ONE offer, not one per call', () => {

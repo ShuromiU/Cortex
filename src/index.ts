@@ -69,8 +69,9 @@ export { runInstall, renderHookScript, installedMatchesTemplate, classifyInstall
 export { suggestNotes, type SuggestedNote, type SuggestedNoteKind } from './query/suggest-notes.js';
 export { buildSessionSummary } from './query/summarize.js';
 export { buildSessionBrief, type SessionBriefOptions } from './query/session-brief.js';
-export { buildStatsReport, renderStatsReport, MOST_RETRIEVED_LIMIT, STATS_ITEM_TEXT_MAX, type StatsReport, type StatsTokenBlock, type StatsMostRetrievedEntry } from './query/stats.js';
+export { buildStatsReport, renderStatsReport, MOST_RETRIEVED_LIMIT, STATS_ITEM_TEXT_MAX, type StatsReport, type StatsReportOptions, type StatsTokenBlock, type StatsMostRetrievedEntry } from './query/stats.js';
 export { flushSpool, appendSpoolEntry, deriveSpoolPath, spoolSizeBytes, type SpoolEntry, type SpoolFlushResult } from './capture/spool.js';
+export { isSubstitutionEnabled, setSubstitutionEnabled, renderHotPathStateLines, deriveSubstitutionFlagPath, deriveTurnReadsPath, resolveSubstMinBytes, resolveSubstMaxBytes, SUBSTITUTION_FLAG_FILENAME, TURN_READS_FILENAME, HOT_PATH_STATE_KEYS, DEFAULT_SUBST_MIN_BYTES, DEFAULT_SUBST_MAX_BYTES, type HotPathStateFacts } from './capture/substitution.js';
 export { runGc, shouldAutoGc, type GcOptions, type GcReport } from './db/gc.js';
 export { estimateTokens, buildTextMetric, evaluateStore, evaluateDatabase, type TextMetric, type TopicEvaluation, type EvaluationResult, type EvaluationOptions, type QualityComparison, type QualityEvaluation, type QualityFixture, type QualityFixtureEvaluation, type QualityScoreBreakdown } from './eval/harness.js';
 export { seedStoreFromScenario, createSeededStore, type EvaluationScenario, type ScenarioMemoryItem, type ScenarioAppGraph, type SeededStore } from './eval/seed.js';

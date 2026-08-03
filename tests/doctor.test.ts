@@ -251,6 +251,10 @@ describe('runDoctor on a healthy installation', () => {
         // became a question a diagnostic has to answer. `store-legacy` and
         // `store-adoption` are conditional and absent from a healthy fixture.
         'store',
+        // Story 4.5 review round: the substitution state, because on-but-inert
+        // (armed with no hot-path facts) was reproducibly invisible on every
+        // user-facing surface.
+        'substitution',
       ].sort(),
     );
   });
@@ -539,6 +543,44 @@ describe('engagement state', () => {
     const fixture = buildFixture();
     fs.writeFileSync(deriveEngagementPath(fixture.projectDir), 'was_enabled=true\n');
     expect(statusOf(doctor(fixture), 'engagement')).toBe('warn');
+  });
+});
+
+describe('read substitution row (FR-6, Story 4.5)', () => {
+  it('reports off as a PASS with the enable pointer — off is the default, not a defect', () => {
+    const fixture = buildFixture();
+    const report = doctor(fixture);
+    expect(statusOf(report, 'substitution')).toBe('pass');
+    expect(detailOf(report, 'substitution')).toContain('cortex substitution on');
+  });
+
+  it('reports on-with-facts as a pass', () => {
+    const fixture = buildFixture();
+    fs.writeFileSync(path.join(fixture.projectDir, '.cortex.substitution'), 'on\n');
+    fs.writeFileSync(
+      deriveEngagementPath(fixture.projectDir),
+      'enabled=true\nsession_id=s-1\nindex_scope=scope\nscope_root=c:/x\n',
+    );
+    const report = doctor(fixture);
+    expect(statusOf(report, 'substitution')).toBe('pass');
+    expect(detailOf(report, 'substitution')).toContain('on');
+  });
+
+  it('warns when the flag is armed but no hot-path facts are published', () => {
+    // The silent-dead configuration the review reproduced: `.cortex.state`
+    // without the session facts (a scope whose root cannot be resolved
+    // publishes nothing), while both user-facing surfaces reported health.
+    const fixture = buildFixture();
+    fs.writeFileSync(path.join(fixture.projectDir, '.cortex.substitution'), 'on\n');
+    const report = doctor(fixture);
+    expect(statusOf(report, 'substitution')).toBe('warn');
+    expect(detailOf(report, 'substitution')).toContain('cannot substitute');
+  });
+
+  it('a directory at the flag path is off, matching the hook and the module', () => {
+    const fixture = buildFixture();
+    fs.mkdirSync(path.join(fixture.projectDir, '.cortex.substitution'));
+    expect(statusOf(doctor(fixture), 'substitution')).toBe('pass');
   });
 });
 
