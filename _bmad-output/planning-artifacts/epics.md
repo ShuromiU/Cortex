@@ -96,7 +96,7 @@ R1 story count: 29 → 27.
 - N-7 Idempotent capture; replay produces identical state.
 - N-8 Additive, idempotent migrations; no memory destroyed.
 - N-9 Determinism where asserted; model-derived content always labeled.
-- B-1..B-8 Performance budgets, including **B-4** (non-substituting PostToolUse ≤500 ms p95 through the installed hook; structurally pure-bash, no Node — amended 2026-08-02) and **B-4a** (Read substitution path, split by outcome: miss ≤100 ms / hit ≤300 ms p95, no Node — amended 2026-08-02; see PRD §10).
+- B-1..B-8 Performance budgets, including **B-4** (non-substituting PostToolUse ≤500 ms p95 through the installed hook; structurally pure-bash, no Node — amended 2026-08-02) and **B-4a** (Read substitution path, structural clause primary: no Node, index-only lookup, one added spawn on a miss / two more on a verified hit; end-to-end miss ≤600 ms / hit ≤800 ms p95 on the quiescent reference platform — amended 2026-08-02, re-based 2026-08-03; see PRD §10).
 - P-1..P-6 Public-surface compatibility: MCP tools, CLI, hook protocol, schema versioning, deprecation policy.
 - SM-C3 False-confidence rate must be **zero**; a single wrong assertion is a release blocker.
 
@@ -901,7 +901,7 @@ So that the redundant read costs twenty tokens instead of four thousand.
 
 **Given** the hook runs the substitution path
 **When** it completes
-**Then** it spawns no Node process (N-4), reads only the flat digest index (AD-3), and stays within B-4a as amended 2026-08-02: ≤100 ms on a miss, ≤300 ms on a verified hit, at p95 through the installed hook.
+**Then** it spawns no Node process (N-4), reads only the flat digest index (AD-3), and stays within B-4a as re-based 2026-08-03: the structural clause is primary — exactly one added spawn on a miss, two more on a verified hit, the hash strictly after the size and eligibility gates — with end-to-end ≤600 ms on a miss, ≤800 ms on a verified hit, at p95 through the installed hook on the quiescent reference platform.
 
 **Given** substitution has never been explicitly enabled
 **When** a Read completes

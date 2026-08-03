@@ -6,7 +6,7 @@ baseline_commit: 135d21eb22575cd7c278461f79e5055e6b39325a
 
 **Epic:** 4 — Content Cache
 **FR:** FR-6 (the substitution half; the query half shipped as Story 3.3)
-**Status:** review
+**Status:** done
 
 As an agent that just re-read a file it already knows,
 I want the result replaced by a short equivalent,
@@ -32,7 +32,8 @@ So that the redundant read costs twenty tokens instead of four thousand.
 
 **Given** the hook runs the substitution path
 **When** it completes
-**Then** it spawns no Node process (N-4), reads only the flat digest index (AD-3), and stays within B-4a as amended 2026-08-02: ≤100 ms on a miss, ≤300 ms on a verified hit, at p95 through the installed hook.
+**Then** it spawns no Node process (N-4), reads only the flat digest index (AD-3), and stays within B-4a as re-based 2026-08-03: the structural clause is primary — exactly one added spawn on a miss, two more on a verified hit, the hash strictly after the size and eligibility gates — with end-to-end ≤600 ms on a miss, ≤800 ms on a verified hit, at p95 through the installed hook on the quiescent reference platform.
+*(AC #5 quoted as re-amended by the 2026-08-03 ruling — see F5. The story was created and reviewed against the 2026-08-02 text: ≤100 ms miss / ≤300 ms hit end-to-end.)*
 
 **Given** substitution has never been explicitly enabled
 **When** a Read completes
@@ -160,6 +161,18 @@ marginal-over-B-4 (which requires widening B-4 to cover `Read`'s base cost); or 
 work as a prerequisite and re-measure. Until ruled, AC #5's latency half is reported as **not
 met**; its structural halves (no Node, index-only lookup, one/three-spawn budget) are met and
 pinned by test.
+
+**Ruled 2026-08-03 (ShuromiU): re-based end-to-end with the structural clause primary** — the first
+candidate shape, the B-4 precedent. Recorded as PRD §10's third dated B-4a amendment: the
+structural clause (no Node, index-only lookup, exactly one added spawn on a miss and two more on a
+verified hit with the hash strictly after the size and eligibility gates) is the normative,
+CI-pinned half; the end-to-end ceiling is **miss ≤ 600 ms / hit ≤ 800 ms p95** through the
+installed hook on a quiescent reference platform at default size bounds, re-measured per hook
+change rather than CI-gated. The quiescent measurement (510.9 / 612.0 / 671.7 ms — see the
+completion-notes table) sits inside the ceiling with 15–19% headroom, so **AC #5's latency half is
+now met as re-based**; the epics.md AC text and the quoted AC above carry the amendment, the sprint
+action item is closed, and this story moves `review → done`. The three-jq→one-jq merge stays
+deferred on its own merits, deliberately not a condition of the ruling.
 
 ## What is actually here — run before designing
 
@@ -783,7 +796,9 @@ budget is exceeded before any substitution logic runs. What substitution *adds* 
 floor (marginals −36.8 / −57.1 / +5.4 ms). This is a PRD-owner decision of exactly the 2026-08-02
 ruling's class, recorded as an open sprint action item (owner: ShuromiU) with the options laid out
 there. Until ruled, AC #5's latency half is reported as **not met**, and the structural halves
-(N-4, AD-3, spawn budget) as met and pinned.
+(N-4, AD-3, spawn budget) as met and pinned. *Ruled 2026-08-03: re-based end-to-end with the
+structural clause primary — see F5's closing paragraph for the full record; the latency half is now
+met as re-based.*
 
 ### MED / LOW — fixed
 
@@ -925,12 +940,12 @@ the full-read gate, so a partial read did not mark the file and the full read th
 substituted as though it were the turn's first. The marker now records every *evaluated* read; both
 steps are builtins, so the reordering costs nothing.
 
-**AC #5 — latency half NOT met; corrected by the review round and escalated.** The first version of
-these notes reported "B-4a met with large headroom" against a marginal reading the Acceptance
-Auditor showed to be self-grading (see F5 — PRD §10's B-4 never covered `Read`, so B-4a's
-end-to-end wording is the only budget on this path). Re-measured through the **installed** hook
-after all review fixes, 60 runs each after 5 discarded warmups, 1000-record index, current and
-pre-4.5 scripts in the same run:
+**AC #5 — latency half NOT met as originally written; escalated, then ruled 2026-08-03 (met as
+re-based).** The first version of these notes reported "B-4a met with large headroom" against a
+marginal reading the Acceptance Auditor showed to be self-grading (see F5 — PRD §10's B-4 never
+covered `Read`, so B-4a's end-to-end wording is the only budget on this path). Re-measured through
+the **installed** hook after all review fixes, 60 runs each after 5 discarded warmups, 1000-record
+index, current and pre-4.5 scripts in the same run:
 
 | scenario | total p95 | pre-4.5 p95 | marginal p95 | budget as written | substituted |
 |---|---|---|---|---|---|
@@ -946,6 +961,13 @@ median 36.9 / p95 83.9 ms). **The 100 ms miss bound is structurally unreachable 
 any implementation.** Escalated to the PRD owner as an open sprint action item with candidate
 shapes; the structural halves — no Node, index-only lookup, exactly `grep` + `wc` + `sha256sum`
 with the hash strictly after both gates, 0 hashes on any miss — are met and pinned by test.
+
+**Ruled 2026-08-03 (ShuromiU): B-4a re-based end-to-end with the structural clause primary** (PRD §10,
+third dated amendment). New ceiling: miss ≤ 600 ms / hit ≤ 800 ms p95 through the installed hook on
+a quiescent reference platform — every row of the table above passes with 15–19% headroom (510.9 vs
+600; 612.0 and 671.7 vs 800). The structural clause is the normative, CI-pinned half; the
+wall-clock figure is re-measured per hook change rather than CI-gated. **AC #5 is now met in full**,
+and the story closes.
 
 **A design decision reversed by measurement.** The obvious optimisation — let bash read the index and
 match it with builtins, spawning nothing at all — is a trap: **4 ms at 1k records but 599 ms at

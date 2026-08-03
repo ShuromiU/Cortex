@@ -1079,9 +1079,10 @@ describe('digest index: lookup cost (AC #5)', () => {
     expect(grep.stdout).toContain('needle.ts');
     // Reported rather than tuned: this bounds the LOOKUP, which is the part
     // this story owns. It is deliberately loose because the process-spawn floor
-    // on this Windows/Git Bash platform dominates it. (The B-4/B-4a budgets
-    // were re-based 2026-08-02 — miss ≤100 ms / hit ≤300 ms, PRD §10; the
-    // per-path measurement belongs to Story 4.5's suite, not this one.)
+    // on this Windows/Git Bash platform dominates it. (B-4a was re-based
+    // 2026-08-02 and again 2026-08-03 — structural clause primary, end-to-end
+    // miss ≤600 ms / hit ≤800 ms p95, PRD §10; the per-path measurement
+    // belongs to Story 4.5's suite, not this one.)
     expect(elapsed).toBeLessThan(2000);
     // eslint-disable-next-line no-console
     console.log(`    [measured] grep over ${rows.length + 1} records: ${elapsed} ms`);

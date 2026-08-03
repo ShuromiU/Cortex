@@ -59,9 +59,10 @@ export const DEFAULT_SUBST_MIN_BYTES = 2048;
  * Measured on the reference platform (Git Bash 5.2.37, median of 25 warm runs):
  * `sha256sum` of nothing costs 55 ms, of 512 KiB 57 ms, of 2 MiB 62 ms. Hashing
  * is ~2–7 ms; the **process** is the whole cost. So the ceiling is not what
- * keeps the hit path inside 300 ms — the spawn count is. It ships anyway
- * because the amendment requires it and because a platform with a slower
- * `sha256sum` is a real possibility.
+ * keeps the hit path inside its budget (B-4a as re-based 2026-08-03: hit
+ * ≤800 ms p95 end-to-end, structural spawn count primary) — the spawn count
+ * is. It ships anyway because the amendment requires it and because a platform
+ * with a slower `sha256sum` is a real possibility.
  *
  * 1 MiB, deliberately **below** `CORTEX_DIGEST_MAX_BYTES` (2 MiB): a ceiling
  * equal to the digest ceiling could never fire, because past that the recorded

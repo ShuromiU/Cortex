@@ -116,7 +116,7 @@ development_status:
   # 4-2-serve-file-cards-with-a-freshness-verdict: withdrawn from R1 2026-07-28 (FR-11 to roadmap; see replan-r1-2026-07-28.md)
   4-3-remember-searches-that-found-nothing: backlog
   4-4-remember-the-outcome-of-expensive-commands: backlog
-  4-5-refund-redundant-reads-through-verified-substitution: review
+  4-5-refund-redundant-reads-through-verified-substitution: done # e7ae876; B-4a ruled 2026-08-03 (re-based end-to-end, structural clause primary) — AC #5 latency half met as re-based, story closed
   4-6-bound-and-evict-the-derived-cache: backlog
   epic-4-retrospective: optional
 
@@ -192,7 +192,7 @@ action_items:
   - epic: 4
     action: "B-4a needs a ruling: as written (miss <=100 ms / hit <=300 ms, p95 END-TO-END through the installed hook) it measures 510.9 / 612.0 / 671.7 ms and is structurally unreachable on the reference platform — one bash spawn (p95 83.9 ms) + one jq (~100 ms) exceeds the miss budget before any Cortex logic runs. Substitution's own marginal is +1.9 ms miss / ~+65 ms hit. Story 4.5's review round retracted its earlier marginal-vs-B-4 reading (PRD section 10 scopes B-4 to the NON-substituting path, so B-4a is the only budget governing Read). Candidate shapes for the ruling: re-base B-4a end-to-end with the structural clause primary (the B-4 precedent); define B-4a as marginal and widen B-4 to cover Read's base cost; or land the three-jq merge (~180 ms/read) first and re-measure. Until ruled, AC #5's latency half is reported NOT met; structural halves met and pinned."
     owner: "ShuromiU (PRD decision)"
-    status: open
+    status: done  # 2026-08-03 ruling (ShuromiU): B-4a re-based end-to-end with the structural clause primary (the B-4 precedent, first candidate shape). Structural clause is the normative, CI-pinned half: no Node, index-only lookup, exactly one added spawn on a miss (grep -F -m1) and two more on a verified hit (wc -c, then sha256sum strictly after the size and eligibility gates). End-to-end ceiling prices the platform: miss <=600 ms / hit <=800 ms p95 through the installed hook on a quiescent reference platform at default size bounds; quiescent measurement 510.9 / 612.0 / 671.7 ms passes with 15-19% headroom, re-measured per hook change rather than CI-gated. Recorded as PRD section 10's third dated B-4a amendment; epics.md line 99 + AC #5 re-amended; story F5 + completion notes updated; Story 4.5 review -> done. Rejected: marginal-over-B-4 (widens B-4 to cover Read, dismantling the 2026-08-02 scoping); jq-merge-first (holds an AC hostage to an optimisation — the ~180 ms/read merge stays deferred on its own merits).
   - epic: 3
     action: "Story 4.5 must revise the stats saved-0 explanation (renderStatsReport, src/query/stats.ts): its wording asserts 'the mechanism ... is not shipped' — a global fact — while its keying is scope-local (scope saved == 0). The day substitution books savings in ANY scope, every other scope prints a false statement. Found by 3.6's review (edge+blind); a BINDS STORY 4.5 comment sits on the branch."
     owner: "create-story (Story 4.5)"
