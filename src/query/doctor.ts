@@ -166,7 +166,7 @@ export const REQUIRED_WIRING: readonly RequiredWiring[] = [
     event: 'PostToolUse',
     label: 'PostToolUse (capture)',
     script: 'cortex-capture.sh',
-    matcher: 'Read|Edit|Write|Bash|Agent',
+    matcher: 'Read|Edit|Write|Bash|Agent|Grep|NotebookEdit|mcp__serena__replace_symbol_body|mcp__serena__rename_symbol|mcp__serena__insert_after_symbol|mcp__serena__insert_before_symbol|mcp__serena__replace_content|mcp__serena__replace_in_files|mcp__serena__safe_delete_symbol',
   },
   {
     event: 'PreToolUse',
@@ -716,7 +716,30 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
   const captureMatchers = commands
     .filter(entry => entry.event === 'PostToolUse' && entry.command.includes('cortex-capture.sh'))
     .map(entry => entry.matcher);
-  const CAPTURE_TOOLS = ['Read', 'Edit', 'Write', 'Bash', 'Agent'] as const;
+  // `NotebookEdit` and the symbol-refactor tools are here for the negative
+  // cache (Story 4.3): they rewrite files without firing the capture hook, so
+  // a search certified in the same turn would fingerprint the post-edit tree
+  // and later assert "no matches" about content the search never examined.
+  // They are named individually rather than as `mcp__.*` on purpose — a
+  // wildcard would add a hook spawn (~500 ms on this platform) to every MCP
+  // call, including the read-only ones, which is a heavy price for tools that
+  // cannot invalidate anything.
+  const CAPTURE_TOOLS = [
+    'Read',
+    'Edit',
+    'Write',
+    'Bash',
+    'Agent',
+    'Grep',
+    'NotebookEdit',
+    'mcp__serena__replace_symbol_body',
+    'mcp__serena__rename_symbol',
+    'mcp__serena__insert_after_symbol',
+    'mcp__serena__insert_before_symbol',
+    'mcp__serena__replace_content',
+    'mcp__serena__replace_in_files',
+    'mcp__serena__safe_delete_symbol',
+  ] as const;
   if (captureMatchers.length > 0) {
     // An empty or absent matcher matches every tool, which is broader than the
     // canonical wiring and therefore fine.

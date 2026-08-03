@@ -10,6 +10,7 @@ import type { GitCommandRunner } from '../src/scope/git.js';
 import { deriveEngagementPath } from '../src/transports/mcp.js';
 import {
   HOOK_SCRIPTS,
+  REQUIRED_WIRING,
   SPOOL_STALE_MS,
   SPOOL_THRESHOLD_BYTES,
   TEMPLATE_ID_PLACEHOLDER,
@@ -25,6 +26,8 @@ import {
   type CheckStatus,
   type DoctorReport,
 } from '../src/query/doctor.js';
+const CAPTURE_MATCHER = REQUIRED_WIRING.find(w => w.event === 'PostToolUse')!.matcher!;
+
 
 // ── Fixture ───────────────────────────────────────────────────────────
 //
@@ -119,7 +122,7 @@ function buildFixture(): Fixture {
       hooks: {
         SessionStart: [{ hooks: [{ type: 'command', command: `"${nodePath}" "${cliPath}" inject-header --quiet` }] }],
         PostToolUse: [
-          { matcher: 'Read|Edit|Write|Bash|Agent', hooks: [{ type: 'command', command: `bash ~/.claude/hooks/cortex-capture.sh` }] },
+          { matcher: CAPTURE_MATCHER, hooks: [{ type: 'command', command: `bash ~/.claude/hooks/cortex-capture.sh` }] },
         ],
         PreToolUse: [
           { matcher: 'Edit|Write', hooks: [{ type: 'command', command: `bash ~/.claude/hooks/cortex-reflect.sh reflect-pre` }] },
@@ -1264,7 +1267,7 @@ describe('capture matcher', () => {
     const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
     fs.writeFileSync(
       settingsPath,
-      fs.readFileSync(settingsPath, 'utf8').replace('Read|Edit|Write|Bash|Agent', 'Read|Edit|Write|Bash'),
+      fs.readFileSync(settingsPath, 'utf8').replace('Agent|', ''),
     );
 
     const report = doctor(fixture);
@@ -1272,6 +1275,24 @@ describe('capture matcher', () => {
     expect(detailOf(report, 'capture-matcher')).toContain('Agent');
     expect(detailOf(report, 'capture-matcher')).toContain('primary session');
     // A narrowed matcher can be deliberate, so it must not break CI.
+    expect(report.ok).toBe(true);
+  });
+
+  it('warns when the matcher lost Grep — dead search capture (Story 4.3)', () => {
+    // The 4.5-era matcher, exactly what every pre-4.3 install carries. The
+    // check must name Grep, or the negative cache silently never records and
+    // nothing anywhere says why.
+    const fixture = buildFixture();
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    fs.writeFileSync(
+      settingsPath,
+      fs
+        .readFileSync(settingsPath, 'utf8')
+        .replace('|Grep', ''),
+    );
+    const report = doctor(fixture);
+    expect(statusOf(report, 'capture-matcher')).toBe('warn');
+    expect(detailOf(report, 'capture-matcher')).toContain('Grep');
     expect(report.ok).toBe(true);
   });
 

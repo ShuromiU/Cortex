@@ -138,6 +138,165 @@ describe.skipIf(!canRun)('cortex-capture.sh', () => {
     });
   });
 
+  it('emits one search line per MEASURED zero-result Grep shape (Story 4.3)', () => {
+    // These are the shapes Claude Code 2.1.170 actually sends, captured by
+    // dumping this branch's own stdin for four real searches (review round;
+    // the hook was restored byte-identically after). The measurement overturned
+    // the guesses this branch shipped with: `tool_response` is always an
+    // OBJECT, there is no "No matches found" string in it — that is the
+    // RENDERED text, not the data — and the array is `filenames`, not `files`.
+    // Only `numFiles == 0` happened to be right, which is why capture worked
+    // at all before this round.
+    const zeroShapes: Array<[string, unknown]> = [
+      [
+        'files_with_matches',
+        { mode: 'files_with_matches', filenames: [], numFiles: 0, totalFiles: 0 },
+      ],
+      [
+        'content',
+        { mode: 'content', numFiles: 0, filenames: [], content: '', numLines: 0, totalLines: 0 },
+      ],
+      [
+        'count',
+        { mode: 'count', numFiles: 0, filenames: [], content: '', numMatches: 0 },
+      ],
+    ];
+    for (const [label, response] of zeroShapes) {
+      const { lines } = runHook({
+        tool_name: 'Grep',
+        tool_input: { pattern: 'zzz_none', path: 'C:/repo/src' },
+        tool_response: response,
+      });
+      expect(lines, label).toHaveLength(1);
+      expect(lines[0], label).toMatchObject({
+        tool: 'search',
+        stool: 'grep',
+        pattern: 'zzz_none',
+        sroot: 'C:/repo/src',
+        zero: 1,
+      });
+    }
+    // Real bash+jq spawns; under full-suite contention the default 10 s budget
+    // is a coin flip on this platform (spawn p95 ~84 ms quiescent, worse
+    // loaded).
+  }, 60_000);
+
+  it('falls back to the payload cwd when Grep was given no path (Story 4.3)', () => {
+    // Measured: a pathless Grep sends no `tool_input.path`, and the tool
+    // searches its own cwd. Recording "" and letting the flush read it as the
+    // scope root asserted over the whole worktree for a search that examined
+    // only the directory Claude was started in — a false negative needing no
+    // tree change at all.
+    const { cwd, lines } = runHook({
+      tool_name: 'Grep',
+      tool_input: { pattern: 'zzz_none', output_mode: 'content' },
+      tool_response: {
+        mode: 'content',
+        numFiles: 0,
+        filenames: [],
+        content: '',
+        numLines: 0,
+        totalLines: 0,
+      },
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.['sroot']).toBe(cwd.replace(/\\/g, '/'));
+  });
+
+  it('refuses a payload whose fields contradict each other (Story 4.3)', () => {
+    // Reproduced before the fix: the or-chain took the first zero-shaped field
+    // it recognized, so a payload claiming zero in one field and listing
+    // matches in another recorded a certified false negative. `totalFiles` is
+    // in the positive set because it is what exposes a truncated page.
+    const contradictions: Array<[string, unknown]> = [
+      ['numFiles 0 + filenames listed', { mode: 'files_with_matches', numFiles: 0, filenames: ['a.ts'], totalFiles: 1 }],
+      ['numFiles 0 + totalFiles 5', { mode: 'files_with_matches', numFiles: 0, filenames: [], totalFiles: 5 }],
+      ['numFiles 0 + content lines', { mode: 'content', numFiles: 0, content: 'a.ts:1:hit', numLines: 1, totalLines: 1 }],
+    ];
+    for (const [label, response] of contradictions) {
+      const { lines } = runHook({
+        tool_name: 'Grep',
+        tool_input: { pattern: 'hit', path: 'C:/repo/src' },
+        tool_response: response,
+      });
+      expect(lines, label).toHaveLength(0);
+    }
+  }, 60_000);
+
+  it('refuses a Grep carrying a parameter this build does not recognize (D2)', () => {
+    // A future matching-relevant parameter could narrow or widen matching in a
+    // way this build cannot reason about, so the search is not recorded at all.
+    const { lines } = runHook({
+      tool_name: 'Grep',
+      tool_input: { pattern: 'zzz_none', path: 'C:/repo/src', semantic_mode: 'fuzzy' },
+      tool_response: { mode: 'files_with_matches', filenames: [], numFiles: 0, totalFiles: 0 },
+    });
+    expect(lines).toHaveLength(0);
+  });
+
+  it('threads the matching-relevant Grep parameters onto the search line', () => {
+    const { lines } = runHook({
+      tool_name: 'Grep',
+      tool_input: {
+        pattern: 'zzz_none',
+        path: 'C:/repo/src',
+        glob: '*.ts',
+        type: 'ts',
+        '-i': true,
+        multiline: true,
+      },
+      tool_response: { mode: 'files_with_matches', filenames: [], numFiles: 0, totalFiles: 0 },
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      tool: 'search',
+      pattern: 'zzz_none',
+      sroot: 'C:/repo/src',
+      sglob: '*.ts',
+      stype: 'ts',
+      sci: 1,
+      sml: 1,
+      zero: 1,
+    });
+  });
+
+  it('emits nothing for non-zero, paginated, ambiguous, or hostile Grep payloads', () => {
+    const zeroResp = { mode: 'files_with_matches', filenames: [], numFiles: 0, totalFiles: 0 };
+    const silent: Array<[string, Record<string, unknown>]> = [
+      ['files found', { tool_input: { pattern: 'hit' }, tool_response: { mode: 'files_with_matches', filenames: ['a.ts'], numFiles: 1, totalFiles: 1 } }],
+      ['nonzero count', { tool_input: { pattern: 'hit' }, tool_response: { mode: 'count', numFiles: 3, numMatches: 9 } }],
+      // offset > 0: Claude Code < 2.1.208 answers a paginated-past-the-end
+      // search with a zero-shaped response while matches exist (changelog).
+      ['offset past page one', { tool_input: { pattern: 'zzz', offset: 50 }, tool_response: zeroResp }],
+      ['scalar response', { tool_input: { pattern: 'zzz' }, tool_response: 42 }],
+      ['null response', { tool_input: { pattern: 'zzz' }, tool_response: null }],
+      ['missing pattern', { tool_input: {}, tool_response: zeroResp }],
+      ['scalar tool_input', { tool_input: 'weird', tool_response: zeroResp }],
+      // The pre-measurement guesses: none of these shapes exist on the real
+      // host, and none may resurrect as a zero marker.
+      ['legacy "No matches found" string', { tool_input: { pattern: 'zzz' }, tool_response: 'No matches found' }],
+      ['legacy files:[] with no count', { tool_input: { pattern: 'zzz' }, tool_response: { files: [] } }],
+      ['legacy empty top-level array', { tool_input: { pattern: 'zzz' }, tool_response: [] }],
+    ];
+    for (const [label, payload] of silent) {
+      const { lines } = runHook({ tool_name: 'Grep', ...payload });
+      expect(lines, label).toHaveLength(0);
+    }
+    // Eight real bash+jq spawns; same loaded-machine budget as the zero matrix.
+  }, 60_000);
+
+  it('carries agent identity on the Grep branch', () => {
+    const { lines } = runHook({
+      tool_name: 'Grep',
+      tool_input: { pattern: 'zzz_none', path: 'C:/repo/src' },
+      tool_response: { mode: 'files_with_matches', filenames: [], numFiles: 0, totalFiles: 0 },
+      agent_id: 'agent-uuid-9',
+      agent_type: 'Explore',
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ tool: 'search', agent_id: 'agent-uuid-9', agent_type: 'Explore' });
+  });
+
   it('omits the agent fields entirely for a primary tool call', () => {
     const { lines } = runHook({
       tool_name: 'Read',
@@ -247,15 +406,16 @@ describe('cortex-capture.sh — no process per tool call (N-4)', () => {
     // this test exists to catch. Setup reads tool_name and cwd; each event
     // branch builds its line with exactly one jq. Story 4.5 split `Read` out of
     // the former `Read|Edit|Write` branch because it needs extra fields — it
-    // still gets exactly one.
-    const branchStarts = ['  Read)', '  Edit|Write)', '  Bash)', '  Agent)'];
+    // still gets exactly one — and Story 4.3 added `Grep` under the same
+    // one-jq discipline.
+    const branchStarts = ['  Read)', '  Grep)', '  Edit|Write)', '  Bash)', '  Agent)'];
     const boundaries = branchStarts.map(marker => {
       const index = lines.findIndex(line => line.startsWith(marker));
       expect(index, `branch ${marker} not found`).toBeGreaterThan(-1);
       return index;
     });
     const esacIndex = lines.findIndex(line => line.startsWith('esac'));
-    expect(esacIndex).toBeGreaterThan(boundaries[3]!);
+    expect(esacIndex).toBeGreaterThan(boundaries[4]!);
 
     const countJq = (from: number, to: number): number =>
       (lines.slice(from, to).join('\n').match(/\|\s*jq\s+-|\$\(\s*jq\s/g) ?? []).length;
@@ -264,7 +424,8 @@ describe('cortex-capture.sh — no process per tool call (N-4)', () => {
     expect(countJq(boundaries[0]!, boundaries[1]!)).toBe(1);
     expect(countJq(boundaries[1]!, boundaries[2]!)).toBe(1);
     expect(countJq(boundaries[2]!, boundaries[3]!)).toBe(1);
-    expect(countJq(boundaries[3]!, esacIndex)).toBe(1);
+    expect(countJq(boundaries[3]!, boundaries[4]!)).toBe(1);
+    expect(countJq(boundaries[4]!, esacIndex)).toBe(1);
 
     // `xargs` was folded into the old counter's alternation; keep it banned
     // outright rather than losing the guard when the counter narrowed to jq.

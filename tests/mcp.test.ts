@@ -33,8 +33,17 @@ function createStore(): { store: CortexStore; sessionId: string } {
 // ── TOOL_DEFINITIONS ──────────────────────────────────────────────────
 
 describe('TOOL_DEFINITIONS', () => {
-  it('defines exactly 12 tools', () => {
-    expect(TOOL_DEFINITIONS).toHaveLength(12);
+  it('defines exactly 13 tools', () => {
+    expect(TOOL_DEFINITIONS).toHaveLength(13);
+  });
+
+  it('cortex_search_ledger asserts only from evidence and stays scope-bounded', () => {
+    const tool = TOOL_DEFINITIONS.find(t => t.name === 'cortex_search_ledger');
+    expect(tool).toBeDefined();
+    expect(tool!.description).toContain('no-matches-at');
+    expect(tool!.description).toContain('never mtime');
+    expect(tool!.description).toContain('another branch');
+    expect(tool!.inputSchema.required).toEqual(['queries']);
   });
 
   it('has cortex_route tool', () => {

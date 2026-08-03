@@ -235,6 +235,72 @@ export interface ParsedContentDigest {
   refundEligible: boolean;
 }
 
+export interface NegativeResultRow {
+  scope_key: string;
+  query_key: string;
+  tool: string;
+  pattern: string;
+  root: string;
+  params_json: string | null;
+  head_oid: string | null;
+  census_sha256: string;
+  census_files: number;
+  census_bytes: number;
+  recorded_at: string;
+}
+
+/**
+ * FR-12's negative cache (Story 4.3). `censusSha256` is the assertion's entire
+ * evidence (AD-6): the search root's working-tree fingerprint at flush time,
+ * re-derived and compared at query. `headOid` is verdict metadata — rendered
+ * in `no-matches-at <head>`, never compared. `pattern` is stored redacted;
+ * `queryKey` hashes the raw pattern, so distinct secret-bearing searches stay
+ * distinct without the secret persisting.
+ */
+export interface ParsedNegativeResult {
+  scopeKey: string;
+  queryKey: string;
+  tool: string;
+  pattern: string;
+  root: string;
+  paramsJson: string | null;
+  headOid: string | null;
+  censusSha256: string;
+  censusFiles: number;
+  censusBytes: number;
+  recordedAt: string;
+}
+
+export interface UpsertNegativeResultOpts {
+  scopeKey: string;
+  queryKey: string;
+  tool: string;
+  pattern: string;
+  root: string;
+  paramsJson?: string | null;
+  headOid?: string | null;
+  censusSha256: string;
+  censusFiles: number;
+  censusBytes: number;
+  recordedAt?: string;
+}
+
+function parseNegativeResultRow(row: NegativeResultRow): ParsedNegativeResult {
+  return {
+    scopeKey: row.scope_key,
+    queryKey: row.query_key,
+    tool: row.tool,
+    pattern: row.pattern,
+    root: row.root,
+    paramsJson: row.params_json,
+    headOid: row.head_oid,
+    censusSha256: row.census_sha256,
+    censusFiles: row.census_files,
+    censusBytes: row.census_bytes,
+    recordedAt: row.recorded_at,
+  };
+}
+
 export function parseContentDigestRow(row: ContentDigestRow): ParsedContentDigest {
   return {
     scopeKey: row.scope_key,
@@ -3846,5 +3912,58 @@ export class CortexStore {
       .prepare('SELECT * FROM content_digests WHERE scope_key = ? AND path = ?')
       .get(scopeKey, toScopeRelativeKey(filePath, root)) as ContentDigestRow | undefined;
     return row ? parseContentDigestRow(row) : undefined;
+  }
+
+  /**
+   * Record a certified zero-result search (FR-12, Story 4.3). Plain
+   * last-writer-wins upsert: a re-search that still found nothing refreshes
+   * the census, the head, and `recorded_at`. No retention CASE like
+   * `upsertContentDigest`'s — there is no per-session attribution to preserve
+   * (negatives are scope facts), and each certified capture fully supersedes
+   * the prior evidence.
+   */
+  upsertNegativeResult(opts: UpsertNegativeResultOpts): ParsedNegativeResult {
+    const recordedAt = opts.recordedAt ?? new Date().toISOString();
+    const row = this.db
+      .prepare(
+        `INSERT INTO negative_results (
+           scope_key, query_key, tool, pattern, root, params_json,
+           head_oid, census_sha256, census_files, census_bytes, recorded_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(scope_key, query_key) DO UPDATE SET
+           tool = excluded.tool,
+           pattern = excluded.pattern,
+           root = excluded.root,
+           params_json = excluded.params_json,
+           head_oid = excluded.head_oid,
+           census_sha256 = excluded.census_sha256,
+           census_files = excluded.census_files,
+           census_bytes = excluded.census_bytes,
+           recorded_at = excluded.recorded_at
+         RETURNING *`,
+      )
+      .get(
+        opts.scopeKey,
+        opts.queryKey,
+        opts.tool,
+        opts.pattern,
+        opts.root,
+        opts.paramsJson ?? null,
+        opts.headOid ?? null,
+        opts.censusSha256,
+        opts.censusFiles,
+        opts.censusBytes,
+        recordedAt,
+      ) as NegativeResultRow;
+    return parseNegativeResultRow(row);
+  }
+
+  /** Exact-key lookup; the `scope_key` equality IS the AC #5 boundary. */
+  getNegativeResult(scopeKey: string, queryKey: string): ParsedNegativeResult | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM negative_results WHERE scope_key = ? AND query_key = ?')
+      .get(scopeKey, queryKey) as NegativeResultRow | undefined;
+    return row ? parseNegativeResultRow(row) : undefined;
   }
 }

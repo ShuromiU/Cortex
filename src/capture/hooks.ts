@@ -1,7 +1,12 @@
+import { execFileSync } from 'node:child_process';
+import * as path from 'node:path';
 import type { CortexStore } from '../db/store.js';
+import { isAbsoluteFileKey } from '../scope/keys.js';
 import { syncBranchSnapshotForSession } from '../scope/runtime.js';
+import { computeRootCensus, type RootCensus } from './census.js';
 import { consolidateLevel1, renderCompressed } from './consolidate.js';
 import { computeFileDigest, type DigestCache } from './digest.js';
+import { isCertifiableSearch, normalizeSearchRoot, searchQueryKey } from './search-query.js';
 import {
   captureOutputTail,
   classifyCommand,
@@ -283,6 +288,238 @@ export function handleReadEvent(
   }
   recordReadDigest(store, sessionId, args);
   syncBranchSnapshotForSession(store, sessionId);
+}
+
+export interface SearchCaptureDeps {
+  census: typeof computeRootCensus;
+  /** Flush-time HEAD of the recording worktree; null when unresolvable. */
+  headOid: (worktreePath: string) => string | null;
+  /**
+   * Which of `paths` git ignores, relative to `worktreePath`. Returns null when
+   * the question cannot be answered (no git, error) — which must be treated as
+   * "not ignored", never as "ignored".
+   */
+  ignored: (worktreePath: string, paths: string[]) => Set<string> | null;
+}
+
+export interface SearchArgs {
+  pattern: string;
+  /** Raw, as the tool reported it: '' (the scope root) or an absolute path. */
+  root: string;
+  glob?: string;
+  type?: string;
+  caseInsensitive?: boolean;
+  multiline?: boolean;
+  /**
+   * The flush pre-pass's verdict (`computeSearchEligibility`): nothing after
+   * this search in its batch could have rewritten the tree under its root.
+   * False means NOTHING is recorded — an uncertifiable negative has no
+   * consumer and a stored one would assert about a tree the search never saw.
+   */
+  certified: boolean;
+  deps?: SearchCaptureDeps;
+  /** Per-batch memo (see `createSearchCaptureCache`). */
+  cache?: SearchCaptureCache;
+}
+
+/**
+ * Per-flush memo for the two expensive, batch-invariant facts: the worktree's
+ * HEAD (one `git` spawn) and a root's census (a full walk). Both were computed
+ * once per certified search inside the flush's write transaction, so N searches
+ * over one root cost N walks and N spawns while holding the SQLite write lock.
+ * Created per batch and discarded with it, exactly like the digest cache — a
+ * module-level cache would serve a stale fingerprint for the life of the
+ * process.
+ */
+export interface SearchCaptureCache {
+  heads: Map<string, string | null>;
+  censuses: Map<string, RootCensus>;
+  ignored: Map<string, Set<string> | null>;
+}
+
+export function createSearchCaptureCache(): SearchCaptureCache {
+  return { heads: new Map(), censuses: new Map(), ignored: new Map() };
+}
+
+function resolveHeadCached(
+  deps: SearchCaptureDeps,
+  cache: SearchCaptureCache | undefined,
+  worktree: string,
+): string | null {
+  const cached = cache?.heads.get(worktree);
+  if (cached !== undefined) return cached;
+  const head = deps.headOid(worktree);
+  cache?.heads.set(worktree, head);
+  return head;
+}
+
+/**
+ * Flush-time HEAD via one git spawn, cold path only, and only for a search
+ * that is actually being recorded. Null on any failure — `head_oid` is
+ * verdict METADATA (rendered, never compared), so a missing head costs a
+ * cosmetic '-' in the verdict, never an assertion.
+ */
+function resolveFlushHeadOid(worktreePath: string): string | null {
+  try {
+    const out = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: worktreePath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5_000,
+    });
+    const oid = out.trim();
+    return /^[0-9a-f]{40}$/.test(oid) ? oid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `git check-ignore` over the runtime files the census skipped. One spawn, and
+ * only when the walk actually met such a file — a search rooted anywhere below
+ * the project root meets none, which is the common case.
+ *
+ * Exit code 0 means "some path is ignored", 1 means "none are", and anything
+ * else is an error; only `--stdin -z` output is trusted, so a non-zero exit
+ * with no output yields an empty set rather than a guess.
+ */
+function resolveIgnoredPaths(worktreePath: string, paths: string[]): Set<string> | null {
+  if (paths.length === 0) return new Set();
+  try {
+    const out = execFileSync('git', ['check-ignore', '--stdin', '-z'], {
+      cwd: worktreePath,
+      input: `${paths.join('\u0000')}\u0000`,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 5_000,
+    });
+    return new Set(out.split('\u0000').filter(p => p.length > 0));
+  } catch (error) {
+    // Exit 1 = nothing ignored, which is a real answer, not a failure.
+    const status = (error as { status?: number }).status;
+    if (status === 1) return new Set();
+    return null;
+  }
+}
+
+const DEFAULT_SEARCH_DEPS: SearchCaptureDeps = {
+  census: computeRootCensus,
+  headOid: resolveFlushHeadOid,
+  ignored: resolveIgnoredPaths,
+};
+
+/**
+ * Record a certified zero-result search as a negative-cache entry (FR-12,
+ * Story 4.3). Deliberately writes NO `events` row: the negative record is the
+ * durable artifact, and a new event type would leak into branch-snapshot
+ * summaries and session tails this story has no license to change.
+ *
+ * Every exit is silent (AD-12): this runs on the capture path, where a memory
+ * failure must never break the turn. The gates, in order — certification
+ * (computed by the flush, which can see the whole batch), the certifiability
+ * class (`isCertifiableSearch`: patterns that cannot be an invalid regex, so
+ * a pre-2.1.208 host's zero-shaped error response can never record a negative
+ * for a search that never ran), root resolution (scope-relative or the scope
+ * root itself; a root outside the scope or an unresolvable scope root records
+ * nothing — never a cwd-anchored walk), then the census at the environment
+ * ceilings. The stored pattern is redacted (people grep for secrets; PRD
+ * §11.1 routes negative-result capture through the existing redaction) while
+ * the KEY hashes the raw pattern, so distinct secret-bearing searches stay
+ * distinct without the secret persisting.
+ */
+export function handleSearchEvent(store: CortexStore, sessionId: string, args: SearchArgs): void {
+  if (!args.certified) return;
+  try {
+    const query = {
+      pattern: args.pattern,
+      root: args.root,
+      ...(args.glob !== undefined ? { glob: args.glob } : {}),
+      ...(args.type !== undefined ? { type: args.type } : {}),
+      ...(args.caseInsensitive !== undefined ? { caseInsensitive: args.caseInsensitive } : {}),
+      ...(args.multiline !== undefined ? { multiline: args.multiline } : {}),
+    };
+    if (!isCertifiableSearch(query)) return;
+
+    const session = store.getSession(sessionId);
+    const scopeKey = session?.scope_key ?? null;
+    if (!scopeKey) return;
+    const scopeRoot = store.resolveScopeRoot(scopeKey);
+    if (!scopeRoot) return;
+
+    const relRoot = normalizeSearchRoot(args.root, scopeRoot);
+    // Still absolute after normalization = outside the scope root. A negative
+    // there is scoped to nothing this store owns; skip it.
+    if (relRoot !== '' && isAbsoluteFileKey(relRoot)) return;
+    const absRoot = relRoot === '' ? scopeRoot : path.join(scopeRoot, relRoot);
+
+    const deps = args.deps ?? DEFAULT_SEARCH_DEPS;
+    const cache = args.cache;
+    let census = cache?.censuses.get(absRoot);
+    if (census === undefined) {
+      census = deps.census(absRoot);
+      cache?.censuses.set(absRoot, census);
+    }
+    if (census.status !== 'ok') return;
+
+    const worktree = session?.worktree_path ?? scopeRoot;
+
+    // **Exclusion parity, or no record** (review round, measured). The census
+    // skips Cortex's runtime files because they change on every tool call and
+    // would invalidate every record instantly — but that is only sound if the
+    // SEARCH skipped them too. Measured against the real Grep tool: a token
+    // inside `.cortex.spool.jsonl` IS found in a repository whose ignore file
+    // has not been swept, and hooks arrive machine-wide while ignore entries
+    // are written per-repo, so every fresh project is in that state. Without
+    // this gate the fingerprint proves "unchanged" over a smaller file universe
+    // than the search read — a false assertion needing no change at all.
+    // Nothing to check when the walk met no such file, which is every search
+    // rooted below the project root.
+    if (census.excludedCortex.length > 0) {
+      const relToWorktree = census.excludedCortex.map(rel =>
+        relRoot === '' ? rel : `${relRoot}/${rel}`,
+      );
+      const ignoreKey = `${worktree}\u0000${relToWorktree.join('\u0000')}`;
+      let ignored = cache?.ignored.get(ignoreKey);
+      if (ignored === undefined) {
+        ignored = deps.ignored(worktree, relToWorktree);
+        cache?.ignored.set(ignoreKey, ignored);
+      }
+      // null = unanswerable (no git, error). Ambiguity is a miss (AD-6).
+      if (ignored === null) return;
+      const answer = ignored;
+      if (relToWorktree.some(p => !answer.has(p))) return;
+    }
+    store.upsertNegativeResult({
+      scopeKey,
+      queryKey: searchQueryKey({ ...query, root: relRoot }),
+      tool: 'grep',
+      pattern: redactSensitiveText(args.pattern),
+      root: relRoot,
+      paramsJson: searchParamsJson(query),
+      headOid: resolveHeadCached(deps, cache, worktree),
+      censusSha256: census.sha256,
+      censusFiles: census.files,
+      censusBytes: census.bytes,
+    });
+  } catch {
+    // Capture edges never throw (AD-12): a failed negative-record is a lost
+    // refund opportunity, never a broken flush.
+  }
+}
+
+/** Only the params that were actually set, or null — keeps rows small. */
+function searchParamsJson(query: {
+  glob?: string;
+  type?: string;
+  caseInsensitive?: boolean;
+  multiline?: boolean;
+}): string | null {
+  const params: Record<string, string | boolean> = {};
+  if (query.glob !== undefined && query.glob !== '') params['glob'] = query.glob;
+  if (query.type !== undefined && query.type !== '') params['type'] = query.type;
+  if (query.caseInsensitive === true) params['i'] = true;
+  if (query.multiline === true) params['multiline'] = true;
+  return Object.keys(params).length > 0 ? JSON.stringify(params) : null;
 }
 
 /**

@@ -22,6 +22,8 @@ export interface GcOptions {
   digestDays?: number;
   /** Delete unconsumed read offers older than this many days (FR-8). */
   offerDays?: number;
+  /** Delete negative-search records not re-confirmed within this many days (FR-12/FR-16). */
+  negativeDays?: number;
   dryRun?: boolean;
   vacuum?: 'auto' | 'always' | 'never';
   now?: Date;
@@ -42,6 +44,7 @@ export interface GcReport {
   command_run_items: GcCategoryReport;
   content_digests: GcCategoryReport;
   read_offers: GcCategoryReport;
+  negative_results: GcCategoryReport;
   freelist_ratio: number;
   vacuumed: boolean;
 }
@@ -61,6 +64,11 @@ const DEFAULTS = {
   // Longer than the ledger because a file read a month ago is still a file the
   // agent plausibly knows.
   digestDays: 60,
+  // Shorter than digests: a negative is only worth asserting while its tree
+  // plausibly hasn't moved, and `recorded_at` refreshes on every re-confirmed
+  // search, so an actively-useful record never ages out (FR-16, Story 4.3 —
+  // shipped with the table rather than deferred, the 3.1 lesson).
+  negativeDays: 30,
 } as const;
 
 function envNumber(name: string): number | undefined {
@@ -96,6 +104,8 @@ function resolveGcOptions(options: GcOptions = {}): Required<Omit<GcOptions, 'no
     // The existing callers keep `envNumber` so this change stays scoped.
     digestDays: normalizeDays(options.digestDays) ?? envDays('CORTEX_GC_DIGEST_DAYS') ?? DEFAULTS.digestDays,
     offerDays: normalizeDays(options.offerDays) ?? envDays('CORTEX_GC_OFFER_DAYS') ?? DEFAULTS.offerDays,
+    negativeDays:
+      normalizeDays(options.negativeDays) ?? envDays('CORTEX_GC_NEGATIVE_DAYS') ?? DEFAULTS.negativeDays,
     dryRun: options.dryRun ?? true,
     vacuum: options.vacuum ?? 'auto',
     now: options.now ?? new Date(),
@@ -284,6 +294,31 @@ function pruneContentDigests(
 }
 
 /**
+ * Drop negative-search records past the horizon (FR-16's "negative results
+ * older than a configurable horizon"). Keyed on `recorded_at`, which the
+ * upsert refreshes on every re-confirmed zero-result search — so an actively
+ * useful record is never pruned, and a pruned one costs a single re-search,
+ * never memory.
+ */
+function pruneNegativeResults(
+  db: Database.Database,
+  cutoff: string,
+  dryRun: boolean,
+): GcCategoryReport {
+  const countRow = db
+    .prepare('SELECT COUNT(*) as count FROM negative_results WHERE recorded_at < ?')
+    .get(cutoff) as { count: number };
+  const candidates = countRow.count;
+  if (dryRun || candidates === 0) {
+    return { candidates, deleted: 0 };
+  }
+  const result = db
+    .prepare('DELETE FROM negative_results WHERE recorded_at < ?')
+    .run(cutoff);
+  return { candidates, deleted: result.changes };
+}
+
+/**
  * Drop read offers nobody acted on (FR-8).
  *
  * An offer is consumed when it is *declined* — the agent read the file anyway.
@@ -374,6 +409,12 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
 
   const readOffers = pruneReadOffers(db, isoDaysAgo(now, resolved.offerDays), dryRun);
 
+  const negativeResults = pruneNegativeResults(
+    db,
+    isoDaysAgo(now, resolved.negativeDays),
+    dryRun,
+  );
+
   const ratio = freelistRatio(db);
   let vacuumed = false;
   if (!dryRun && resolved.vacuum !== 'never') {
@@ -408,6 +449,7 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
     command_run_items: commandRuns,
     content_digests: digests,
     read_offers: readOffers,
+    negative_results: negativeResults,
     freelist_ratio: Number(ratio.toFixed(4)),
     vacuumed,
   };

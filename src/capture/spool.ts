@@ -2,16 +2,19 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { CortexStore } from '../db/store.js';
-import { normalizeFilePathKey } from '../scope/keys.js';
+import { isAbsoluteFileKey, normalizeFilePathKey } from '../scope/keys.js';
 import { resolveAgentSessionId } from '../scope/runtime.js';
 import { createDigestCache, type DigestCache, type DigestDeps } from './digest.js';
 import { digestIndexExists, writeDigestIndex } from './digest-index.js';
 import {
+  createSearchCaptureCache,
   handleAgentEvent,
   handleCmdEvent,
   handleEditEvent,
   handleReadEvent,
+  handleSearchEvent,
   handleWriteEvent,
+  type SearchCaptureCache,
 } from './hooks.js';
 
 /**
@@ -47,6 +50,36 @@ export interface SpoolEntry {
    * Interpreted through `isSubstitutedRead`, never by truthiness.
    */
   subst?: unknown;
+  /**
+   * A zero-result search observed by the hook (FR-12, Story 4.3).
+   *
+   * `tool: 'search'`. `stool` names the searching tool ('grep'); `pattern`,
+   * `sroot`, `sglob`, `stype` carry the matching-relevant parameters exactly
+   * as the tool reported them (`sroot` may be '' — the scope root). `zero`,
+   * `sci` and `sml` are jq-emitted flags and arrive as NUMBERS — interpreted
+   * through `readJsonFlag`, never truthiness, the `subst` hazard again. The
+   * hook emits a search line only when the payload POSITIVELY proved zero
+   * results under a recognized response shape; ambiguity emits nothing.
+   */
+  stool?: string;
+  pattern?: string;
+  sroot?: string;
+  sglob?: string;
+  stype?: string;
+  sci?: unknown;
+  sml?: unknown;
+  zero?: unknown;
+  /**
+   * This `cmd` was launched into the background (Story 4.3 review round).
+   *
+   * PostToolUse fires at LAUNCH, so a backgrounded build's timestamp orders
+   * *before* a later search while the process keeps writing after it — the
+   * ordered `>=` disqualifier is blind to exactly the writer most likely to
+   * invalidate a search. Any `bg` command in a batch disqualifies every search
+   * in that batch, whatever the order. jq emits it as a number, so it is read
+   * through `readJsonFlag`.
+   */
+  bg?: unknown;
   /**
    * A credit that originated on the hot path (AD-15, FR-8 AC #5).
    *
@@ -136,6 +169,11 @@ function isReplayable(entry: SpoolEntry): boolean {
       return Boolean(entry.cmd);
     case 'agent':
       return Boolean(entry.desc);
+    case 'search':
+      // Only a POSITIVELY-proven zero result is replayable; a search line
+      // without the zero flag has no consumer (D3: non-zero searches are not
+      // captured in this story) and is skipped rather than half-recorded.
+      return Boolean(entry.pattern) && readJsonFlag(entry.zero);
     case 'credit':
       // Every field is required. A credit line missing any part of its evidence
       // is dropped rather than booked at a default — AC #5's "a lost spool
@@ -194,6 +232,15 @@ function parseCreditNumber(raw: unknown): number | null {
  * which is the pre-4.5 behaviour and the safe direction.
  */
 function isSubstitutedRead(raw: unknown): boolean {
+  return raw === 1 || raw === true || raw === '1' || raw === 'true';
+}
+
+/**
+ * The generic form of `isSubstitutedRead`'s explicit test, for the search
+ * flags: `jq` emits `{zero:1}` as a NUMBER, and truthiness would additionally
+ * accept `"false"`, `"0"` and `{}`.
+ */
+function readJsonFlag(raw: unknown): boolean {
   return raw === 1 || raw === true || raw === '1' || raw === 'true';
 }
 
@@ -282,6 +329,89 @@ function computeReadEligibility(
   });
 }
 
+/**
+ * Which `search` entries may be RECORDED as negatives (FR-12, Story 4.3).
+ *
+ * The census is computed at flush time, a whole turn after the search ran —
+ * if anything after the search in its batch could have changed the tree under
+ * its root, the census would describe a tree the search never examined, and a
+ * later byte-identical query would assert "no matches" for content the search
+ * never saw: SM-C3 in two ordinary tool calls. Unlike `computeReadEligibility`
+ * this gates RECORDING, not a flag — an uncertifiable negative has no other
+ * consumer, so it is simply never stored.
+ *
+ * Disqualifiers, each resolving ambiguity to a miss (AD-6):
+ * - `conservative` (inject-header's leftover flushes certify nothing) or a
+ *   missing timestamp;
+ * - any `cmd` at-or-after the search (`>=`: hook stamps are whole-second, and
+ *   commands rewrite files invisibly — classifying them is Story 4.4's
+ *   problem);
+ * - **any BACKGROUNDED `cmd` anywhere in the batch, whatever the order**
+ *   (review round): its PostToolUse fires at launch, so a build started before
+ *   the search orders before it and then writes after it — the ordered rule is
+ *   blind to precisely the writer most likely to invalidate the search;
+ * - any `edit`/`write` at-or-after the search whose file sits UNDER the
+ *   search's root. An edit outside the root is irrelevant and must not
+ *   disqualify, or search-then-edit turns would kill every record. A root of
+ *   '' means the scope root, under which every edit presumptively falls;
+ * - a RELATIVE non-empty root: it would need resolving against the recording
+ *   session's cwd, which the flush does not have — resolving against the
+ *   flush's own cwd is the 3.2 relocation defect;
+ * - anything in the live-spool peek (events that landed after the claim).
+ */
+function computeSearchEligibility(
+  entries: SpoolEntry[],
+  live: LiveSpoolDisqualifiers,
+  conservative: boolean,
+): boolean[] {
+  const MAX_TS = '￿';
+  let latestCmdTs: string | null = live.anyCmd ? MAX_TS : null;
+  let anyBackgroundCmd = false;
+  interface EditStamp {
+    key: string;
+    ts: string;
+  }
+  const edits: EditStamp[] = [];
+  for (const p of live.editedPaths) {
+    edits.push({ key: p, ts: MAX_TS });
+  }
+  for (const entry of entries) {
+    const ts = entry.ts ?? MAX_TS;
+    // `mutate` is a file-writing tool the hook cannot model (NotebookEdit, the
+    // symbol-refactor tools). It carries no path, so it is treated exactly like
+    // a command: anything at-or-after the search disqualifies it. Nothing
+    // replays these lines; they exist only to be seen here.
+    if (entry.tool === 'cmd' || entry.tool === 'mutate') {
+      if (readJsonFlag(entry.bg)) anyBackgroundCmd = true;
+      if (latestCmdTs === null || ts > latestCmdTs) latestCmdTs = ts;
+    } else if ((entry.tool === 'edit' || entry.tool === 'write') && entry.file) {
+      edits.push({ key: normalizeFilePathKey(entry.file), ts });
+    }
+  }
+
+  const editUnderRootAtOrAfter = (rootRaw: string, searchTs: string): boolean => {
+    if (rootRaw === '') {
+      return edits.some(e => e.ts >= searchTs);
+    }
+    const rootKey = normalizeFilePathKey(rootRaw).replace(/\/+$/, '');
+    return edits.some(
+      e => e.ts >= searchTs && (e.key === rootKey || e.key.startsWith(`${rootKey}/`)),
+    );
+  };
+
+  return entries.map(entry => {
+    if (entry.tool !== 'search' || !entry.pattern) return false;
+    if (conservative || entry.ts === undefined) return false;
+    // Order-independent: a backgrounded command is still running, so it can
+    // write after a search that its own timestamp precedes.
+    if (anyBackgroundCmd) return false;
+    const root = entry.sroot ?? '';
+    if (root !== '' && !isAbsoluteFileKey(root.replace(/\\/g, '/'))) return false;
+    if (latestCmdTs !== null && latestCmdTs >= entry.ts) return false;
+    return !editUnderRootAtOrAfter(root, entry.ts);
+  });
+}
+
 interface LiveSpoolDisqualifiers {
   anyCmd: boolean;
   editedPaths: string[];
@@ -300,12 +430,13 @@ interface LiveSpoolDisqualifiers {
  * disqualifies nothing extra, which costs at most a wrong-direction refund
  * already bounded by Story 3.1's flush-window caveat.
  */
+/** `mutate` counts as a live command: an unmodellable writer landed after the claim. */
 function peekLiveSpool(dir: string): LiveSpoolDisqualifiers {
   try {
     const raw = fs.readFileSync(deriveSpoolPath(dir), 'utf8');
     const entries = parseSpoolLines(raw);
     return {
-      anyCmd: entries.some(entry => entry.tool === 'cmd'),
+      anyCmd: entries.some(entry => entry.tool === 'cmd' || entry.tool === 'mutate'),
       editedPaths: entries
         .filter(entry => (entry.tool === 'edit' || entry.tool === 'write') && entry.file)
         .map(entry => normalizeFilePathKey(entry.file as string)),
@@ -321,6 +452,8 @@ function replayEntry(
   entry: SpoolEntry,
   digestCache: DigestCache,
   readEligible: boolean,
+  searchCertified: boolean,
+  searchCache?: SearchCaptureCache,
 ): boolean {
   switch (entry.tool) {
     case 'read':
@@ -356,6 +489,24 @@ function replayEntry(
     case 'agent':
       if (!entry.desc) return false;
       handleAgentEvent(store, sessionId, { desc: entry.desc });
+      return true;
+    case 'search':
+      if (!entry.pattern) return false;
+      // Only the search tool this build knows how to key. A newer hook emitting
+      // another tool would otherwise be recorded with grep's key semantics by
+      // an older Node build, the way unknown `tool` values are skipped rather
+      // than guessed.
+      if (entry.stool !== undefined && entry.stool !== 'grep') return false;
+      handleSearchEvent(store, sessionId, {
+        pattern: entry.pattern,
+        root: entry.sroot ?? '',
+        ...(entry.sglob ? { glob: entry.sglob } : {}),
+        ...(entry.stype ? { type: entry.stype } : {}),
+        caseInsensitive: readJsonFlag(entry.sci),
+        multiline: readJsonFlag(entry.sml),
+        certified: searchCertified,
+        ...(searchCache ? { cache: searchCache } : {}),
+      });
       return true;
     case 'credit': {
       // AD-15: the credit is booked here, on the cold path. Nothing is
@@ -490,11 +641,9 @@ function processClaimFile(
   const entries = parseSpoolLines(raw);
   // Peeked per claim, not once per flush: the fresh claim IS the former live
   // spool, so what is live changes between the orphan batch and the fresh one.
-  const eligibility = computeReadEligibility(
-    entries,
-    peekLiveSpool(dir),
-    conservativeEligibility,
-  );
+  const live = peekLiveSpool(dir);
+  const eligibility = computeReadEligibility(entries, live, conservativeEligibility);
+  const searchEligibility = computeSearchEligibility(entries, live, conservativeEligibility);
   let processed = 0;
   let skipped = 0;
 
@@ -512,6 +661,13 @@ function processClaimFile(
       // discarded with the batch — a module-level cache would let a long-lived
       // MCP process serve a stale hash indefinitely.
       const digestCache = createDigestCache(undefined, deps);
+      // Searches get the same treatment, and here it is not just an
+      // optimisation: without it, N searches over one root ran N full census
+      // walks and N `git rev-parse` SPAWNS inside this write transaction, so a
+      // stalled git (network drive, antivirus) held the write lock for N×5 s and
+      // starved every other writer. Same lifetime as the digest cache, same
+      // reason.
+      const searchCache = createSearchCaptureCache();
 
       for (const [index, entry] of entries.entries()) {
         if (!isReplayable(entry)) {
@@ -519,7 +675,17 @@ function processClaimFile(
           continue;
         }
         const target = resolveEntrySession(store, sessionId, entry, sessionByAgent);
-        if (replayEntry(store, target, entry, digestCache, eligibility[index] === true)) {
+        if (
+          replayEntry(
+            store,
+            target,
+            entry,
+            digestCache,
+            eligibility[index] === true,
+            searchEligibility[index] === true,
+            searchCache,
+          )
+        ) {
           processed++;
         } else {
           skipped++;

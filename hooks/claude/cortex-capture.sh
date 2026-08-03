@@ -329,6 +329,105 @@ case "$TOOL_NAME" in
       LINE="$LINE_SUBST"
     fi
     ;;
+  Grep)
+    # FR-12 (Story 4.3): a zero-result search becomes one spool line; anything
+    # else emits nothing.
+    #
+    # **The response shape is MEASURED, not guessed** (review round). The live
+    # probe ran against Claude Code 2.1.170 by dumping this branch's own stdin
+    # for four real searches (restored byte-identically after). Verified shapes,
+    # all three output modes, `tool_response` always an OBJECT:
+    #
+    #   files_with_matches zero  {mode, filenames:[], numFiles:0, totalFiles:0}
+    #   content zero             {mode, numFiles:0, filenames:[], content:"",
+    #                             numLines:0, totalLines:0}
+    #   count zero               {mode, numFiles:0, filenames:[], content:"",
+    #                             numMatches:0}
+    #   files_with_matches hit   {mode, filenames:[…], numFiles:2, totalFiles:2}
+    #
+    # What the measurement overturned: there is NO "No matches found" string in
+    # the payload — that is the RENDERED text, not the data — and the array is
+    # `filenames`, not `files`. Three of the six markers this branch shipped
+    # with could never fire; capture worked because one guess (`numFiles == 0`)
+    # happened to be right. `numFiles` is now the anchor because it is present
+    # and zero in every measured zero shape.
+    #
+    # **Zero still requires corroboration** (review round, reproduced): the
+    # original or-chain took the first zero-shaped field it recognized, so
+    # `{"numFiles":0,"files":["a.ts","b.ts"]}` recorded a certified false
+    # negative. A contradicting field must veto — so: recognized zero evidence
+    # AND no positive evidence anywhere. `totalFiles`/`totalLines` are in the
+    # positive set precisely because they are the fields that would expose a
+    # truncated-page zero (the pre-2.1.208 pagination bug) even if `offset`
+    # were ever absent. Unrecognized shapes emit nothing: with the shape now
+    # measured, silence means the host changed, and silence is the safe way to
+    # find that out. The pre-measurement string and array fallbacks are GONE
+    # rather than kept as belt-and-braces — "No matches found" is the rendered
+    # text, so honouring it would mean trusting a display string as data, which
+    # is the guess this round exists to retire.
+    #
+    # **An unrecognized `tool_input` key vetoes the capture** (D2's promised
+    # rule, shippable now that the parameter set is measured rather than
+    # guessed). Everything in `$known` is either matching-relevant and carried
+    # on the spool line, or output-shaping and deliberately excluded from the
+    # key — zero results in any output mode is zero matches for the same
+    # (pattern, filters) pair. A key outside that set may narrow or widen
+    # matching in a way this build cannot reason about, so the search is simply
+    # not recorded. That makes a future host parameter fail silent instead of
+    # silently wrong.
+    #
+    # **The root is the search's REAL root** (review round): `tool_input.path`
+    # when given, otherwise the payload's `cwd`, which is what the Grep tool
+    # itself defaults to. Recording "" and letting the flush read it as the
+    # scope root asserted over the whole worktree for a search that only
+    # examined the directory Claude was started in — a false negative needing no
+    # tree change at all.
+    #
+    # `offset` past page one is refused outright — Claude Code < 2.1.208 answers
+    # a paginated-past-the-end search with a zero-shaped response while matches
+    # exist (changelog, fixed 2.1.208; the reference platform runs 2.1.170). The
+    # flush applies the deeper gates (literal-pattern class, eligibility,
+    # exclusion parity, census); this branch is mechanical extraction only.
+    # `.tool_response?` and the type dispatch keep the program alive on every
+    # payload shape (the 4.5 scalar lesson) — and a dead program here costs only
+    # this line, since no other capture rides the Grep branch. One jq, no other
+    # spawns: the B-4 structural clause binds this branch as it binds Edit|Write.
+    LINE=$(echo "$INPUT" | jq -c --arg ts "$TS" '
+      def num0($v): ($v | type) == "number" and $v == 0;
+      def numpos($v): ($v | type) == "number" and $v > 0;
+      def arrpos($v): ($v | type) == "array" and ($v | length) > 0;
+      ((.tool_input // {}) | if type == "object" then . else {} end) as $ti
+      | ["pattern","path","output_mode","glob","type","-i","-n","multiline",
+         "offset","head_limit","-A","-B","-C"] as $known
+      | (($ti | keys) - $known | length) as $unknownParams
+      | (($ti.pattern // "") | tostring) as $pat
+      | (($ti.path // .cwd // "") | tostring) as $root
+      | (($ti.glob // "") | tostring) as $glob
+      | (($ti.type // "") | tostring) as $type
+      | (if ($ti["-i"] // false) == true then 1 else 0 end) as $ci
+      | (if ($ti.multiline // false) == true then 1 else 0 end) as $ml
+      | (($ti.offset // 0) == 0) as $unpaged
+      | (.tool_response? // null) as $resp
+      | (if ($resp | type) == "object" then
+           ( num0($resp.numFiles?) or num0($resp.numMatches?) or num0($resp.numLines?) )
+         else false end) as $zero
+      | (if ($resp | type) == "object" then
+           ( ((($resp.content? // null) | type) == "string" and ($resp.content | length) > 0)
+             or arrpos($resp.filenames?) or arrpos($resp.files?) or arrpos($resp.matches?)
+             or numpos($resp.numFiles?) or numpos($resp.totalFiles?)
+             or numpos($resp.numMatches?) or numpos($resp.numLines?)
+             or numpos($resp.totalLines?) )
+         else false end) as $positive
+      | if $pat != "" and $root != "" and $zero and ($positive | not) and $unpaged
+           and $unknownParams == 0
+        then (({v:1, ts:$ts, tool:"search", stool:"grep", pattern:$pat, sroot:$root}
+               + (if $glob != "" then {sglob:$glob} else {} end)
+               + (if $type != "" then {stype:$type} else {} end)
+               + (if $ci == 1 then {sci:1} else {} end)
+               + (if $ml == 1 then {sml:1} else {} end)
+               + {zero:1})'"$AGENT_FIELDS"')
+        else empty end')
+    ;;
   Edit|Write)
     TOOL=$(printf '%s' "$TOOL_NAME" | tr '[:upper:]' '[:lower:]')
     LINE=$(echo "$INPUT" | jq -c --arg ts "$TS" --arg tool "$TOOL" '
@@ -336,8 +435,15 @@ case "$TOOL_NAME" in
       | select(.file != "")')
     ;;
   Bash)
+    # `bg:1` marks a command launched into the background (Story 4.3 review).
+    # Its PostToolUse fires at LAUNCH, so its timestamp orders before a later
+    # search while the process keeps writing afterwards — the ordered `>=`
+    # disqualifier cannot see it. `computeSearchEligibility` therefore treats
+    # any backgrounded command in a batch as disqualifying every search in that
+    # batch, whatever the order.
     LINE=$(echo "$INPUT" | jq -c --arg ts "$TS" '
       {v:1, ts:$ts, tool:"cmd", cmd:(.tool_input.command // "")}
+      + (if (.tool_input.run_in_background // false) == true then {bg:1} else {} end)
       + (if (.exit_code // .tool_response.exit_code // .tool_result.exit_code) != null
          then {exit: ((.exit_code // .tool_response.exit_code // .tool_result.exit_code) | tostring)} else {} end)
       + (if (.stdout // .tool_response.stdout // .tool_result.stdout // "") != ""
@@ -352,6 +458,20 @@ case "$TOOL_NAME" in
       | select(.desc != "")')
     # Marker consumed by cortex-end-of-turn.sh for the conditional note nudge.
     : > "$CWD/.cortex.agent-used"
+    ;;
+  NotebookEdit|mcp__serena__replace_symbol_body|mcp__serena__rename_symbol|mcp__serena__insert_after_symbol|mcp__serena__insert_before_symbol|mcp__serena__replace_content|mcp__serena__replace_in_files|mcp__serena__safe_delete_symbol)
+    # A file-mutating tool this script cannot model, recorded ONLY so the
+    # negative cache's certification can see it (Story 4.3 review round). The
+    # named hole: this repository's own instructions mandate the symbol-refactor
+    # tools for wide edits, and they rewrite files without firing any branch
+    # above — so a search certified in the same turn fingerprinted the
+    # post-rename tree and would later assert "no matches" over content full of
+    # the new name. `computeSearchEligibility` treats a `mutate` line exactly
+    # like a command; nothing replays it, so it creates no event, no episode and
+    # no memory item. Zero jq: the tool name is already in `$TOOL_NAME`, and
+    # this line must not cost a process on tools that never search.
+    printf '{"v":1,"ts":"%s","tool":"mutate"}\n' "$TS" >> "$SPOOL"
+    exit 0
     ;;
   *)
     exit 0

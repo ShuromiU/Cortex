@@ -85,6 +85,7 @@ import {
   resolveOnDiskPath,
   READ_LEDGER_MAX_PATHS,
 } from '../query/read-ledger.js';
+import { querySearchLedger, renderSearchLedger } from '../query/search-ledger.js';
 import {
   listMemory,
   inspectMemory,
@@ -1655,6 +1656,61 @@ export function createProgram(): Command {
         store.insertLedgerEntry({
           sessionId: session.id,
           type: 'read_ledger',
+          direction: 'injected',
+          tokens: estimateTokens(rendered),
+        });
+      } catch {
+        // Accounting never breaks the answer.
+      }
+      process.stdout.write(`${rendered}\n`);
+    });
+
+  program
+    .command('search-ledger')
+    .description('Ask whether a search already returned zero results and provably still would (FR-13)')
+    .argument('<pattern>', 'The search pattern, exactly as it would be run')
+    .option('--path <dir>', 'Search root; relative resolves against the current directory (default: the project root)')
+    .option('--glob <glob>', 'Filename filter the search would use')
+    .option('--type <type>', 'File-type filter the search would use')
+    .option('-i, --ignore-case', 'The search would be case-insensitive')
+    .option('--multiline', 'The search would use multiline matching')
+    .option('--json', 'Emit the structured verdict instead of the rendered line')
+    .action((pattern: string, opts: { path?: string; glob?: string; type?: string; ignoreCase?: boolean; multiline?: boolean; json?: boolean }) => {
+      const { store } = openCortexDb(process.cwd());
+      const session = ensureScopedSession(store, process.cwd());
+      // A relative --path resolves against cwd — what someone typing one in a
+      // shell means; the core relativizes against the scope root. An omitted
+      // --path stays '' (the scope root itself), never resolved to cwd.
+      // An explicit `--path ""` means the same as omitting it: `path.resolve`
+      // answers cwd for an empty input, which is a different root than the
+      // scope root `undefined` selects.
+      const root =
+        opts.path === undefined || opts.path === ''
+          ? ''
+          : path.isAbsolute(opts.path)
+            ? opts.path
+            : path.resolve(process.cwd(), opts.path);
+      const results = querySearchLedger(store, session.scope_key ?? '', [
+        {
+          pattern,
+          root,
+          ...(opts.glob !== undefined ? { glob: opts.glob } : {}),
+          ...(opts.type !== undefined ? { type: opts.type } : {}),
+          ...(opts.ignoreCase === true ? { caseInsensitive: true } : {}),
+          ...(opts.multiline === true ? { multiline: true } : {}),
+        },
+      ]);
+      const rendered = renderSearchLedger(results);
+      if (opts.json) {
+        process.stdout.write(`${JSON.stringify({ results }, null, 2)}\n`);
+        return;
+      }
+      try {
+        // Parity with the MCP tool: both surfaces answer the same question and
+        // must account for it the same way, or the P&L stops being comparable.
+        store.insertLedgerEntry({
+          sessionId: session.id,
+          type: 'search_ledger',
           direction: 'injected',
           tokens: estimateTokens(rendered),
         });

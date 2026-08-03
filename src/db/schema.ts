@@ -445,6 +445,42 @@ CREATE TABLE IF NOT EXISTS read_offers (
   offered_at TEXT NOT NULL,
   PRIMARY KEY (session_id, scope_key, path)
 ) WITHOUT ROWID;
+
+-- FR-12's negative cache (Story 4.3). A LOOKUP STRUCTURE, not knowledge: per
+-- AD-4 negative results do NOT project into memory_items — no backfill, no
+-- retrieval kind, queried by key only. Keyed (scope_key, query_key), where
+-- query_key is sha256-16 of the canonical query (tool + raw pattern + root +
+-- matching-relevant params). The key hashes the RAW pattern while the stored
+-- pattern column is redacted: distinct secret-bearing searches stay distinct
+-- without persisting the secret, and the hash is one-way.
+--
+-- census_sha256 is the assertion's ENTIRE evidence (AD-6): a fingerprint of
+-- the search root's working-tree bytes at flush time, re-derived and compared
+-- at query time. head_oid is verdict METADATA — recorded per the AC, rendered
+-- in the "no-matches-at <head>" verdict, never compared: a head that moved
+-- over a byte-identical root does not change what the search would return,
+-- and comparing it could only produce false misses. census_sha256 is NOT NULL
+-- by design: a record whose census could not be computed (ceilings exceeded,
+-- unreadable entry) is never stored at all, because it could never assert.
+--
+-- No session_id, deliberately: negatives are scope facts, not context facts —
+-- any session in the scope may be told the tree provably still has no matches
+-- — and omitting it also avoids binding a scope-wide fact to a session row's
+-- ON DELETE CASCADE (the content_digests concern parked with Story 4.6).
+CREATE TABLE IF NOT EXISTS negative_results (
+  scope_key     TEXT NOT NULL,
+  query_key     TEXT NOT NULL,
+  tool          TEXT NOT NULL,
+  pattern       TEXT NOT NULL,
+  root          TEXT NOT NULL,
+  params_json   TEXT,
+  head_oid      TEXT,
+  census_sha256 TEXT NOT NULL,
+  census_files  INTEGER NOT NULL,
+  census_bytes  INTEGER NOT NULL,
+  recorded_at   TEXT NOT NULL,
+  PRIMARY KEY (scope_key, query_key)
+) WITHOUT ROWID;
 `;
 
 const V2_FTS = `

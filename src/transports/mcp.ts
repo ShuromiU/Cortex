@@ -33,6 +33,11 @@ import {
   resolveOnDiskPath,
   READ_LEDGER_MAX_PATHS,
 } from '../query/read-ledger.js';
+import {
+  querySearchLedger,
+  renderSearchLedger,
+  SEARCH_LEDGER_MAX_QUERIES,
+} from '../query/search-ledger.js';
 
 let engagementPath: string | null = null;
 const CORTEX_CONSULTED_KEY = 'cortex_consulted';
@@ -135,6 +140,7 @@ export function renderCortexRoute(): string {
     'Use cortex_validate_memory(topic) when retrieved notes mention files/plans and you need to check them against the current checkout.',
     'Use cortex_note for durable decisions, blockers, and non-obvious insights; use cortex_disengage to silence capture and reflex.',
     'Use cortex_read_ledger(paths) before re-reading files, to learn whether you already read them and whether they changed since.',
+    'Use cortex_search_ledger(queries) before repeating a search: a zero-result search may already be proven still-zero for this scope.',
   ].join('\n');
 }
 
@@ -378,7 +384,83 @@ export const TOOL_DEFINITIONS = [
       required: ['paths'],
     },
   },
+  {
+    name: 'cortex_search_ledger',
+    description: 'Ask whether a search already returned zero results and provably still would (FR-13). Per query: no-matches-at <head> (the root re-fingerprints byte-identical to the recorded census — asserted from evidence, never mtime), miss (no record, or the tree changed), or unknown (cannot be established either way). Scope-bounded: a negative recorded on another branch is never asserted here.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        queries: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              pattern: { type: 'string', description: 'The search pattern, exactly as it would be run.' },
+              path: { type: 'string', description: 'Search root; relative resolves against the current working directory. Omit for the project root.' },
+              glob: { type: 'string' },
+              type: { type: 'string' },
+              caseInsensitive: { type: 'boolean' },
+              multiline: { type: 'boolean' },
+            },
+            required: ['pattern'],
+          },
+          description: `Searches to ask about (max ${SEARCH_LEDGER_MAX_QUERIES}). A bare string is accepted as a pattern.`,
+        },
+      },
+      required: ['queries'],
+    },
+  },
 ] as const;
+
+/**
+ * `queries` arrives from a model. Accepted shapes, most tolerant first: an
+ * array of query objects, an array of bare pattern strings, one query object,
+ * or one bare pattern string. Entries with no usable pattern are dropped
+ * rather than coerced — a query that is not a query cannot be looked up, and
+ * inventing one would answer about a search nobody ran.
+ */
+export function normalizeSearchQueries(
+  raw: unknown,
+): Array<{ pattern: string; path?: string; glob?: string; type?: string; caseInsensitive?: boolean; multiline?: boolean }> {
+  const list = Array.isArray(raw) ? raw : raw !== undefined && raw !== null ? [raw] : [];
+  const out: Array<{ pattern: string; path?: string; glob?: string; type?: string; caseInsensitive?: boolean; multiline?: boolean }> = [];
+  for (const item of list) {
+    if (typeof item === 'string') {
+      if (item.trim().length > 0) out.push({ pattern: item });
+      continue;
+    }
+    if (item !== null && typeof item === 'object') {
+      const record = item as Record<string, unknown>;
+      const pattern = record['pattern'];
+      if (typeof pattern !== 'string' || pattern.trim().length === 0) continue;
+      // A type-mangled field drops the whole ENTRY, never just the field
+      // (review round). Silently discarding `caseInsensitive: "true"` keys the
+      // case-SENSITIVE variant, so an existing record there answers
+      // `no-matches-at` for the case-INSENSITIVE search actually asked about —
+      // and sensitive-zero does not imply insensitive-zero, so the caller skips
+      // a search that would have found matches. This module's own rule for
+      // `pattern` ("dropped rather than coerced — inventing one would answer
+      // about a search nobody ran") applies to every field that changes what
+      // gets matched.
+      const optionalStringsOk = (['path', 'glob', 'type'] as const).every(
+        key => record[key] === undefined || typeof record[key] === 'string',
+      );
+      const optionalFlagsOk = (['caseInsensitive', 'multiline'] as const).every(
+        key => record[key] === undefined || typeof record[key] === 'boolean',
+      );
+      if (!optionalStringsOk || !optionalFlagsOk) continue;
+      out.push({
+        pattern,
+        ...(typeof record['path'] === 'string' ? { path: record['path'] } : {}),
+        ...(typeof record['glob'] === 'string' ? { glob: record['glob'] } : {}),
+        ...(typeof record['type'] === 'string' ? { type: record['type'] } : {}),
+        ...(record['caseInsensitive'] === true ? { caseInsensitive: true } : {}),
+        ...(record['multiline'] === true ? { multiline: true } : {}),
+      });
+    }
+  }
+  return out;
+}
 
 /**
  * `paths` arrives from a model, so it is whatever the model emitted. A bare
@@ -406,6 +488,7 @@ const SELF_BOOKING_TOOLS = new Set([
   'cortex_recall',
   'cortex_brief',
   'cortex_read_ledger',
+  'cortex_search_ledger',
 ]);
 
 /**
@@ -708,6 +791,47 @@ function dispatchToolCall(
       store.insertLedgerEntry({
         sessionId: session.id,
         type: 'read_ledger',
+        direction: 'injected',
+        tokens: estimateTokens(output),
+      });
+      return output;
+    }
+
+    case 'cortex_search_ledger': {
+      const session = ensureScopedSession(store, cwd);
+      const requested = normalizeSearchQueries(args['queries']);
+      if (requested.length === 0) {
+        return 'No usable queries: each needs a non-empty pattern.';
+      }
+      // The transport resolves a relative root against ITS cwd — what a caller
+      // typing one means — and the core relativizes against the scope root,
+      // the same split the read ledger settled. An omitted root stays '' (the
+      // scope root), never resolved to cwd: an MCP server's cwd and the scope
+      // root are not the same directory.
+      const results = querySearchLedger(
+        store,
+        session.scope_key ?? '',
+        requested.map(q => ({
+          pattern: q.pattern,
+          // An explicit `""` means the same as omitting it (review round):
+          // `path.resolve(cwd, '')` answers the transport's cwd, so an empty
+          // string silently asked about a different root than `undefined` did.
+          root:
+            q.path === undefined || q.path === ''
+              ? ''
+              : path.isAbsolute(q.path)
+                ? q.path
+                : path.resolve(cwd, q.path),
+          ...(q.glob !== undefined ? { glob: q.glob } : {}),
+          ...(q.type !== undefined ? { type: q.type } : {}),
+          ...(q.caseInsensitive === true ? { caseInsensitive: true } : {}),
+          ...(q.multiline === true ? { multiline: true } : {}),
+        })),
+      );
+      const output = renderSearchLedger(results, requested.length);
+      store.insertLedgerEntry({
+        sessionId: session.id,
+        type: 'search_ledger',
         direction: 'injected',
         tokens: estimateTokens(output),
       });

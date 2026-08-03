@@ -114,7 +114,7 @@ development_status:
   epic-4: in-progress
   # 4-1-derive-file-cards-deterministically: withdrawn from R1 2026-07-28 (FR-10 to roadmap; see replan-r1-2026-07-28.md)
   # 4-2-serve-file-cards-with-a-freshness-verdict: withdrawn from R1 2026-07-28 (FR-11 to roadmap; see replan-r1-2026-07-28.md)
-  4-3-remember-searches-that-found-nothing: backlog
+  4-3-remember-searches-that-found-nothing: review # dev + three-layer review reconciled 2026-08-03 (created same day). 34 findings; all three layers converged on the same SM-C3 class from four routes (wrong root / wrong zero / wrong file universe / invisible writer) - all four closed. THE PAYLOAD PROBE RAN (this session is itself a live Claude Code session; hook stdin dumped for four real searches, restored byte-identically): tool_response is always an object keyed on numFiles/filenames - four of six shipped markers were fiction, capture had worked on one lucky guess. Zero now requires no-positive-evidence; root is the real search root; census/search universe parity enforced via git check-ignore; backgrounded cmds and NotebookEdit/symbol-refactor tools disqualify. Live E2E proven twice with REAL session searches (no-matches-at -> miss on change -> honest re-validation). 1533 tests, gate 9/9, doctor 17/17.
   4-4-remember-the-outcome-of-expensive-commands: backlog
   4-5-refund-redundant-reads-through-verified-substitution: done # e7ae876; B-4a ruled 2026-08-03 (re-based end-to-end, structural clause primary) — AC #5 latency half met as re-based, story closed
   4-6-bound-and-evict-the-derived-cache: backlog

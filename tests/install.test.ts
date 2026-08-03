@@ -9,6 +9,8 @@ import {
   commandSatisfiesWiring,
   tokenizeCommand,
 } from '../src/query/doctor.js';
+const CAPTURE_MATCHER = REQUIRED_WIRING.find(w => w.event === 'PostToolUse')!.matcher!;
+
 import {
   SUBSTITUTION_FLAG_FILENAME,
   TURN_READS_FILENAME,
@@ -162,7 +164,7 @@ describe('installing into a project with no Cortex configuration (AC #1)', () =>
       fs.readFileSync(path.join(fixture.homeDir, '.claude', 'settings.json'), 'utf8'),
     ) as { hooks: Record<string, Array<{ matcher?: string }>> };
 
-    expect(settings.hooks['PostToolUse']?.[0]?.matcher).toBe('Read|Edit|Write|Bash|Agent');
+    expect(settings.hooks['PostToolUse']?.[0]?.matcher).toBe(CAPTURE_MATCHER);
     expect(settings.hooks['PreToolUse']?.[0]?.matcher).toBe('Edit|Write');
     // Events with no matcher must not gain an empty one.
     expect(settings.hooks['Stop']?.[0]).not.toHaveProperty('matcher');
@@ -695,7 +697,44 @@ describe('repairing an existing wiring, not just detecting one', () => {
       hooks: Record<string, Array<{ matcher?: string; hooks: unknown[] }>>;
     };
     expect(after.hooks['PostToolUse']).toHaveLength(1);
-    expect(after.hooks['PostToolUse']![0]!.matcher).toBe('Read|Edit|Write|Bash|Agent');
+    expect(after.hooks['PostToolUse']![0]!.matcher).toBe(CAPTURE_MATCHER);
+  });
+
+  it('upgrades a 4.5-era matcher (no Grep) in place and converges', () => {
+    // The Story 4.3 rollout case: every install predating the Grep branch
+    // carries the five-tool matcher. Install must rewrite it — a matcher
+    // without Grep is dead search capture — and a second run must report
+    // nothing to do.
+    const fixture = buildFixture();
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    const posixHooks = path.join(fixture.homeDir, '.claude', 'hooks').replace(/\\/g, '/');
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: 'Read|Edit|Write|Bash|Agent',
+              hooks: [{ type: 'command', command: `bash "${posixHooks}/cortex-capture.sh"` }],
+            },
+          ],
+        },
+      }),
+    );
+
+    install(fixture);
+    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as {
+      hooks: Record<string, Array<{ matcher?: string; hooks: unknown[] }>>;
+    };
+    expect(after.hooks['PostToolUse']).toHaveLength(1);
+    expect(after.hooks['PostToolUse']![0]!.matcher).toBe(CAPTURE_MATCHER);
+
+    const second = install(fixture);
+    const finalSettings = fs.readFileSync(settingsPath, 'utf8');
+    install(fixture);
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(finalSettings);
+    expect(second).toBeDefined();
   });
 
   it('rewrites a SessionStart command whose Node moved', () => {

@@ -308,6 +308,7 @@ For new projects, keep the global `~/.codex/AGENTS.md` Cortex section aligned wi
 | `cortex_suggest_notes` | Suggest load-bearing notes from the current session without writing them |
 | `cortex_validate_memory` | Audit memories against the current checkout without deleting notes |
 | `cortex_read_ledger` | Ask whether files were already read in this scope and whether they changed since — four verdicts, produced by re-hashing |
+| `cortex_search_ledger` | Ask whether a search already returned zero results and provably still would — `no-matches-at <head>`, `miss`, or `unknown` |
 | `cortex_engage` | Re-enable Cortex if it was disengaged |
 | `cortex_disengage` | Disable Cortex hooks for the current session |
 | `cortex_summarize` | Force a session summary/checkpoint |
@@ -330,6 +331,8 @@ cortex suggest-notes
 cortex validate-memory --topic "Activity notes portal"
 cortex read-ledger src/db/store.ts src/query/recall.ts
 cortex read-ledger src/db/store.ts --json
+cortex search-ledger deriveReadKey --path src
+cortex search-ledger plainword --glob "*.ts" -i --json
 cortex list-memory
 cortex list-memory --kind note:decision --state hot,warm --limit 50
 cortex list-memory --scope "branch:c:/work/cortex/.git:c:/work/cortex:main" --offset 20 --json
@@ -603,6 +606,34 @@ the installed script; it cannot verify the host.
 The hook does this in pure bash: one `grep` against the flat digest index on a miss, a `wc -c` and
 a `sha256sum` more on a verified hit, no Node process and no database. `cortex doctor` reports the
 substitution state, including the armed-but-inert case where no session facts are published yet.
+
+## Remembering searches that found nothing
+
+A zero-result search is the most wasteful category of repeated work: it costs full price and
+teaches nothing. Cortex records searches that provably returned nothing, and `cortex search-ledger`
+(and the `cortex_search_ledger` tool) answers the question worth asking before repeating one:
+
+```
+cortex search-ledger deriveReadKey --path src
+deriveReadKey: no-matches-at 4ae5ac8 (2026-08-03 10:41Z)
+```
+
+Three verdicts, never a guess. `no-matches-at <head>` is asserted only when the search root's
+working tree re-fingerprints **byte-identical** to the census recorded at capture — file content,
+uncommitted changes and all, never mtime — so the assertion holds whatever HEAD did in between.
+Any change under the root, or the root vanishing, answers `miss`; anything that cannot be
+established either way answers `unknown`. Restore the exact bytes (`git stash pop`) and the record
+honestly re-validates. A negative recorded on one branch is never asserted on another.
+
+Capture is deliberately narrow, because a false "no matches" is the worst answer this feature
+could produce. Only searches the runtime can vouch for are recorded: plain literal-ish patterns
+(never anything that could be an invalid regex — some Claude Code versions answer those with a
+zero-shaped response), no pagination, a bounded root (`CORTEX_NEGATIVE_MAX_FILES` /
+`CORTEX_NEGATIVE_MAX_BYTES`, default 2,000 files / 8 MiB — a repo-root search over `node_modules`
+is simply never cached), and nothing after the search in its turn that could have rewritten the
+tree. Search patterns pass through the same secret redaction as command capture before storage.
+Records expire after `CORTEX_GC_NEGATIVE_DAYS` (default 30) without a re-confirming search;
+`cortex gc` prunes them dry-run-first like everything else.
 
 ## Correcting and deleting memory
 
