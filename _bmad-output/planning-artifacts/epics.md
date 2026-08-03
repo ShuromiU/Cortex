@@ -31,8 +31,11 @@ and consequences in `replan-r1-2026-07-28.md` (same directory). Summary:
 - **Epic 4 execution order:** 4.5 → 4.3 → 4.4 → 4.6. Story numbering unchanged
   (Epic 1 precedent). 4.5 is time-sensitive: the platform hook it needs
   (`updatedToolOutput` for built-in tools) shipped in Claude Code v2.1.121 and
-  competitors ship partial mechanisms. 4.5 is blocked on the open B-4 re-base
-  action item (Windows hook latency) before story creation.
+  competitors ship partial mechanisms. ~~4.5 is blocked on the open B-4 re-base
+  action item (Windows hook latency) before story creation.~~ **Resolved
+  2026-08-02:** B-4 re-based to ≤500 ms p95 through the installed hook; B-4a
+  split by outcome — miss ≤100 ms, hit ≤300 ms p95 (ruling recorded in the PRD
+  §10 amendment notes). 4.5 is unblocked.
 - **Added:** Story 2.7, a docs-only repositioning pass.
 - Epics 0, 1, 3 and Stories 2.1–2.6, 5.1–5.3 are unchanged. Withdrawn story
   text below is retained for the future release that picks it back up.
@@ -93,7 +96,7 @@ R1 story count: 29 → 27.
 - N-7 Idempotent capture; replay produces identical state.
 - N-8 Additive, idempotent migrations; no memory destroyed.
 - N-9 Determinism where asserted; model-derived content always labeled.
-- B-1..B-8 Performance budgets, including **B-4** (non-substituting PostToolUse ≤15 ms) and **B-4a** (Read substitution path ≤100 ms, no Node).
+- B-1..B-8 Performance budgets, including **B-4** (non-substituting PostToolUse ≤500 ms p95 through the installed hook; structurally pure-bash, no Node — amended 2026-08-02) and **B-4a** (Read substitution path, split by outcome: miss ≤100 ms / hit ≤300 ms p95, no Node — amended 2026-08-02; see PRD §10).
 - P-1..P-6 Public-surface compatibility: MCP tools, CLI, hook protocol, schema versioning, deprecation policy.
 - SM-C3 False-confidence rate must be **zero**; a single wrong assertion is a release blocker.
 
@@ -898,7 +901,7 @@ So that the redundant read costs twenty tokens instead of four thousand.
 
 **Given** the hook runs the substitution path
 **When** it completes
-**Then** it spawns no Node process (N-4), reads only the flat digest index (AD-3), and stays within 100 ms (B-4a).
+**Then** it spawns no Node process (N-4), reads only the flat digest index (AD-3), and stays within B-4a as amended 2026-08-02: ≤100 ms on a miss, ≤300 ms on a verified hit, at p95 through the installed hook.
 
 **Given** substitution has never been explicitly enabled
 **When** a Read completes

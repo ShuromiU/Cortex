@@ -25,7 +25,7 @@ companions: []
 
 The existing layered core is ratified as-is — `transports/` → `query/` → `memory/` + `scope/` → `db/`, one-way, with `db/` importing `memory/items` only for text shaping. Every R1–R4 module slots into an existing layer. No new top-level layer is introduced.
 
-What *is* new is a second execution context. The read-refund feature must answer during a PostToolUse hook, where spawning Node is forbidden (N-4) and the budget is 100 ms (B-4a). That work cannot reach SQLite. So the architecture grows a **hot path**: a read-only, Node-free consumer of a flat projection that the cold path writes. The core still owns all truth; the hot path only ever reads a derived artifact it could not corrupt if it tried.
+What *is* new is a second execution context. The read-refund feature must answer during a PostToolUse hook, where spawning Node is forbidden (N-4) and the budget is 100 ms (B-4a). *(B-4a amended 2026-08-02: split by outcome, miss ≤100 ms / hit ≤300 ms p95 — see PRD §10. The architectural consequence — hot path reads a flat projection, never SQLite — is unchanged.)* That work cannot reach SQLite. So the architecture grows a **hot path**: a read-only, Node-free consumer of a flat projection that the cold path writes. The core still owns all truth; the hot path only ever reads a derived artifact it could not corrupt if it tried.
 
 | Layer | Directory | Execution context |
 | --- | --- | --- |

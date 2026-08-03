@@ -130,7 +130,7 @@ action_items:
   - epic: 1
     action: "Re-base B-4 (hook latency budget) against the Windows/Git Bash platform — PRD amendment; ~400 ms measured vs <=15 ms budget; adopted from Epic 0's never-run retrospective. 2026-07-28: now also BLOCKS Story 4.5 creation — B-4a (<=100 ms substitution path) inherits the same platform reality"
     owner: "ShuromiU (PRD decision)"
-    status: open
+    status: done  # 2026-08-02 ruling (ShuromiU): B-4 re-based to <=500 ms p95 through the installed hook, structural clause (pure bash, no Node, no SQLite) primary; B-4a split by outcome — miss <=100 ms / hit <=300 ms p95. Recorded as dated amendments in PRD section 10; epics.md 4.5 AC updated; alternatives (flat ~250 ms, MCP-server listener, defer FR-6) recorded in the amendment note. Story 4.5 create-story is unblocked.
   - epic: 1
     action: "Fold the two CLI resolve defects (note-resolve conflict clearing; contested --subject refusal) into Story 2.2's scope at create-story time"
     owner: "create-story (Story 2.2)"
@@ -186,7 +186,7 @@ action_items:
   - epic: 3
     action: "B-4a (<=100 ms) is unmet on this platform independently of Cortex: measured spawn floor ~39-42 ms, jq alone ~81 ms, a plausible 4.5 sequence 214.8 ms. Story 3.2 reports its lookup cost (41-100 ms over 1k-200k records) but does NOT claim the budget met. Blocks 4.5 with the existing B-4 amendment."
     owner: "ShuromiU (PRD decision)"
-    status: open
+    status: done  # 2026-08-02: resolved by the same ruling as the epic-1 B-4 item — B-4a split by outcome (miss <=100 ms / hit <=300 ms p95 through the installed hook). The 214.8 ms measured sequence sits inside the hit budget; the grep-first miss path (41-100 ms) sits inside the miss budget at realistic index sizes.
   - epic: 3
     action: "Story 4.5 must revise the stats saved-0 explanation (renderStatsReport, src/query/stats.ts): its wording asserts 'the mechanism ... is not shipped' — a global fact — while its keying is scope-local (scope saved == 0). The day substitution books savings in ANY scope, every other scope prints a false statement. Found by 3.6's review (edge+blind); a BINDS STORY 4.5 comment sits on the branch."
     owner: "create-story (Story 4.5)"
