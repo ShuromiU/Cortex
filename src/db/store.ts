@@ -500,12 +500,56 @@ export interface LedgerTypeTotals {
   estimated: number;
 }
 
-const LEDGER_DIRECTIONS: ReadonlySet<string> = new Set([
+/**
+ * Ledger sums keyed by the stored direction values (FR-9).
+ *
+ * `injected` here is the same quantity `getTotalTokens()` reports as `spent` —
+ * that older field name is kept so existing readers compile (Story 3.5); new
+ * FR-9 surfaces use the stored vocabulary and this comment states the mapping
+ * once.
+ */
+export interface LedgerDirectionTotals {
+  injected: number;
+  saved: number;
+  unrealized: number;
+  estimated: number;
+}
+
+/** One session's ledger sum for one direction; feeds the FR-9 session block. */
+export interface SessionLedgerTotalRow {
+  session_id: string;
+  direction: string;
+  tokens: number;
+}
+
+export const LEDGER_DIRECTIONS: ReadonlySet<string> = new Set([
   'injected',
   'saved',
   'unrealized',
   'estimated',
 ]);
+
+/**
+ * The one direction fold (FR-9). Both aggregate readers and the stats layer
+ * fold `{direction, tokens}` rows through this so a fifth direction added
+ * later has exactly one place to be missed — and a miss is at least a shared
+ * miss, not two folds drifting independently. Unknown directions cannot enter
+ * through `insertLedgerEntry` (it throws), only through a raw INSERT — the
+ * documented `cortex gc` bypass — and they fold to nothing here, an
+ * undercount, the PM-preferred direction.
+ */
+export function foldLedgerDirectionTotals(
+  rows: Array<{ direction: string; tokens: number }>,
+): LedgerDirectionTotals {
+  const totals: LedgerDirectionTotals = { injected: 0, saved: 0, unrealized: 0, estimated: 0 };
+  for (const row of rows) {
+    if (row.direction === 'injected') totals.injected += row.tokens;
+    else if (row.direction === 'saved') totals.saved += row.tokens;
+    else if (row.direction === 'unrealized') totals.unrealized += row.tokens;
+    else if (row.direction === 'estimated') totals.estimated += row.tokens;
+  }
+  return totals;
+}
 
 /**
  * A credit must be evidenced, and its AMOUNT must be consistent with that
@@ -3246,6 +3290,135 @@ export class CortexStore {
     }
 
     return { ...totals, byType };
+  }
+
+  // ── FR-9 reporting reads (Story 3.6) ──────────────────────────────
+  //
+  // All read-only: `cortex stats` must not create sessions, touch items, or
+  // book ledger rows by being used (the FR-21 rule, binding hardest on a
+  // reporting surface).
+
+  /**
+   * Per-session, per-direction ledger sums for an explicit session list —
+   * the FR-9 session block, called with a primary's tree
+   * (`getSessionTreeIds`). Returning rows rather than folded totals lets the
+   * caller both total the tree and see whether any child contributed.
+   */
+  getSessionLedgerTotals(sessionIds: string[]): SessionLedgerTotalRow[] {
+    if (sessionIds.length === 0) {
+      // Measured: SQLite 3.51.3 accepts `IN ()` and matches nothing, so this
+      // guard is belt-and-braces, not load-bearing — kept because the
+      // empty-list contract should not depend on a parser extension older
+      // SQLite builds reject. Its mutation is equivalent here by measurement.
+      return [];
+    }
+    const placeholders = sessionIds.map(() => '?').join(', ');
+    return this.db
+      .prepare(
+        `SELECT session_id, direction, SUM(tokens) as tokens
+           FROM token_ledger
+          WHERE session_id IN (${placeholders})
+          GROUP BY session_id, direction`,
+      )
+      .all(...sessionIds) as SessionLedgerTotalRow[];
+  }
+
+  /**
+   * Cumulative ledger sums for a set of scope keys (FR-9's "cumulatively for
+   * the scope"). The ledger carries no scope column, so attribution joins
+   * through `sessions`; children inherit their primary's scope_key (Epic 0)
+   * and GC rollups keep their session_id, so both stay inside the total. A
+   * row whose session is gone drops out — an undercount, the direction FR-9's
+   * PM note prefers ("over-reporting is fatal"); nothing deletes sessions
+   * today.
+   */
+  getScopeTokenTotals(scopeKeys: string[]): LedgerDirectionTotals {
+    if (scopeKeys.length === 0) {
+      return foldLedgerDirectionTotals([]);
+    }
+    const placeholders = scopeKeys.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `SELECT tl.direction as direction, SUM(tl.tokens) as tokens
+           FROM token_ledger tl
+           JOIN sessions s ON s.id = tl.session_id
+          WHERE s.scope_key IN (${placeholders})
+          GROUP BY tl.direction`,
+      )
+      .all(...scopeKeys) as Array<{ direction: string; tokens: number }>;
+    return foldLedgerDirectionTotals(rows);
+  }
+
+  /**
+   * Ledger rows no scope view can reach: sessions whose `scope_key` is NULL
+   * (the column was added by migration with no backfill, so pre-scope stores
+   * hold such sessions) and rows whose session row is gone. The scope join
+   * drops both silently — an undercount, safe for the ratio, but the
+   * `estimated` history FR-8 promised to keep visible would vanish from every
+   * surface without this. Measured 0 on this repo's store; the query exists
+   * for the stores where it is not.
+   */
+  getUnattributedTokenTotals(): LedgerDirectionTotals {
+    const rows = this.db
+      .prepare(
+        `SELECT tl.direction as direction, SUM(tl.tokens) as tokens
+           FROM token_ledger tl
+           LEFT JOIN sessions s ON s.id = tl.session_id
+          WHERE s.id IS NULL OR s.scope_key IS NULL
+          GROUP BY tl.direction`,
+      )
+      .all() as Array<{ direction: string; tokens: number }>;
+    return foldLedgerDirectionTotals(rows);
+  }
+
+  /** Item counts by state, store-wide (FR-9 retrieval health; D5). */
+  getMemoryItemStateCounts(): Record<string, number> {
+    const rows = this.db
+      .prepare('SELECT state, COUNT(*) as count FROM memory_items GROUP BY state')
+      .all() as Array<{ state: string; count: number }>;
+    const counts: Record<string, number> = {};
+    for (const row of rows) {
+      counts[row.state] = row.count;
+    }
+    return counts;
+  }
+
+  /**
+   * Items retrieval has never reinforced. `access_count` is bumped only by
+   * `touchMemoryItems` and preserved by every re-sync path (FR-22), so zero
+   * means exactly "never retrieved".
+   */
+  countNeverRetrievedMemoryItems(): number {
+    const row = this.db
+      .prepare('SELECT COUNT(*) as count FROM memory_items WHERE access_count = 0')
+      .get() as { count: number };
+    return row.count;
+  }
+
+  /**
+   * The most-retrieved items, store-wide. `access_count > 0` because padding
+   * a "most-retrieved" list with never-retrieved rows fabricates retrieval
+   * history. The tiebreakers are load-bearing: seeded and same-transaction
+   * rows share timestamps to the millisecond, and an unstable order over a
+   * partial order silently reshuffles between runs (the FR-21 paging lesson).
+   */
+  getMostRetrievedMemoryItems(limit: number): ParsedMemoryItem[] {
+    // Public API, so the limit is clamped here rather than trusted: SQLite
+    // reads a negative LIMIT as *no limit* — the exact whole-store dump the
+    // FR-21 paging work guards against — and better-sqlite3 throws raw on
+    // NaN. Non-finite and non-positive fall back to ten (the FR-9 constant);
+    // 200 mirrors MAX_PAGE_LIMIT.
+    const clamped =
+      Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 200) : 10;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_items
+          WHERE access_count > 0
+          ORDER BY access_count DESC, last_accessed_at DESC, rowid DESC
+          LIMIT ?`,
+      )
+      .all(clamped) as MemoryItemRow[];
+    return rows.map(parseMemoryItemRow);
   }
 
   // ── Correction and deletion (FR-22) ───────────────────────────────

@@ -55,7 +55,7 @@
 # story 2-7 (docs repositioning) added.
 
 generated: 2026-07-24
-last_updated: 2026-08-01
+last_updated: 2026-08-02
 project: cortex
 project_key: NOKEY
 tracking_system: file-system
@@ -95,13 +95,13 @@ development_status:
   epic-2-retrospective: optional
 
   # Epic 3 — Read Ledger and Token P&L (FR-5..FR-9; 3.2 carries AD-3, no FR)
-  epic-3: in-progress
+  epic-3: done
   3-1-capture-content-digests-on-read: done
   3-2-build-the-flat-digest-index: done
   3-3-answer-the-read-ledger-question: done
-  3-4-surface-the-read-ledger-in-the-session-brief: backlog
-  3-5-account-for-tokens-injected-and-saved: backlog
-  3-6-report-the-pl: backlog # epic title: "Story 3.6: Report the P&L"
+  3-4-surface-the-read-ledger-in-the-session-brief: done
+  3-5-account-for-tokens-injected-and-saved: done # 1ddd043 + reconciliation 2d2b2e4 (fixed an overstatement in 1ddd043's own report)
+  3-6-report-the-pl: done # epic title: "Story 3.6: Report the P&L"
   epic-3-retrospective: optional
 
   # Epic 4 — Content Cache (FR-12..FR-16, FR-6 substitution; FR-10/FR-11 withdrawn 2026-07-28)
@@ -186,4 +186,8 @@ action_items:
   - epic: 3
     action: "B-4a (<=100 ms) is unmet on this platform independently of Cortex: measured spawn floor ~39-42 ms, jq alone ~81 ms, a plausible 4.5 sequence 214.8 ms. Story 3.2 reports its lookup cost (41-100 ms over 1k-200k records) but does NOT claim the budget met. Blocks 4.5 with the existing B-4 amendment."
     owner: "ShuromiU (PRD decision)"
+    status: open
+  - epic: 3
+    action: "Story 4.5 must revise the stats saved-0 explanation (renderStatsReport, src/query/stats.ts): its wording asserts 'the mechanism ... is not shipped' — a global fact — while its keying is scope-local (scope saved == 0). The day substitution books savings in ANY scope, every other scope prints a false statement. Found by 3.6's review (edge+blind); a BINDS STORY 4.5 comment sits on the branch."
+    owner: "create-story (Story 4.5)"
     status: open

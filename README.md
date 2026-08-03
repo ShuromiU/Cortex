@@ -8,7 +8,7 @@ Cortex answers three questions a storage layer normally leaves open:
 
 - **Trust — is this still what we decided?** Writing a note that opposes an active decision on the same subject marks *both* sides `[contested]` on every **retrieval** surface — recall, brief, state, the SessionStart brief and the reflex — the last two mattering most, since they inject a lone remembered item as settled context. (The operator listing `cortex list-memory` shows neither marker; `cortex inspect-memory` reports the contest in full.) Neither side is quietly retired until you close the contest with `cortex_resolve`. When a decision is genuinely superseded it cools one tier instead of vanishing, and carries a `(superseded)` label so it can never read as live.
 - **Freshness — does this still describe the checkout?** File references in memory are validated against the working tree. A memory pointing at a deleted file is penalised in ranking and renders `[stale: missing …]` rather than disappearing; a renamed file resolves through a git rename map to `[moved: a.ts → b.ts]`. The penalty is graduated and capped so stale memory stays reachable, which means the **label** is the guarantee, not the rank.
-- **Economy — what did remembering cost?** Every channel carries a token budget it actually spends rather than treats as advice: **150** for the session brief, **450** for `cortex_brief`, **600** for `cortex_recall`, **800** for `cortex_state`. Recall and the brief drop evidence from the bottom; `cortex_state` drops whole sections. Output size is gated retrospectively too — `npm run gate` fails CI on any *rise* in `output_tokens` against a locked baseline, so recall getting more expensive is a build failure rather than something noticed later. `cortex stats` reports the running injected/saved/net — and books credit only against recorded evidence, so the savings figure is falsifiable rather than modeled.
+- **Economy — what did remembering cost?** Every channel carries a token budget it actually spends rather than treats as advice: **150** for the session brief, **450** for `cortex_brief`, **600** for `cortex_recall`, **800** for `cortex_state`. Recall and the brief drop evidence from the bottom; `cortex_state` drops whole sections. Output size is gated retrospectively too — `npm run gate` fails CI on any *rise* in `output_tokens` against a locked baseline, so recall getting more expensive is a build failure rather than something noticed later. `cortex stats` reports injected/saved/net and a floored `saved/injected` ratio — for the most recent session and cumulatively for the scope — plus retrieval health (items by state, the count never retrieved, the ten most-retrieved), and books credit only against recorded evidence, so the savings figure is falsifiable rather than modeled.
 
 Under all three: memory is scoped to a branch and a worktree, capture is ambient and costs no process per tool call, and the default lexical ranking is locked against reference baselines that CI re-checks on every push. (The optional `CORTEX_SEMANTIC_MODE=rank` path is off by default and is *not* covered by those baselines.)
 
@@ -675,6 +675,35 @@ Two things worth knowing before you accept one:
 - **Adopt before you do much work in the moved checkout.** If the new location has recorded notes of its own by then, adoption is refused rather than discarding them, and you have to move that store aside yourself to choose.
 
 Growth is bounded: `cortex gc` (and the opt-in `CORTEX_GC_AUTO=apply` startup sweep, at most once per 24h) prunes events of consolidated sessions, trims the retrieval log, rolls up old ledger rows, deletes never-accessed archived items after 90 days, and caps stored `command_run` items per scope. Dry-run is the default; `--apply` deletes.
+
+### The P&L
+
+`cortex stats` reports what Cortex cost and returned — for the most recent session in your scope (its subagents included, and labeled when they contributed) and cumulatively for the scope — plus retrieval health over the whole store:
+
+```text
+Session:       started 2026-08-02 23:21Z
+  Injected:    111
+  Saved:       0
+  Net:         -111
+  Ratio:       0.00×
+Scope:         cumulative over 2 scope keys
+  Injected:    16k
+  Saved:       0
+  Net:         -16k
+  Ratio:       0.00×
+  Estimated:   558.9k (retired consolidation estimate, not counted)
+               no verified savings yet: credit needs recorded evidence, and the
+               mechanism that produces it (verified read substitution) is not shipped
+Memory items:  4814 (pinned 0, hot 337, warm 138, cold 4339, archived 0)
+  Never retrieved: 4661
+  Most retrieved (by access count; ties: latest access, then rowid):
+    43× Decision [2026-06-05 21:05Z]: decision: Implemented Cortex living-brain Phase 0 plus… — notes:86ab1231-…
+    35× Decision [2026-05-12 17:22Z]: decision: For the next Cortex improvement plan, optimi… — notes:6167bc11-…
+```
+
+*(Abridged: the command prints all ten lines, full ids, plus the `Focus`/`Sessions`/`Active notes` header and the `Database`/`WAL` trailer.)*
+
+The ratio is `saved / injected` — the number this product asks to be judged on — and it is conservative by construction: floored to hundredths rather than rounded (996 saved against 1000 injected reads 0.99×, never parity), with a `—` when nothing was injected, and `Unrealized` (a refund was offered and the agent read the file anyway) and `Estimated` (the retired pre-3.5 consolidation figure, kept for history) reported beside it but never counted into it. Scope attribution joins ledger rows through their sessions, so a subagent's injected brief lands in the session tree that dispatched it and GC rollups stay inside the totals; ledger rows no scope can reach (sessions predating scope records) render as one `Unattributed:` line rather than vanishing. Each most-retrieved line ends with the item's id — the handle into `cortex inspect-memory`. The report only reads: it creates no session, reinforces no item — the ten-most-retrieved list must not reorder itself by being looked at — and books nothing.
 
 ### The write-ahead log
 
