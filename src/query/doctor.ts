@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { deriveSpoolPath, SCAN_STATUS_KEY } from '../capture/spool.js';
+import { SUBAGENT_START_COUNT_KEY, SUBAGENT_START_KEY } from '../scope/runtime.js';
 import { DIGEST_INDEX_FILENAME, parseIndexLine } from '../capture/digest-index.js';
 import {
   SCHEMA_VERSION,
@@ -116,6 +117,7 @@ export const HOOK_SCRIPTS = [
   'cortex-capture.sh',
   'cortex-reflect.sh',
   'cortex-end-of-turn.sh',
+  'cortex-subagent.sh',
 ] as const;
 
 /** Placeholder the installer substitutes with `hookTemplateDigest`. */
@@ -186,6 +188,19 @@ export const REQUIRED_WIRING: readonly RequiredWiring[] = [
     actionOptionalUnless: 'reflect-pre',
   },
   { event: 'Stop', label: 'Stop (flush + nudge)', script: 'cortex-end-of-turn.sh' },
+  {
+    event: 'SubagentStart',
+    label: 'SubagentStart (subagent session)',
+    script: 'cortex-subagent.sh',
+    action: 'subagent-start',
+    // No matcher. Matchers on this event match the AGENT TYPE, and every
+    // subagent must be attributable — so the wiring matches all, the way
+    // `Stop` and `SessionStart` do. Deliberately no `actionOptionalUnless`
+    // either: that field exists because `cortex-reflect.sh` defaults its action
+    // and two events share it. Here the default and the only wired action
+    // coincide, and the escape hatch would let a future `subagent-stop` wiring
+    // satisfy this requirement once Story 5.3 lands.
+  },
 ];
 
 /** True when a settings command implements the given wiring. */
@@ -1142,6 +1157,9 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
   let migrationFailure: string | null = null;
   let outcomeScan: string | null = null;
   let commandsRecorded = 0;
+  let subagentFirstSeen: string | null = null;
+  let subagentFires = 0;
+  let subagentChildren = 0;
   if (storeExists) {
     try {
       const db = openDatabaseReadOnly(identity.dbPath);
@@ -1151,6 +1169,25 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
         migrationFailure = failed.length > 0 ? failed : null;
         const scan = getMetaValue(db, SCAN_STATUS_KEY) ?? '';
         outcomeScan = scan.length > 0 ? scan : null;
+        const firstSeen = getMetaValue(db, SUBAGENT_START_KEY) ?? '';
+        subagentFirstSeen = firstSeen.length > 0 ? firstSeen : null;
+        if (subagentFirstSeen !== null) {
+          // `Number`, never `parseInt`.
+          const fires = Number(getMetaValue(db, SUBAGENT_START_COUNT_KEY));
+          subagentFires = Number.isFinite(fires) && fires >= 0 ? Math.floor(fires) : 0;
+          try {
+            const row = db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM sessions
+                 WHERE parent_session_id IS NOT NULL AND started_at >= ?`,
+              )
+              .get(subagentFirstSeen) as { n?: number } | undefined;
+            subagentChildren = typeof row?.n === 'number' ? row.n : 0;
+          } catch {
+            // A store predating the column answers "no activity", which keeps
+            // this row quiet rather than warning on evidence it does not have.
+          }
+        }
         try {
           const row = db.prepare('SELECT COUNT(*) AS n FROM command_runs').get() as
             | { n?: number }
@@ -1206,6 +1243,39 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
         label: 'Command outcomes',
         status: 'pass',
         detail: outcomeScan,
+      });
+    }
+  }
+
+  // ── Subagent sessions (FR-17) ───────────────────────────────────────
+  //
+  // Conditional and silent until the path has fired at least once. The
+  // tempting warn — "child sessions exist but this never ran" — misfires on day
+  // one for every store with subagent history predating the feature, which is
+  // the flap `command-outcomes` already had to be repaired for. An unwired
+  // event is not this row's job either: `hook-wiring` fails on it by name,
+  // because SubagentStart is in REQUIRED_WIRING.
+  //
+  // What this catches is the state in between, which nothing else can see:
+  // wired, apparently fine, and missing dispatches. Every child created after
+  // the first fire should have been created BY a fire, so fewer fires than
+  // children means subagents ran that this hook never saw.
+  if (storeExists && subagentFirstSeen !== null) {
+    const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+    if (subagentFires < subagentChildren) {
+      add({
+        id: 'subagent-sessions',
+        label: 'Subagent sessions',
+        status: 'warn',
+        detail: `${plural(subagentChildren, 'subagent session', 'subagent sessions')} since ${subagentFirstSeen}, but SubagentStart fired only ${plural(subagentFires, 'time', 'times')} — some dispatches are not reaching the hook`,
+        fix: 'Re-run `cortex install` so the SubagentStart wiring and script are current, then dispatch a subagent and re-run `cortex doctor`.',
+      });
+    } else {
+      add({
+        id: 'subagent-sessions',
+        label: 'Subagent sessions',
+        status: 'pass',
+        detail: `SubagentStart fired ${plural(subagentFires, 'time', 'times')} since ${subagentFirstSeen}; ${plural(subagentChildren, 'subagent session', 'subagent sessions')} recorded`,
       });
     }
   }

@@ -219,6 +219,60 @@ export function resolveAgentSessionId(
   return ensureAgentSession(store, primary, agentId, agentType).id;
 }
 
+/**
+ * First time this scope saw a `SubagentStart` fire. Written once and never
+ * moved, so `doctor` can tell "this path has never run" from "no subagent has
+ * run since" — two states a latest-timestamp would conflate.
+ */
+export const SUBAGENT_START_KEY = 'subagent_start_first_seen';
+
+/**
+ * How many times the `SubagentStart` path has fired since
+ * {@link SUBAGENT_START_KEY} was set. `doctor` compares it against the child
+ * sessions created in the same window: fewer fires than children means
+ * subagents ran that the hook never saw — the "wired, running, dead" state a
+ * lone timestamp cannot distinguish from a quiet week.
+ *
+ * Both keys live here rather than in `transports/` because `query/doctor.ts`
+ * reads them and AD-1 forbids a query importing a transport.
+ */
+export const SUBAGENT_START_COUNT_KEY = 'subagent_start_count';
+
+/**
+ * Record that the `SubagentStart` path ran. Advisory: the session is the
+ * deliverable, so a failed marker write must never cost the attribution that
+ * already succeeded (AD-12).
+ */
+export function recordSubagentStart(store: CortexStore): void {
+  try {
+    // Stamped with NOW, never with the resolved child's `started_at`. A fire
+    // can *find* an existing child rather than create one — `getSessionByAgentId`
+    // is unfiltered by parent and status, deliberately, so a recycled agent id
+    // resolves to a row from an earlier primary. Stamping that row's birthday
+    // back-dates the marker and sweeps the whole pre-feature history into
+    // `doctor`'s window, producing exactly the false warn this marker exists to
+    // avoid. Reproduced before the fix: marker 2026-01-01, 1 fire, 21 children
+    // in window, verdict WARN with a fix that repairs nothing.
+    if (store.getMeta(SUBAGENT_START_KEY) === undefined) {
+      store.setMeta(SUBAGENT_START_KEY, new Date().toISOString());
+    }
+    // One statement, not read-modify-write. Two subagents start ~800 ms apart
+    // as separate OS processes on separate connections, and `busy_timeout`
+    // serialises writes without preventing a lost update: both can read 5
+    // before either writes 6. Reproduced before the fix — two fires from 5
+    // landed on 6. Every lost increment is permanent, because the marker is
+    // write-once and the count never re-baselines, so a single occurrence
+    // latches `doctor` to a warn for the life of the store.
+    //
+    // A corrupt value restarts the count rather than being parsed as a prefix —
+    // see `incrementMetaCounter`, which had to guard against SQL reproducing
+    // the `parseInt` trap this repository has paid for four times.
+    store.incrementMetaCounter(SUBAGENT_START_COUNT_KEY);
+  } catch {
+    // Advisory only — see above.
+  }
+}
+
 export function ensureScopedSession(
   store: CortexStore,
   cwd: string,

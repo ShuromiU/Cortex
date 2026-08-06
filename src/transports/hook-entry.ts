@@ -19,7 +19,11 @@ import { suggestNotes } from '../query/suggest-notes.js';
 import { estimateTokens } from '../query/retrieval.js';
 import { flushSpool } from '../capture/spool.js';
 import { writeDigestIndex } from '../capture/digest-index.js';
-import { ensureScopedSession, type ScopeSessionOptions } from '../scope/runtime.js';
+import {
+  ensureScopedSession,
+  recordSubagentStart,
+  type ScopeSessionOptions,
+} from '../scope/runtime.js';
 import { configureEngagementPath, readEngagement, writeEngagement } from './mcp.js';
 
 const CORTEX_CONSULTED_KEY = 'cortex_consulted';
@@ -48,6 +52,7 @@ export type HookAction =
   | 'reflect-edit'
   | 'reflect-cmd'
   | 'reflect-agent'
+  | 'subagent-start'
   | 'end-of-turn';
 
 export interface HookRuntimeOptions {
@@ -357,6 +362,77 @@ function postToolUse(
   }
 }
 
+/**
+ * `SubagentStart` (FR-17): give a dispatched subagent its own session before it
+ * does anything, so a subagent that only thinks is still attributable and a
+ * later brief has somewhere to bill itself.
+ *
+ * Emits nothing (N-1). Story 5.2 owns the brief; this is the channel it needs.
+ *
+ * The measured payload is seven fields — `agent_id`, `agent_type`, `cwd`,
+ * `hook_event_name`, `prompt_id`, `session_id`, `transcript_path` — and carries
+ * neither the dispatch description nor `tool_input`, whatever the hook docs list
+ * as conditionally present. Nothing here may depend on more than that.
+ */
+function subagentStart(
+  store: CortexStore,
+  payload: Record<string, unknown>,
+  cwd: string,
+): void {
+  try {
+    createSubagentSession(store, payload, cwd);
+  } catch {
+    // AD-12 / N-3, and the wrapper script's promise that it prints nothing and
+    // exits 0. `main()` guards only `openCortexDb` and rethrows everything
+    // else, so an escape here reaches the turn as a stack trace on stderr and a
+    // non-zero exit. `ensureAgentSession` genuinely can throw — it rethrows
+    // when it loses the create race and the re-find misses, reachable on a
+    // store whose unique index degraded to non-unique — and SQLITE_BUSY from a
+    // second hook lands in the same place. A subagent losing its session is a
+    // miss; a subagent's dispatch printing a stack trace is a broken turn.
+  }
+}
+
+function createSubagentSession(
+  store: CortexStore,
+  payload: Record<string, unknown>,
+  cwd: string,
+): void {
+  const identity = agentIdentity(payload);
+  if (!identity.agentId) {
+    // Host drift, or an event for something that is not a subagent. Doing
+    // nothing is the only safe answer: `resolveSessionId` without an identity
+    // resolves — and creates — a PRIMARY session, so the obvious fallback would
+    // manufacture a primary as a side effect of a subagent event, and rotate the
+    // real one whenever this `cwd` resolved to a different scope.
+    return;
+  }
+
+  // AC #1 says the child records "the parent's scope_key", so a parent has to
+  // exist. With no active primary `ensureScopedSession` would fall through to
+  // `ensurePrimarySession` and MINT one from the subagent's own cwd — running
+  // `detectGitScope` on this path and attaching the child to a scope the parent
+  // never had. A subagent event must never be the thing that creates a primary.
+  // Unreachable in the installed wiring (engagement implies `inject-header`
+  // ran, which always leaves an active primary), so the cost of being strict
+  // here is nil and the cost of being permissive is a wrong parent.
+  const primary = store.getCurrentSession();
+  if (!primary?.scope_key) {
+    return;
+  }
+
+  // `ensureScopedSession` adopts that primary rather than resolving one from
+  // the subagent's cwd, so it cannot end or rotate the parent (AD-9); it
+  // find-or-creates by (scope_key, agent_id) behind a partial unique index; and
+  // it inherits the parent's scope fields.
+  ensureScopedSession(store, cwd, identity);
+
+  // AD-12: a wired-but-dead path must not look like an idle one. `doctor` reads
+  // these to tell "never fired" from "nothing dispatched lately", and to catch
+  // the case in between — subagents running that this hook never saw.
+  recordSubagentStart(store);
+}
+
 function truncateSuggestion(text: string, maxChars = 140): string {
   const collapsed = text.replace(/\s+/g, ' ').trim();
   return collapsed.length <= maxChars
@@ -538,6 +614,11 @@ export function handleHookPayload(
   const payload = parsePayload(rawPayload);
   if (action === 'post') {
     postToolUse(store, payload, cwd, options);
+    return '';
+  }
+
+  if (action === 'subagent-start') {
+    subagentStart(store, payload, cwd);
     return '';
   }
 

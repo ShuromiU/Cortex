@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { findPosixTool } from './posix-tools.js';
+import { renderHookScript } from '../src/query/install.js';
 
 /**
  * Executes the real PostToolUse hook script. Nothing else can: the script is
@@ -482,5 +483,169 @@ describe('cortex-capture.sh — no process per tool call (N-4)', () => {
     // ahead of it passed, so a miss pays for none of the later ones.
     expect(sizeLine).toBeGreaterThan(lookupLine);
     expect(hashLine).toBeGreaterThan(sizeLine);
+  });
+});
+
+// ── cortex-subagent.sh (FR-17, Story 5.1) ───────────────────────────
+//
+// The raw template is executed, not a rendered copy: the surviving
+// `__CORTEX_NODE__` placeholder is not a real executable, so any path that
+// reaches the Node invocation fails loudly. That makes it the stronger harness
+// for a guard whose whole job is to NOT reach it.
+const SUBAGENT_SCRIPT = path.resolve(__dirname, '..', 'hooks', 'claude', 'cortex-subagent.sh');
+
+function runSubagentHook(
+  payload: Record<string, unknown>,
+  engagement: string | null,
+  action?: string,
+): { status: number | null; stdout: string; stderr: string } {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-subagent-hook-'));
+  if (engagement !== null) {
+    fs.writeFileSync(path.join(cwd, '.cortex.state'), engagement);
+  }
+  const posixCwd = cwd.replace(/\\/g, '/');
+  const result = childProcess.spawnSync(
+    BASH as string,
+    action === undefined ? [SUBAGENT_SCRIPT] : [SUBAGENT_SCRIPT, action],
+    {
+      input: JSON.stringify({ cwd: posixCwd, ...payload }),
+      encoding: 'utf8',
+    },
+  );
+  return {
+    status: result.status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+  };
+}
+
+describe.skipIf(!canRun)('cortex-subagent.sh', () => {
+  const payload = {
+    hook_event_name: 'SubagentStart',
+    agent_id: 'a1b2c3d4e5f60718',
+    agent_type: 'general-purpose',
+  };
+
+  // Every case below passes the action EXPLICITLY, because that is the only
+  // form `install` writes and the only form `doctor` accepts. Testing the
+  // arg-less form would exercise an invocation that never ships.
+  const WIRED = 'subagent-start';
+
+  // AC #3, bash half. If this leaks, the placeholder is invoked and the run
+  // fails — so a pass here really does mean Node was never reached.
+  it('exits silently without reaching Node when the project is disengaged', () => {
+    const result = runSubagentHook(payload, 'enabled=false\n', WIRED);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+  });
+
+  it('exits silently when there is no state file at all', () => {
+    const result = runSubagentHook(payload, null, WIRED);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+  });
+
+  it('does not read enabled=true out of a substring', () => {
+    const result = runSubagentHook(payload, 'not_enabled=true\n', WIRED);
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  // The action carries no default, so an arg-less wiring — the form `doctor`
+  // refuses — must also do nothing. Otherwise a refused wiring silently works
+  // and `install` appends a second entry beside it.
+  it('does nothing when invoked with no action at all', () => {
+    const result = runSubagentHook(payload, 'enabled=true\n');
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+  });
+
+  it('exits without reaching Node when the payload carries no cwd', () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-subagent-hook-'));
+    fs.writeFileSync(path.join(cwd, '.cortex.state'), 'enabled=true\n');
+    const result = childProcess.spawnSync(BASH as string, [SUBAGENT_SCRIPT], {
+      input: JSON.stringify({ hook_event_name: 'SubagentStart', agent_id: 'x' }),
+      encoding: 'utf8',
+    });
+    expect(result.status).toBe(0);
+    expect(result.stderr ?? '').toBe('');
+  });
+
+  // An unrecognised action must not reach Node: `handleHookPayload` routes
+  // anything it does not know to the reflex path, which resolves — and can
+  // create — a PRIMARY session. A mis-wired argument would then rotate the
+  // parent's session on every dispatch.
+  it('refuses an action it does not recognise, even when engaged', () => {
+    const result = runSubagentHook(payload, 'enabled=true\n', 'reflect-prompt');
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+  });
+
+  it('reaches Node for subagent-start when engaged — proving the guards above are load-bearing', () => {
+    // The placeholder is not an executable, so a non-zero exit or a populated
+    // stderr is the evidence that this path DOES try to invoke Node. Without
+    // this, every assertion above would pass with the invocation deleted.
+    const result = runSubagentHook(payload, 'enabled=true\n', WIRED);
+    expect(result.stderr.length).toBeGreaterThan(0);
+  });
+});
+
+// These read files and assert on their text. They must NOT sit inside
+// `describe.skipIf(!canRun)`: a machine where bash cannot be resolved would
+// skip them silently and report green, which is the exact shape
+// `docs/invariants.md:101` records — the shell layer going unverified while the
+// run looks clean. They need no shell, so they always run.
+describe('cortex-subagent.sh — structure', () => {
+  it('is a per-dispatch path only: one Node invocation, no hot-path work (N-4)', () => {
+    const script = fs.readFileSync(SUBAGENT_SCRIPT, 'utf8');
+    const lines = script.split(/\r?\n/).filter(line => !line.trim().startsWith('#'));
+    const body = lines.join('\n');
+
+    // Exactly one Node invocation, and exactly one jq — the payload read.
+    expect(body.match(/__CORTEX_NODE__/g) ?? []).toHaveLength(1);
+    expect(body.match(/\bjq\b/g) ?? []).toHaveLength(1);
+    // No SQLite, no network, and nothing that blocks waiting on a file.
+    for (const banned of ['sqlite', 'curl', 'wget', 'sleep', 'sha256sum']) {
+      expect(body, `subagent hook must not use ${banned}`).not.toContain(banned);
+    }
+    // The engagement guard must precede the dispatch, so `cortex_disengage`
+    // turns this off with everything else.
+    const guardLine = lines.findIndex(line => line.includes("'^enabled=true'"));
+    const nodeLine = lines.findIndex(line => line.includes('__CORTEX_NODE__'));
+    expect(guardLine).toBeGreaterThan(-1);
+    expect(nodeLine).toBeGreaterThan(guardLine);
+  });
+
+  // The property that matters is the INSTALLED script's line endings, not the
+  // template's. There is no `.gitattributes` and `core.autocrlf` is on for this
+  // platform, so a Windows checkout legitimately has CRLF templates —
+  // `cortex-capture.sh` already does (`git ls-files --eol`: `i/lf w/crlf`).
+  // Asserting the template is LF would therefore go red on any fresh clone
+  // while guarding nothing, because `renderHookScript` normalises CRLF to LF
+  // before substituting. Assert the thing that ships instead.
+  it('renders to LF whatever the checkout did to the template (invariants: bash outside Git Bash)', () => {
+    const template = fs.readFileSync(SUBAGENT_SCRIPT, 'utf8');
+    const crlfTemplate = template.replace(/\r?\n/g, '\r\n');
+    for (const source of [template, crlfTemplate]) {
+      const rendered = renderHookScript(source, {
+        nodePath: '/usr/bin/node',
+        cliEntry: '/pkg/cli.js',
+        hookEntry: '/pkg/hook-entry.js',
+      });
+      expect(rendered).not.toContain('\r');
+      expect(rendered).not.toMatch(/__CORTEX_[A-Z_]+__/);
+    }
+  });
+
+  it('leaves the PostToolUse hot path untouched (N-4)', () => {
+    // This story must not add per-tool-call cost. The capture script is the
+    // hot path; it must know nothing about subagent starts.
+    const capture = fs.readFileSync(SCRIPT, 'utf8');
+    expect(capture).not.toContain('subagent-start');
+    expect(capture).not.toContain('SubagentStart');
   });
 });

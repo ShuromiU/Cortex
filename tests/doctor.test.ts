@@ -9,6 +9,7 @@ import { resolveStoreIdentity } from '../src/scope/identity.js';
 import type { GitCommandRunner } from '../src/scope/git.js';
 import { deriveEngagementPath } from '../src/transports/mcp.js';
 import { SCAN_STATUS_KEY } from '../src/capture/spool.js';
+import { SUBAGENT_START_COUNT_KEY, SUBAGENT_START_KEY } from '../src/scope/runtime.js';
 import {
   HOOK_SCRIPTS,
   REQUIRED_WIRING,
@@ -79,7 +80,23 @@ const TEMPLATE_BODIES: Record<string, string> = {
     'printf %s "$INPUT" | "__CORTEX_NODE__" "__CORTEX_HOOK_ENTRY__" end-of-turn',
     '',
   ].join('\n'),
+  'cortex-subagent.sh': [
+    '#!/bin/bash',
+    `# cortex-hook-template: ${TEMPLATE_ID_PLACEHOLDER}`,
+    'printf %s "$INPUT" | "__CORTEX_NODE__" "__CORTEX_HOOK_ENTRY__" subagent-start',
+    '',
+  ].join('\n'),
 };
+
+// A stand-in must exist for every entry in HOOK_SCRIPTS, or `buildFixture`
+// throws on `template.replaceAll` of an undefined and every test in this file
+// dies in setup rather than failing on its own terms. Asserted here so the next
+// script to be added fails loudly at the right place.
+for (const script of HOOK_SCRIPTS) {
+  if (TEMPLATE_BODIES[script] === undefined) {
+    throw new Error(`tests/doctor.test.ts: TEMPLATE_BODIES is missing a stand-in for ${script}`);
+  }
+}
 
 function writeFile(target: string, content: string): void {
   fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -130,6 +147,9 @@ function buildFixture(): Fixture {
         ],
         UserPromptSubmit: [{ hooks: [{ type: 'command', command: `bash ~/.claude/hooks/cortex-reflect.sh reflect-prompt` }] }],
         Stop: [{ hooks: [{ type: 'command', command: `bash ~/.claude/hooks/cortex-end-of-turn.sh` }] }],
+        SubagentStart: [
+          { hooks: [{ type: 'command', command: `bash ~/.claude/hooks/cortex-subagent.sh subagent-start` }] },
+        ],
       },
     }),
   );
@@ -658,6 +678,102 @@ describe('command outcomes row (FR-14, Story 4.4)', () => {
     const fixture = buildFixture();
     seedMeta(fixture, '2026-08-03T12:00:00Z unavailable:no-path synthesized=0');
     expect(doctor(fixture).ok).toBe(true);
+  });
+});
+
+describe('subagent sessions (FR-17)', () => {
+  const seedSubagentMarker = (fixture: Fixture, firstSeen: string, fires: string): void => {
+    const db = new Database(fixture.dbPath);
+    const set = db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)');
+    set.run(SUBAGENT_START_KEY, firstSeen);
+    set.run(SUBAGENT_START_COUNT_KEY, fires);
+    db.close();
+  };
+
+  const seedChildSessions = (fixture: Fixture, startedAt: string, count: number): void => {
+    const db = new Database(fixture.dbPath);
+    db.prepare(
+      'INSERT INTO sessions (id, started_at, worktree_path, scope_type, scope_key) VALUES (?,?,?,?,?)',
+    ).run('s-parent', startedAt, fixture.projectDir, 'project', `project:${fixture.projectDir}`);
+    const insert = db.prepare(
+      `INSERT INTO sessions (id, parent_session_id, started_at, agent_type, agent_id, worktree_path, scope_type, scope_key)
+       VALUES (?,?,?,?,?,?,?,?)`,
+    );
+    for (let i = 0; i < count; i += 1) {
+      insert.run(
+        `s-child-${i}`,
+        's-parent',
+        startedAt,
+        'general-purpose',
+        `agent-${i}`,
+        fixture.projectDir,
+        'project',
+        `project:${fixture.projectDir}`,
+      );
+    }
+    db.close();
+  };
+
+  it('says nothing on a project where no subagent has ever started', () => {
+    const report = doctor(buildFixture());
+    expect(report.checks.find(check => check.id === 'subagent-sessions')).toBeUndefined();
+  });
+
+  it('stays silent on a store whose subagent history predates the feature', () => {
+    // The day-one case, and the one that made `command-outcomes` flap: both
+    // live stores already hold child sessions and no marker. Warning here would
+    // fire on a healthy install the moment this ships.
+    const fixture = buildFixture();
+    seedChildSessions(fixture, '2026-08-02T01:00:00Z', 40);
+    const report = doctor(fixture);
+    expect(report.checks.find(check => check.id === 'subagent-sessions')).toBeUndefined();
+    expect(report.ok).toBe(true);
+  });
+
+  it('passes once the path has fired and accounts for every child', () => {
+    const fixture = buildFixture();
+    seedSubagentMarker(fixture, '2026-08-06T10:00:00Z', '3');
+    seedChildSessions(fixture, '2026-08-06T11:00:00Z', 3);
+    const report = doctor(fixture);
+    expect(statusOf(report, 'subagent-sessions')).toBe('pass');
+    expect(detailOf(report, 'subagent-sessions')).toContain('fired 3 times');
+  });
+
+  it('warns when subagents ran that the hook never saw', () => {
+    // Wired, apparently fine, missing dispatches — the state nothing else sees.
+    const fixture = buildFixture();
+    seedSubagentMarker(fixture, '2026-08-06T10:00:00Z', '1');
+    seedChildSessions(fixture, '2026-08-06T11:00:00Z', 5);
+    const report = doctor(fixture);
+    expect(statusOf(report, 'subagent-sessions')).toBe('warn');
+    expect(detailOf(report, 'subagent-sessions')).toContain('fired only 1');
+    expect(report.checks.find(check => check.id === 'subagent-sessions')?.fix).toContain(
+      'cortex install',
+    );
+  });
+
+  it('ignores children that predate the first fire', () => {
+    const fixture = buildFixture();
+    seedChildSessions(fixture, '2026-08-01T09:00:00Z', 12);
+    seedSubagentMarker(fixture, '2026-08-06T10:00:00Z', '1');
+    const report = doctor(fixture);
+    expect(statusOf(report, 'subagent-sessions')).toBe('pass');
+  });
+
+  it('never fails the run — a missed dispatch is not a broken installation', () => {
+    const fixture = buildFixture();
+    seedSubagentMarker(fixture, '2026-08-06T10:00:00Z', '0');
+    seedChildSessions(fixture, '2026-08-06T11:00:00Z', 9);
+    expect(doctor(fixture).ok).toBe(true);
+  });
+
+  it('reads a corrupt fire count as zero rather than throwing', () => {
+    const fixture = buildFixture();
+    seedSubagentMarker(fixture, '2026-08-06T10:00:00Z', 'many');
+    seedChildSessions(fixture, '2026-08-06T11:00:00Z', 2);
+    const report = doctor(fixture);
+    expect(statusOf(report, 'subagent-sessions')).toBe('warn');
+    expect(detailOf(report, 'subagent-sessions')).toContain('fired only 0');
   });
 });
 

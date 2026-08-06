@@ -1336,6 +1336,35 @@ export class CortexStore {
       .run(key, value);
   }
 
+  /**
+   * Increment a numeric `meta` counter in ONE statement.
+   *
+   * A read-modify-write across two connections loses updates even under
+   * `busy_timeout`: that setting serialises writes, it does not make
+   * read-then-write atomic, so two processes can both read `5` and both write
+   * `6`. Hook processes are independent by construction, so any counter they
+   * share needs the increment to happen inside the database.
+   *
+   * The digit guard is not decoration. A bare `CAST(value AS INTEGER)` parses a
+   * numeric PREFIX — `'12 fires'` becomes 12 — which is precisely the
+   * fail-forward behaviour `parseInt` was banned for after four incidents, just
+   * arriving through SQL instead of JS. Only an all-digit value counts; anything
+   * else restarts at 1, matching the `Number`-based readers that treat a corrupt
+   * value as 0.
+   */
+  incrementMetaCounter(key: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO meta (key, value) VALUES (?, '1')
+         ON CONFLICT(key) DO UPDATE SET value = CAST(
+           CASE WHEN value GLOB '[0-9]*' AND NOT value GLOB '*[^0-9]*'
+                THEN CAST(value AS INTEGER)
+                ELSE 0
+           END + 1 AS TEXT)`,
+      )
+      .run(key);
+  }
+
   // ── Sessions ──────────────────────────────────────────────────────
 
   createSession(opts: CreateSessionOpts = {}): SessionRow {

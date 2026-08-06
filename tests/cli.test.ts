@@ -5,7 +5,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { Command } from 'commander';
 import { createProgram, formatBytes, onlyUnusedProject, renderDoctorReport, renderInstallResult } from '../src/transports/cli.js';
 import type { DoctorCheck, DoctorReport } from '../src/query/doctor.js';
-import { tokenizeCommand } from '../src/query/doctor.js';
+import { HOOK_SCRIPTS, tokenizeCommand } from '../src/query/doctor.js';
 import type { InstallAction, InstallResult } from '../src/query/install.js';
 import { deriveEngagementPath } from '../src/transports/mcp.js';
 import { openDatabase, ensureCortexSchema } from '../src/db/schema.js';
@@ -1843,6 +1843,13 @@ function seedSandboxHome(hooksDir: string): string {
         Stop: [
           { hooks: [{ type: 'command', command: `bash "${posixHooks}/cortex-end-of-turn.sh"` }] },
         ],
+        SubagentStart: [
+          {
+            hooks: [
+              { type: 'command', command: `bash "${posixHooks}/cortex-subagent.sh" subagent-start` },
+            ],
+          },
+        ],
       },
     }),
   );
@@ -2088,8 +2095,13 @@ describe('no transport derives a project-root store path', () => {
   // two files can be reverted to `path.join(startDir, '.cortex.db')` with the
   // whole suite still green.
   //
-  // `readFileSync` rather than a grep: `hook-entry.ts` contains a raw NUL byte,
-  // so ripgrep and grep classify it as binary and skip it silently.
+  // `readFileSync` rather than a grep. The original reason — `hook-entry.ts`
+  // held a raw NUL byte, so ripgrep and grep classified it as binary and
+  // skipped it silently — no longer applies: Story 4.5 replaced all four NULs
+  // with escapes and `tests/substitution.test.ts` now walks `src/`, `hooks/`
+  // and `tests/` failing on any control byte but tab, LF and CR. Reading the
+  // file directly is kept anyway, because it does not depend on that guard
+  // continuing to hold.
   const TRANSPORTS = [
     'src/transports/cli.ts',
     'src/transports/mcp.ts',
@@ -2160,7 +2172,9 @@ describe('cortex doctor', () => {
       runCommand(installProject, ['install-hooks', '--dir', hooksDir]),
     );
 
-    for (const script of ['cortex-capture.sh', 'cortex-reflect.sh', 'cortex-end-of-turn.sh']) {
+    // Driven by HOOK_SCRIPTS, not a hand-written list: a hardcoded list means
+    // the next script Cortex ships is silently exempt from this round trip.
+    for (const script of HOOK_SCRIPTS) {
       const installed = fs.readFileSync(path.join(hooksDir, script), 'utf8');
       expect(installed).not.toMatch(/__CORTEX_[A-Z_]+__/);
       expect(installed).toMatch(/# cortex-hook-template: [0-9a-f]{16}/);
@@ -2173,7 +2187,9 @@ describe('cortex doctor', () => {
     // Repoint them at real files so the rest of the report can be asserted
     // green; the template stamp is a separate line and is left untouched, so
     // this does not weaken the round trip being tested.
-    for (const script of ['cortex-capture.sh', 'cortex-reflect.sh', 'cortex-end-of-turn.sh']) {
+    // Driven by HOOK_SCRIPTS, not a hand-written list: a hardcoded list means
+    // the next script Cortex ships is silently exempt from this round trip.
+    for (const script of HOOK_SCRIPTS) {
       const installedPath = path.join(hooksDir, script);
       fs.writeFileSync(
         installedPath,

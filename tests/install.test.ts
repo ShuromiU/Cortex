@@ -829,6 +829,34 @@ describe('settings files Claude Code merges', () => {
     // The events that file does not wire are still written here.
     expect(userSettings.hooks['PostToolUse']).toHaveLength(1);
   });
+
+  // Driven by REQUIRED_WIRING rather than pinned to `Stop`, so a newly added
+  // event cannot silently escape the de-duplication that protects it. Without
+  // this, `SubagentStart` had no coverage here at all.
+  it.each(REQUIRED_WIRING.map(w => w.event))(
+    'does not duplicate %s when another settings file already wires it',
+    event => {
+      const required = REQUIRED_WIRING.find(w => w.event === event)!;
+      const fixture = buildFixture();
+      const posixHooks = fixture.hooksDir.split(path.sep).join('/');
+      const command =
+        required.script === undefined
+          ? `"${fixture.nodePath}" "${fixture.cliEntry}" inject-header --quiet`
+          : `bash "${posixHooks}/${required.script}"${required.action ? ` ${required.action}` : ''}`;
+
+      writeFile(
+        path.join(fixture.projectDir, '.claude', 'settings.local.json'),
+        JSON.stringify({ hooks: { [event]: [{ hooks: [{ type: 'command', command }] }] } }),
+      );
+
+      install(fixture);
+
+      const userSettings = JSON.parse(
+        fs.readFileSync(path.join(fixture.homeDir, '.claude', 'settings.json'), 'utf8'),
+      ) as { hooks: Record<string, unknown[] | undefined> };
+      expect(userSettings.hooks[event]).toBeUndefined();
+    },
+  );
 });
 
 describe('an edit confined to a placeholder slot (AC #3)', () => {
