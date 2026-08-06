@@ -921,11 +921,13 @@ So that Cortex's footprint does not grow with my codebase.
 
 **Given** `gc` runs
 **When** it prunes
-**Then** it removes digests for files absent from the current app graph, negative results past the configured horizon, and tool outputs whose `head_oid` is no longer an ancestor of HEAD *(amended 2026-07-28: card pruning removed with Story 4.1's withdrawal; restore it when cards return)*.
+**Then** it removes digests for files absent from the current app graph, negative results past the configured horizon, and tool outputs whose `head_oid` is no longer an ancestor of HEAD *(amended 2026-07-28: card pruning removed with Story 4.1's withdrawal; restore it when cards return)* *(amended 2026-08-06: **app-graph digest pruning also removed**, by ruling (ShuromiU) after the Story 4.6 review — built, then withdrawn: it deleted digests for files that EXIST because the digest key is lowercased on win32/darwin while the app graph preserves case (107 of 201 digests across 30 live stores were prune candidates, 86% on one project), it cost ~43 s at session start against a real 59,280-file app graph, and it permanently forgot every read outside the git index. Restore only with a shared path normalizer, a materialized file list, and a sample of more than one repository. **What remains of this AC is the negative-results horizon, met by Story 4.3, plus the command-history bound added in its place.**)* *(amended 2026-08-04: **tool-output pruning removed with FR-15's withdrawal** during Story 4.4 — three review layers found six reachable routes to a false "your tests still pass" and the ruling (ShuromiU, 2026-08-03) kept only the command-outcome oracle, so there is no tool-output cache to prune; restore it if tool-output caching returns. Added in its place, from the 2026-08-04 `dbstat` measurement: the `command_runs` table, 5,434 rows / 3.00 MB on the live store with **no gc rule at all** and growing faster since Story 4.4)*.
 
 **Given** the derived cache exceeds its configured ceiling
 **When** eviction runs
 **Then** the oldest, least-retrieved entries evict first.
+
+*(**VOID, amended 2026-08-06** — built and withdrawn by ruling after the Story 4.6 review: the eviction deleted by `rowid` on three `WITHOUT ROWID` tables so `gc --apply` exited 1 and `last_gc_at` was never written; it measured eight tables while evicting six, so the exit condition could be unsatisfiable and it halved the rest to zero; and it excluded `current_app_graphs`, the largest object in the two largest live stores. It also never engaged on a healthy store — 3.4 MB derived against a 32 MiB default. Restore only with primary-key deletes, an evictable set equal to the measured set, and a convergence bound.)*
 
 **Given** `gc` is invoked without an explicit apply flag
 **When** it runs
@@ -934,6 +936,8 @@ So that Cortex's footprint does not grow with my codebase.
 **Given** stats runs
 **When** it reports footprint
 **Then** derived-cache size is reported against its ceiling.
+
+*(**VOID, amended 2026-08-06** — withdrawn with the ceiling it reported against. The figure excluded `current_app_graphs` and printed `0%` for a 140 MB store. `cortex stats` instead reports `Last cleanup:`, which is the gap that actually mattered: GC had never run on any store on the machine and no surface said so.)*
 
 ---
 

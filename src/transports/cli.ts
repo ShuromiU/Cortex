@@ -24,6 +24,20 @@ import {
 import { flushSpool } from '../capture/spool.js';
 import { detectGitScope } from '../scope/git.js';
 import { runGc, shouldAutoGc } from '../db/gc.js';
+
+/**
+ * Whether an operator has explicitly turned automatic GC off (Story 4.6 AC #5).
+ *
+ * Only these exact spellings disable it. Anything else — including a typo, an
+ * empty string, or the historical `apply` that used to switch it ON — leaves it
+ * enabled, because failing open on a misconfigured bound reproduces exactly the
+ * state the ruling ended: a bound nobody noticed was off.
+ */
+export function isAutoGcDisabled(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  const value = raw.trim().toLowerCase();
+  return value === 'off' || value === 'never' || value === 'false' || value === '0';
+}
 import { writeDigestIndex } from '../capture/digest-index.js';
 import {
   deriveTurnReadsPath,
@@ -878,8 +892,46 @@ export function createProgram(): Command {
         // Non-fatal; a stale marker suppresses refunds, never grants them.
       }
 
-      // Opt-in automatic GC, at most once per 24h.
-      if (process.env['CORTEX_GC_AUTO'] === 'apply') {
+      // Automatic GC, at most once per 24h. **On by default** (ruling: ShuromiU,
+      // 2026-08-04, Story 4.6 AC #5).
+      //
+      // It was opt-in behind `CORTEX_GC_AUTO=apply`, and nobody set it — so on
+      // this machine GC had **never run on any store**, `last_gc_at` was absent
+      // everywhere, and the reference store reached 25.2 MB, half of B-8's 50 MB
+      // budget, with the entire bounding mechanism switched off. FR-16 says
+      // derived data "cannot grow without bound"; a bound that is opt-in is
+      // indistinguishable from no bound.
+      //
+      // What made the ruling safe rather than bold: every rule here removes only
+      // re-earnable derived data — a pruned row costs a re-read, a re-search or a
+      // re-run, never an authored note. On the reference store authored notes are
+      // 44 rows / 0.04 MB and no category targets them.
+      //
+      // The env var survives as an opt-OUT for operators. An unrecognised value
+      // means ON, never off: a typo must not silently disable the bound and
+      // reproduce the state this ruling exists to end (AD-12).
+      //
+      // **Re-enabled 2026-08-06 after the review**, with the two rules that made
+      // it unsafe withdrawn (the byte ceiling, whose DELETE threw on three
+      // `WITHOUT ROWID` tables, and the app-graph digest rule, which deleted
+      // digests for files that exist and cost ~43 s at session start on a real
+      // 59,280-file graph). What remains removes only per-scope command history
+      // and the pre-existing age rules. Largest measured first run across 36
+      // live stores: repo-b, 22,940 rows, ~1.4 s including VACUUM, once.
+      //
+      // **The due-check runs on the connection that is already open**, and it
+      // gates opening a second one. `shouldAutoGc` only reads `meta` and
+      // swallows its own errors, while `openProjectStore` runs
+      // `ensureCortexSchema` and its backfills — measured at 313 ms on a live
+      // store, which would OTHERWISE now be paid at every session start whether
+      // or not GC then ran. (Not "was previously" — before this story the whole
+      // block sat behind `CORTEX_GC_AUTO === 'apply'`, which nobody set, so it
+      // was paid at no session start at all. Turning auto-GC on is what makes
+      // the ordering matter.)
+      // Ordering it first makes the common case (already collected
+      // within 24h) free. It must NOT `return` from the action: the session
+      // brief below still has to render.
+      if (!isAutoGcDisabled(process.env['CORTEX_GC_AUTO']) && shouldAutoGc(store.db)) {
         try {
           // Through `openProjectStore`, not a hand-rolled open: the hand-rolled
           // form skipped `recordStoreIdentityMeta` and handed `ensureCortexSchema`
@@ -1032,6 +1084,18 @@ export function createProgram(): Command {
       maybeCheckpointWal(store.db, dbPath, { CORTEX_WAL_MAX_BYTES: '4096' });
       process.stdout.write(`Database:      ${formatBytes(databaseSizeBytes(dbPath))}\n`);
       process.stdout.write(`WAL:           ${formatBytes(walSizeBytes(dbPath))}\n`);
+      // **The `Derived cache: X of Y ceiling` line was WITHDRAWN with the
+      // ceiling itself** (ruling: ShuromiU, 2026-08-06). It reported a figure that
+      // excluded `current_app_graphs` — the largest object in the two largest
+      // live stores — so it printed `0%` for a 140 MB store. A footprint number
+      // that a user reads as "the store" while it measures 0.02% of it is worse
+      // than no number at all.
+      //
+      // `Last cleanup:` stays, and is the line that actually mattered: GC had
+      // never run on any store on this machine, every bounding rule was inert,
+      // and no surface said so. That is the AD-12 gap this story found.
+      const lastGc = store.getMeta('last_gc_at');
+      process.stdout.write(`Last cleanup:  ${lastGc ?? 'never'}\n`);
     });
 
   program

@@ -45,6 +45,10 @@ export interface GcReport {
   content_digests: GcCategoryReport;
   read_offers: GcCategoryReport;
   negative_results: GcCategoryReport;
+  /** The SOURCE table. `command_run_items` above is its projection (Story 4.6). */
+  command_runs: GcCategoryReport;
+  /** Projection rows whose source row is gone. */
+  orphaned_command_run_items: GcCategoryReport;
   freelist_ratio: number;
   vacuumed: boolean;
 }
@@ -91,9 +95,26 @@ function resolveGcOptions(options: GcOptions = {}): Required<Omit<GcOptions, 'no
     correctionDays:
       options.correctionDays ?? envNumber('CORTEX_GC_CORRECTION_DAYS') ?? DEFAULTS.correctionDays,
     archivedDays: options.archivedDays ?? envNumber('CORTEX_GC_ARCHIVED_DAYS') ?? DEFAULTS.archivedDays,
+    // **A ROW COUNT, with its own normalizer — not `envNumber`, not `envDays`.**
+    //
+    // `envNumber` parses with `Number.parseInt`, which succeeds on a PREFIX, so
+    // `CORTEX_GC_COMMAND_RUN_CAP=1e9` — the natural way to disable the cap —
+    // became **1**. Before Story 4.6 that only deleted the `memory_items`
+    // projection, which `backfillMemoryItems` restored on the next command (the
+    // very no-op this story exists to fix). Now the cap deletes `cmd` events and
+    // `command_runs` themselves, permanently and unattended. The blast radius
+    // changed, so the parser had to. Fourth `parseInt` incident in this file.
+    //
+    // `envDays` was the first fix and was still wrong twice over: it clamps to
+    // `MAX_RETENTION_DAYS`, a **date** range, so `1e9` became 100,000 rather than
+    // "disabled"; and it accepts `0`, which on a row cap means **keep nothing** —
+    // the same spelling that means "off" for `CORTEX_GC_AUTO`, so the one value
+    // an operator would most plausibly type to disable the cap would instead
+    // have deleted every command in every scope, at session start, unattended.
+    // `normalizeCount` refuses `0` and does not clamp.
     commandRunCapPerScope:
-      options.commandRunCapPerScope ??
-      envNumber('CORTEX_GC_COMMAND_RUN_CAP') ??
+      normalizeCount(options.commandRunCapPerScope) ??
+      envCount('CORTEX_GC_COMMAND_RUN_CAP') ??
       DEFAULTS.commandRunCapPerScope,
     // `envDays`, not `envNumber`: the neighbouring helper parses with
     // `Number.parseInt`, which succeeds on a PREFIX. Measured against a 30-day
@@ -137,6 +158,32 @@ function normalizeDays(value: number | undefined): number | undefined {
 
 /** ~274 years. Beyond this a retention window is not a date any more. */
 const MAX_RETENTION_DAYS = 100_000;
+
+/**
+ * A retained-ROW count: whole, finite, and at least 1.
+ *
+ * Distinct from `normalizeDays` on both counts that matter. It does **not**
+ * clamp to `MAX_RETENTION_DAYS` — that bound exists because a retention window
+ * becomes an unrepresentable `Date`, which has nothing to do with a row count,
+ * and clamping `1e9` to 100,000 silently deletes MORE than asked, the wrong
+ * direction for a bound. And it rejects **`0`**: on a retention window zero
+ * means "keep nothing recent", which is at least arguable, but on a row cap it
+ * means keep nothing AT ALL, and `0` is exactly what an operator types to turn
+ * something off (it is one of the spellings that disables `CORTEX_GC_AUTO`).
+ * Refusing it falls through to the default rather than erasing every command.
+ */
+function normalizeCount(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isFinite(value) || value < 1) return undefined;
+  return Math.floor(value);
+}
+
+/** Like `envDays`: `Number`, never `parseInt`, so `1e9` is a billion and not 1. */
+function envCount(name: string): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim().length === 0) return undefined;
+  return normalizeCount(Number(raw.trim()));
+}
 
 /** Like `envNumber`, but with `Number` so `1e9` is a billion and not one. */
 function envDays(name: string): number | undefined {
@@ -204,6 +251,88 @@ const COMMAND_RUN_OVERFLOW_SQL = `
     FROM memory_items
     WHERE kind = 'command_run'
   ) WHERE rn > ?`;
+
+/**
+ * The same cap, applied to the SOURCE table.
+ *
+ * **`COMMAND_RUN_OVERFLOW_SQL` above was a no-op that reported deletions.**
+ * Measured 2026-08-04 on a copy of the live 25.2 MB store: `runGc` reported
+ * `command_run_items.deleted = 4787` and the database shrank to **13.8 MB** —
+ * then a single `ensureCortexSchema`, which **every CLI command triggers**,
+ * restored all 5,434 rows and 24.3 MB. `backfillMemoryItems` re-inserts
+ * `memory_items` from `notes`, `episodes`, `project_snapshots` and
+ * `command_runs`, so deleting the projection while its source survives deletes
+ * nothing durably. `store.ts` already says this in as many words — "Deleting the
+ * `memory_items` row alone is not a deletion" — for `deleteMemoryItemCascade`;
+ * GC was doing exactly what that docstring warns against, and reporting success.
+ *
+ * That is the AD-12 shape: wired, running, reporting, and achieving nothing.
+ * It is also why FR-16 had no teeth — `command_runs` was the second-largest
+ * object in the database (5,434 rows / 3.00 MB) with no effective rule, and
+ * Story 4.4 increased what is written to it.
+ *
+ * Partitioned by the SESSION's `scope_key` (`command_runs` has no `scope_key` of
+ * its own) and ordered by `timestamp`, matching the projection's intent. Nothing
+ * references `command_runs(id)` as a foreign key — `event_id` points outward to
+ * `events` with `ON DELETE SET NULL`, and `episodes` hangs off `sessions`, not
+ * off command runs — so this delete cannot orphan or corrupt anything else.
+ */
+const COMMAND_RUN_SOURCE_OVERFLOW_SQL = `
+  SELECT id FROM (
+    SELECT cr.id AS id, ROW_NUMBER() OVER (
+      PARTITION BY COALESCE(s.scope_key, s.id) ORDER BY cr.timestamp DESC
+    ) AS rn
+    FROM command_runs cr
+    JOIN sessions s ON s.id = cr.session_id
+  ) WHERE rn > ?`;
+
+/**
+ * The HEAD of the command chain: `cmd` events beyond the per-scope cap.
+ *
+ * **The chain is `events(cmd)` to `command_runs` to `memory_items`, and every
+ * link has a backfill.** Bounding `command_runs` alone was still partially
+ * undone: measured on a copy of the live store, GC brought command runs to 647
+ * and one `ensureCortexSchema` restored 112 of them, because
+ * `backfillCommandRuns` (`schema.ts:1282`) re-inserts from `events WHERE type =
+ * 'cmd'`. That is the identical defect one level up, and it is the reason this
+ * rule exists rather than a deeper cap on the middle table.
+ *
+ * The general lesson, worth stating because this codebase has now paid for it
+ * twice in one story: **a derived table with a backfill can only be bounded at
+ * its source.** Deleting anything downstream reports a number and achieves
+ * nothing durable.
+ *
+ * The existing `events` rule only removes events of *consolidated* sessions
+ * (ended AND summarized), which most sessions never become, so it cannot bound
+ * this. Capped per scope and ordered by timestamp to match the two links below,
+ * so the three stay in step. `command_runs.event_id` is `ON DELETE SET NULL`, so
+ * removing an event cannot corrupt a surviving run.
+ */
+const CMD_EVENT_OVERFLOW_SQL = `
+  SELECT id FROM (
+    SELECT e.id AS id, ROW_NUMBER() OVER (
+      PARTITION BY COALESCE(s.scope_key, s.id) ORDER BY e.timestamp DESC
+    ) AS rn
+    FROM events e
+    JOIN sessions s ON s.id = e.session_id
+    WHERE e.type = 'cmd'
+  ) WHERE rn > ?`;
+
+/**
+ * Projection rows whose source row is gone.
+ *
+ * Runs AFTER the source prune, and is what keeps the two in step regardless of
+ * ranking: the projection ranks on `created_at` and the source on `timestamp`,
+ * so capping both to the same N is not guaranteed to select the same rows.
+ * Matching on existence is exact, and it is also the only thing that cleans up
+ * after a source row deleted by any other path (a cascaded session delete, a
+ * future rule).
+ */
+const ORPHANED_COMMAND_RUN_ITEMS_SQL = `
+  SELECT id FROM memory_items
+  WHERE source_table = 'command_runs'
+    AND source_id IS NOT NULL
+    AND source_id NOT IN (SELECT id FROM command_runs)`;
 
 function rollupLedger(
   db: Database.Database,
@@ -393,11 +522,43 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
     dryRun,
   );
 
+  // **Head of the chain first, and this order is load-bearing.** The chain is
+  // `events(cmd)` -> `command_runs` -> `memory_items`, and each link is rebuilt
+  // from the one above it on every `ensureCortexSchema`. Pruning any link while
+  // its source survives is undone within one command — measured twice while
+  // building this story.
+  const cmdEvents = countThenDelete(
+    db,
+    `SELECT COUNT(*) as count FROM events WHERE id IN (${CMD_EVENT_OVERFLOW_SQL})`,
+    `DELETE FROM events WHERE id IN (${CMD_EVENT_OVERFLOW_SQL})`,
+    [resolved.commandRunCapPerScope],
+    dryRun,
+  );
+  events.candidates += cmdEvents.candidates;
+  events.deleted += cmdEvents.deleted;
+
+  const commandRunSources = countThenDelete(
+    db,
+    `SELECT COUNT(*) as count FROM command_runs WHERE id IN (${COMMAND_RUN_SOURCE_OVERFLOW_SQL})`,
+    `DELETE FROM command_runs WHERE id IN (${COMMAND_RUN_SOURCE_OVERFLOW_SQL})`,
+    [resolved.commandRunCapPerScope],
+    dryRun,
+  );
+
   const commandRuns = countThenDelete(
     db,
     `SELECT COUNT(*) as count FROM memory_items WHERE id IN (${COMMAND_RUN_OVERFLOW_SQL})`,
     `DELETE FROM memory_items WHERE id IN (${COMMAND_RUN_OVERFLOW_SQL})`,
     [resolved.commandRunCapPerScope],
+    dryRun,
+  );
+
+  // Whatever the two rankings disagreed about, plus anything a cascade removed.
+  const orphanedCommandRunItems = countThenDelete(
+    db,
+    `SELECT COUNT(*) as count FROM memory_items WHERE id IN (${ORPHANED_COMMAND_RUN_ITEMS_SQL})`,
+    `DELETE FROM memory_items WHERE id IN (${ORPHANED_COMMAND_RUN_ITEMS_SQL})`,
+    [],
     dryRun,
   );
 
@@ -407,6 +568,16 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
     dryRun,
   );
 
+  // **The app-graph digest rule was WITHDRAWN by ruling (ShuromiU, 2026-08-06)**
+  // after the Story 4.6 review. It deleted digests for files that EXIST: the
+  // digest key is lowercased on win32 and darwin (`scope/keys.ts`) while the app
+  // graph preserves case, so 107 of 201 digests across 30 live stores were
+  // prune candidates — 86% on one project — and a third of those differed only
+  // by case. It also cost ~43 s at session start against a real 59,280-file app
+  // graph, and permanently deleted digests for every file outside the git index.
+  // See the story's review section; restore only with a shared normalizer, a
+  // materialized file list, and a sample of more than one repository.
+
   const readOffers = pruneReadOffers(db, isoDaysAgo(now, resolved.offerDays), dryRun);
 
   const negativeResults = pruneNegativeResults(
@@ -415,6 +586,17 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
     dryRun,
   );
 
+  // **The byte ceiling and its eviction were WITHDRAWN by ruling (ShuromiU,
+  // 2026-08-06)** after the Story 4.6 review found it broken three independent
+  // ways: it deleted by `rowid` on three `WITHOUT ROWID` tables so
+  // `gc --apply` exited 1 and `last_gc_at` was never written (re-arming auto-GC
+  // every session start); it measured eight tables while evicting six, so the
+  // exit condition could be unsatisfiable and it halved the rest to zero every
+  // run; and it excluded `current_app_graphs`, the largest object in the two
+  // largest live stores, so a 140 MB store reported 0% of its ceiling. It also
+  // never engaged on a healthy store — the measured derived set is 3.4 MB
+  // against a 32 MiB default — so its entire value was hypothetical while every
+  // one of its defects was real. The per-scope and age rules are the bound.
   const ratio = freelistRatio(db);
   let vacuumed = false;
   if (!dryRun && resolved.vacuum !== 'never') {
@@ -450,6 +632,8 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
     content_digests: digests,
     read_offers: readOffers,
     negative_results: negativeResults,
+    command_runs: commandRunSources,
+    orphaned_command_run_items: orphanedCommandRunItems,
     freelist_ratio: Number(ratio.toFixed(4)),
     vacuumed,
   };

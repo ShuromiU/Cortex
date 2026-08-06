@@ -767,7 +767,7 @@ Two things worth knowing before you accept one:
 - **Check the recorded path the preview prints.** A clone or fork of the same repository shares a root commit, so a sibling checkout that happens to be unavailable right now — an unmounted share, a folder mid-rename — can match. Adoption moves the store.
 - **Adopt before you do much work in the moved checkout.** If the new location has recorded notes of its own by then, adoption is refused rather than discarding them, and you have to move that store aside yourself to choose.
 
-Growth is bounded: `cortex gc` (and the opt-in `CORTEX_GC_AUTO=apply` startup sweep, at most once per 24h) prunes events of consolidated sessions, trims the retrieval log, rolls up old ledger rows, deletes never-accessed archived items after 90 days, and caps stored `command_run` items per scope. Dry-run is the default; `--apply` deletes.
+Growth is bounded: `cortex gc` — and, **on by default**, a startup sweep at most once per 24h (`CORTEX_GC_AUTO=off` opts out) — prunes events of consolidated sessions, trims the retrieval log, rolls up old ledger rows, deletes never-accessed archived items after 90 days, and caps command history per scope at its **source**: the `cmd` events and `command_runs` rows, not only the `memory_items` projection those are rebuilt from. Dry-run is the default for the command; the startup sweep applies. `cortex stats` reports `Last cleanup:` so an inert bound cannot look like a quiet one.
 
 ### The P&L
 

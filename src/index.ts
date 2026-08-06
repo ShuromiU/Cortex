@@ -75,7 +75,7 @@ export { isSubstitutionEnabled, setSubstitutionEnabled, renderHotPathStateLines,
 export { computeRootCensus, resolveCensusMaxFiles, resolveCensusMaxBytes, CENSUS_DEFAULT_MAX_FILES, CENSUS_DEFAULT_MAX_BYTES, type RootCensus, type CensusLimits } from './capture/census.js';
 export { canonicalSearchQuery, searchQueryKey, normalizeSearchRoot, isCertifiableSearch, CERTIFIABLE_PATTERN, CERTIFIABLE_GLOB, CERTIFIABLE_TYPES, type SearchQuery } from './capture/search-query.js';
 export { querySearchLedger, renderSearchLedger, renderSearchLedgerLine, SEARCH_LEDGER_MAX_QUERIES, SEARCH_LEDGER_TOKENS_PER_QUERY, type SearchLedgerResult, type SearchLedgerVerdict, type SearchLedgerDeps } from './query/search-ledger.js';
-export { runGc, shouldAutoGc, type GcOptions, type GcReport } from './db/gc.js';
+export { runGc, shouldAutoGc, type GcOptions, type GcReport, type GcCategoryReport } from './db/gc.js';
 export { estimateTokens, buildTextMetric, evaluateStore, evaluateDatabase, type TextMetric, type TopicEvaluation, type EvaluationResult, type EvaluationOptions, type QualityComparison, type QualityEvaluation, type QualityFixture, type QualityFixtureEvaluation, type QualityScoreBreakdown } from './eval/harness.js';
 export { seedStoreFromScenario, createSeededStore, type EvaluationScenario, type ScenarioMemoryItem, type ScenarioAppGraph, type SeededStore } from './eval/seed.js';
 export { runEvalGate, regenerateBaseline, checkKindCoverage, checkBaselineJustification, BASELINE_TRAILER, type EvalGateOptions, type GateResult, type GateSuiteResult, type GateKindCoverage, type RegenerationReport, type BaselineJustificationVerdict, type CommitRecord } from './eval/gate.js';
