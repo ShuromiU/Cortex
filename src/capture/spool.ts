@@ -995,10 +995,25 @@ export function flushSpool(
     // A failed synthesis loses failures, which is the safe direction. It must
     // never cost the batch that already committed.
   }
-  try {
-    store.setMeta(SCAN_STATUS_KEY, `${new Date().toISOString()} ${scanStatus} synthesized=${synthesized}`);
-  } catch {
-    // Observability must not be able to break the thing it observes.
+  // **Only a TRANSCRIPT-AWARE caller may write the status** (Epic 4 rollout,
+  // 2026-08-06). `flushSpool` has four callers and only `end-of-turn` can ever
+  // have a transcript; `inject-header`'s leftover flush and `cortex flush-spool`
+  // structurally cannot. Those were overwriting the good status with
+  // `unavailable:no-path`, so `cortex doctor` flapped between PASS and WARN on a
+  // perfectly healthy install depending on which flush ran last — a check that
+  // cries wolf trains people to ignore it, which is the failure it exists to
+  // prevent. Presence of the KEY is the signal, not its value: a host that stops
+  // providing `transcript_path` still passes `transcriptPath: null` from
+  // `end-of-turn`, and that must still warn.
+  if ('transcriptPath' in options) {
+    try {
+      store.setMeta(
+        SCAN_STATUS_KEY,
+        `${new Date().toISOString()} ${scanStatus} synthesized=${synthesized}`,
+      );
+    } catch {
+      // Observability must not be able to break the thing it observes.
+    }
   }
 
   // Rebuild the flat index AFTER the replay transactions have committed, so it

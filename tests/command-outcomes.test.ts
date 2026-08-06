@@ -608,6 +608,28 @@ describe('observability', () => {
     expect(status).toContain('synthesized=1');
   });
 
+  it('a flush that CANNOT have a transcript does not clobber the status', () => {
+    // `flushSpool` has four callers and only `end-of-turn` can ever have a
+    // transcript. `inject-header`'s leftover flush and `cortex flush-spool` pass
+    // no `transcriptPath` key at all, and were overwriting the good status with
+    // `unavailable:no-path` — so `cortex doctor` flapped between PASS and WARN
+    // on a healthy install depending on which flush ran last. Found during the
+    // Epic 4 rollout, on the very check meant to stop silent failure.
+    const fx = fixture();
+    const t = path.join(fx.root, 'transcript.jsonl');
+    writeTranscript(t, [{ id: 'a1', command: 'npm test' }]);
+    appendSpoolEntry(fx.root, { tool: 'cmd', cmd: 'npm test' });
+    flushSpool(fx.store, fx.root, fx.sessionId, undefined, { transcriptPath: t });
+    const good = fx.store.getMeta(SCAN_STATUS_KEY);
+    expect(good).toContain('ok outcomes=1');
+
+    // A transcript-unaware flush, exactly as the CLI callers make it.
+    appendSpoolEntry(fx.root, { tool: 'cmd', cmd: 'npm run build' });
+    flushSpool(fx.store, fx.root, fx.sessionId);
+
+    expect(fx.store.getMeta(SCAN_STATUS_KEY)).toBe(good);
+  });
+
   it('distinguishes an ABSENT transcript from a quiet one', () => {
     const fx = fixture();
     appendSpoolEntry(fx.root, { tool: 'cmd', cmd: 'npm run build' });
