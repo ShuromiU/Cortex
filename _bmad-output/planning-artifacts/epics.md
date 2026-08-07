@@ -971,12 +971,56 @@ As a parent agent dispatching work,
 I want the subagent to receive relevant prior context without my pasting it,
 So that delegation stops discarding the memory the parent already has.
 
+> **RE-BASED 2026-08-06 against measurement, before implementation.** Probed live
+> on the installed host; `~/.claude/settings.json` restored byte-identically
+> (sha `ed3ac572…`). Two findings drive the amendments below.
+>
+> **The delivery channel is CONFIRMED, not assumed.** A `SubagentStart` hook's
+> `hookSpecificOutput.additionalContext` reaches the subagent's context: a
+> dispatched subagent quoted the marker back verbatim and reported it arrived
+> "immediately after your task message and before I did any work". This
+> satisfies the standing rule (Story 4.5) that this mechanism is probed rather
+> than inferred from documentation.
+>
+> **The dispatch description is NOT available at `SubagentStart`.** The payload
+> is seven fields and carries no `tool_input`, whatever the hook documentation
+> lists as conditionally present. The per-agent sidecar that holds the
+> description is written **strictly after** every `SubagentStart` hook returns —
+> a 5,259 ms in-hook poll never saw it — and reading the parent transcript
+> instead is a reproduced race: with two `Explore` agents dispatched in one
+> message, the first agent's hook saw a transcript that did not yet contain its
+> own dispatch block. The only reliable source is `PreToolUse` on the `Agent`
+> tool, which carries `tool_input: {description, prompt, subagent_type}` and
+> `tool_use_id`, and whose events strictly interleave with `SubagentStart` even
+> for two same-type agents dispatched together.
+
 **Acceptance Criteria:**
 
 **Given** a subagent is dispatched with a description matching memory in scope
 **When** `SubagentStart` fires
 **Then** a brief derived from the dispatch description is emitted on stdout and injected into the subagent's context
 **And** it respects the standard brief budget.
+
+> **AMENDED 2026-08-06 (three clauses).**
+> 1. *"derived from the dispatch description"* stands, but the description must
+>    be **captured at `PreToolUse` on the `Agent` tool and consumed at
+>    `SubagentStart`**, paired by `agent_type` over unconsumed captures in
+>    dispatch order. The pairing is a guess and must be **audited, not trusted**:
+>    `PreToolUse.tool_use_id` equals the `toolUseId` the host later writes to the
+>    per-agent sidecar, so every pairing is verifiable at `SubagentStop` and
+>    mispairings must be counted rather than left invisible (AD-12).
+> 2. *"emitted on stdout"* is **VOID as written**. The mechanism is the
+>    `hookSpecificOutput.additionalContext` envelope; raw stdout is not the
+>    contract. `toHookJson` (`src/transports/hook-entry.ts`) is typed to
+>    `'UserPromptSubmit' | 'PreToolUse'` and must widen.
+> 3. *"the standard brief budget"* was ambiguous — `cortex_brief` defaults to 450
+>    tokens and the SessionStart brief is capped at 150. **RULING (ShuromiU,
+>    2026-08-06): 150**, the SessionStart cap. It is paid on every dispatch
+>    including the many that need nothing, and a long preamble competes with the
+>    instructions the parent actually wrote. Raising it later is a one-line
+>    change with evidence behind it. Rejected: 450 (matches a hand-pasted brief
+>    but is paid unconditionally) and start-small-then-measure (defers a real
+>    answer by a story).
 
 **Given** no relevant memory exists for the dispatch description
 **When** `SubagentStart` fires
@@ -986,9 +1030,25 @@ So that delegation stops discarding the memory the parent already has.
 **When** both paths run
 **Then** context is not double-injected.
 
+> **CLARIFIED 2026-08-06 — this AC is now MORE implementable than when written.**
+> The two paths do not share a context: `cortex_brief` returns into the
+> *parent's* context, and the auto-brief lands in the *subagent's*. They collide
+> only when the parent pastes its brief into the dispatch prompt. That is
+> detectable, because the `PreToolUse` capture required by AC #1 hands over the
+> **full dispatch prompt** — so "the parent already said this" is a comparison
+> against text in hand, not an inference. The AC is met by suppressing the
+> auto-brief when its content is already present in the prompt.
+
 **Given** brief generation fails for any reason
 **When** the subagent starts
 **Then** it starts normally with no error surfaced (AD-12).
+
+> **ADDED 2026-08-06 — a defect this story must fix, found while re-basing.**
+> `bookHookInjection` (`src/transports/hook-entry.ts`) books against
+> `store.getCurrentSession()`, which is primary-only, so tokens injected into a
+> subagent would be billed to the **parent**. Left unfixed, this story's own
+> cost is unattributable and the P&L that judges it is wrong. Story 5.1 created
+> the child session that makes the correct attribution possible.
 
 ### Story 5.3: Write subagent conclusions back
 
@@ -998,21 +1058,77 @@ So that a 200k-token run leaves more than one paragraph behind.
 
 **Acceptance Criteria:**
 
+> **RE-BASED 2026-08-06 against measurement, before implementation.** Three of
+> the four ACs stand, one better supported than written; the third was
+> **unenforceable** as specified and is amended below.
+
 **Given** a subagent finishes
 **When** `SubagentStop` fires
 **Then** its `last_assistant_message` is captured and its load-bearing findings are recorded as episodes attached to the parent's scope.
+
+> **CONFIRMED 2026-08-06, and richer than assumed.** `last_assistant_message` is
+> present in the measured payload, and so is `agent_transcript_path` — the
+> subagent's **complete** transcript, which the PRD did not count on. "Attached
+> to the parent's scope" needs no work: Story 5.1's child session already
+> inherits the parent's `scope_key`. "Load-bearing" is defined (PRD §Glossary:
+> *"it changes what a future agent would do"*). The unstated hard part is
+> **selection** — which sentences of a final message clear that bar. Reuse
+> `suggestNotes(store, sessionId?)`, which already takes a session id and
+> already carries confidence scoring, rather than inventing a second judge.
 
 **Given** a finding is note-shaped
 **When** write-back runs
 **Then** it is routed through the non-mutating suggestion path and projects into `memory_items` only once accepted (AD-4, FR-19).
 
+> **STANDS, with the acceptance path named.** `suggestNotes` is the non-mutating
+> path and is already session-scoped, so running it over the child session is
+> the whole mechanism. *"Only once accepted"* must name its acceptor: the Stop
+> hook already surfaces high-confidence suggestions to the parent **when a
+> subagent ran this turn**, which is exactly this case — so acceptance is the
+> parent choosing to write the note, and nothing self-authors.
+
 **Given** a subagent attempts to modify or resolve a note authored outside its own session
 **When** the operation is evaluated
 **Then** it is refused.
 
+> **AMENDED 2026-08-06 — the AC was unenforceable where it assumed, and is now
+> anchored where enforcement is actually possible.**
+>
+> **What was measured:** Cortex's MCP server **cannot distinguish a subagent's
+> call from its parent's**. All thirteen `ensureScopedSession` call sites in
+> `src/transports/mcp.ts` pass only `(store, cwd)` — no agent identity — and the
+> MCP protocol carries no caller id, so there is no channel to add one. Today a
+> subagent's `cortex_resolve` is indistinguishable from the user's own.
+>
+> **What makes it enforceable:** `PreToolUse` for a **subagent's** tool call
+> carries `agent_id` (measured: `agent_id=ae3fb76952fd58038` matching the
+> dispatched subagent, alongside `agent_type`, `tool_name`, `tool_input` and
+> `tool_use_id`), and `PreToolUse` can deny.
+>
+> **RULING (ShuromiU, 2026-08-06): enforce it — refuse the operation.** The
+> criterion protects decisions the user authored from being retired by an agent
+> the user dispatched, and that is worth Cortex's first blocking hook. Bound by
+> two conditions that were part of the ruling: the matcher covers **Cortex's own
+> memory-editing MCP tools only**, never anything else; and the check **fails
+> OPEN** — if it cannot establish that the note belongs to another session, the
+> operation proceeds, so a defect here can never wedge the user's work. Note
+> this is a new capability class: AD-7 scopes refunds to `PostToolUse`
+> substitution and explicitly not to `PreToolUse` deny, so that invariant needs
+> a companion clause rather than a contradiction. Rejected: *report but allow*
+> (honest, but leaves an authored decision quietly retirable) and *withdraw the
+> AC* (cheapest, and the option Epic 4 took four times — declined here because
+> this one guards the user's own authored memory).
+
 **Given** a new episode kind is introduced by write-back
 **When** the change ships
 **Then** a locked eval fixture exercising that kind ships with it (AD-5).
+
+> **STANDS, and it will bind.** The existing episode kinds are `command_failure`,
+> `test_cycle`, `session_summary`, `branch_snapshot`, `project_snapshot`,
+> `session_state` and `command_run`; a subagent-finding kind is new, so the
+> fixture obligation is live rather than theoretical. Adding the kind to
+> `eval/kind-coverage.json`'s grandfathered list is explicitly **not** how to
+> satisfy this — that file says so itself.
 
 ### Story 5.4: Record sibling claims during fan-out — WITHDRAWN FROM R1 (2026-07-28)
 
