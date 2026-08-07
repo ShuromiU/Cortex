@@ -21,6 +21,8 @@ import { flushSpool } from '../capture/spool.js';
 import { writeDigestIndex } from '../capture/digest-index.js';
 import {
   ensureScopedSession,
+  recordSubagentAmbiguity,
+  recordSubagentBriefed,
   recordSubagentDispatch,
   recordSubagentPairing,
   recordSubagentStart,
@@ -427,6 +429,17 @@ function dispatchPre(
 }
 
 function captureDispatch(store: CortexStore, payload: Record<string, unknown>): void {
+  // The off switch is checked HERE too, not only where the brief is emitted.
+  // Reproduced in review: with `CORTEX_SUBAGENT_BRIEF=off` — the spelling the
+  // README tells users to flip — every dispatch still wrote a row that nothing
+  // would ever consume, and `doctor`'s "captures with no pairings" rule then
+  // warned FOREVER on a deliberately configured install, naming
+  // `cortex install` as a fix that repairs nothing. That is the cries-wolf half
+  // of AD-12 arriving through the one switch documented to prevent all of this.
+  if (!subagentBriefEnabled()) {
+    return;
+  }
+
   // The matcher is the host's job, but a hand-edited or broadened matcher would
   // otherwise file every Edit and Bash into the dispatch table.
   if (toolName(payload) !== 'Agent') {
@@ -594,16 +607,29 @@ function createSubagentSession(
  * only turn a correct pairing into a miss if the primary rotated between the
  * dispatch and the start — about 800 ms apart, measured.
  *
- * **The residual is exactly one case: N same-type subagents dispatched in a
- * single assistant message.** They share all three parts, so only order
- * separates them, and FIFO resolves it on the measured strict interleaving
- * (`PreToolUse(alpha) → SubagentStart(alpha) → PreToolUse(bravo) →
- * SubagentStart(bravo)`). FIFO over silence is deliberate: refusing to brief on
- * ambiguity would silence exactly the fan-out case, which is common here — this
- * repository's own review workflow dispatches three same-type agents in one
- * message — and is where briefing is worth most. Those siblings' contexts are
- * genuinely related, so the cost of getting the order wrong is bounded. The rate
- * is counted so the assumption is not merely asserted.
+ * **More than one candidate means say nothing** (ruling: ShuromiU, 2026-08-07).
+ *
+ * The story shipped the opposite — take the oldest — and justified it with
+ * "refusing would silence exactly the fan-out case, which is where briefing is
+ * worth most". **Review proved that premise false.** The measured host ordering
+ * is strictly interleaved — `PreToolUse(alpha) → SubagentStart(alpha) →
+ * PreToolUse(bravo) → SubagentStart(bravo)` — so a genuine same-message fan-out
+ * never has two captures pending at a start, and kept its briefs either way.
+ * What first-come-first-served actually resolved was the BROKEN shapes, and it
+ * resolved them wrongly: an `Agent` call the user denies fires `PreToolUse` and
+ * never starts, the assistant re-dispatches in the SAME turn — same
+ * `session_id`, same `prompt_id`, same `agent_type`, inside the horizon — and
+ * the real subagent is handed the orphan. Reproduced: a subagent sent to audit
+ * the read ledger opened with `Most relevant — Decision [kafka pipeline]`. That
+ * is SM-C3, reached by an ordinary user action, and the story's stated residual
+ * explicitly did not cover it: an orphan is not a sibling.
+ *
+ * The refusal does NOT consume anything. Draining to one and briefing from the
+ * survivor would just be the same guess with an extra step, and which row is the
+ * orphan is exactly what cannot be known here. Stated consequence: one denied
+ * dispatch makes every later same-type subagent in that turn silent. Silence is
+ * this feature's documented default, so the cost is a missed brief, never a
+ * wrong one — and the count is reported so the shape's frequency is visible.
  */
 function renderSubagentBrief(
   store: CortexStore,
@@ -614,29 +640,41 @@ function renderSubagentBrief(
     return '';
   }
 
+  const agentId = agentIdentity(payload).agentId;
   const hostSessionId = firstString(payload['session_id'], payload['sessionId']);
   const promptId = firstString(payload['prompt_id'], payload['promptId']);
   const agentType = firstString(payload['agent_type'], payload['agentType']);
-  if (!hostSessionId || !promptId || !agentType) {
+  if (!agentId || !hostSessionId || !promptId || !agentType) {
     return '';
   }
 
   const key = { hostSessionId, promptId, agentType };
   const cutoff = dispatchCutoff(new Date(), dispatchHorizonSeconds());
 
-  // Counted before the claim, because after it the evidence is gone.
   const pending = store.countPendingSubagentDispatches(key, cutoff);
   if (pending === 0) {
+    return '';
+  }
+  if (pending > 1) {
+    recordSubagentAmbiguity(store);
     return '';
   }
 
   // One conditional statement, never read-then-write: two `SubagentStart` hooks
   // are independent processes and `busy_timeout` does not make read-then-write
-  // atomic, so the naive shape would hand ONE capture to TWO subagents.
-  const dispatch = store.consumeSubagentDispatch(key, cutoff);
+  // atomic, so the naive shape would hand ONE capture to TWO subagents. The same
+  // statement also refuses a second claim by an agent that already has one.
+  const dispatch = store.consumeSubagentDispatch(key, cutoff, agentId);
   if (!dispatch) {
     return '';
   }
+
+  // Booked HERE, before the brief is built. Booking it afterwards left a
+  // throwing brief with the capture consumed and `paired` un-incremented —
+  // reproduced with retrieval stubbed to throw: four consumed rows, `paired`
+  // unset, and `doctor` warning "no dispatch has ever paired" with a fix wrong
+  // for that cause.
+  recordSubagentPairing(store);
 
   const result = buildSubagentBrief(store, {
     description: dispatch.description,
@@ -644,14 +682,10 @@ function renderSubagentBrief(
     promptPrefix: dispatch.promptPrefix,
   });
 
-  recordSubagentPairing(store, {
-    ambiguous: pending > 1,
-    briefed: result.text.length > 0,
-  });
-
   if (result.text.length === 0) {
     return '';
   }
+  recordSubagentBriefed(store);
 
   // The CHILD, not the primary. This text lands in the subagent's context and is
   // the subagent's cost; billing it to the parent would make the P&L wrong about
@@ -780,10 +814,25 @@ function reflectFromPayload(
   // story as one question: the reflex was billed to the primary, and — because
   // `statePath()` keys the dedupe file on the session id — a subagent consumed
   // the PARENT's once-per-anchor marker, so the parent then edited the same file
-  // and got no reflex at all. Nothing rendered depends on the session id
+  // and got no reflex at all. Nothing RENDERED depends on the session id
   // (`reflectMemory` uses it only for that state file and the ledger row), so
-  // this corrects attribution without moving a single character of output.
-  const sessionId = resolveSessionId(store, cwd, options, agentIdentity(payload));
+  // per invocation this corrects attribution without moving a character of
+  // output. In AGGREGATE it does move: the marker is now per session, so a
+  // parent and three subagents editing one file produce four whispers where one
+  // fired before. Kept by ruling (ShuromiU, 2026-08-07) — each subagent has a fresh
+  // context and genuinely has not seen it — with the cost stated rather than
+  // discovered later in `cortex stats`.
+  //
+  // Identity is dropped when no primary is active, mirroring
+  // `createSubagentSession`'s guard. `ensureScopedSession` with an `agentId` and
+  // no active primary falls through to `ensurePrimarySession` and MINTS one from
+  // the subagent's cwd; the child it then creates has no corresponding
+  // `SubagentStart` fire, and `doctor`'s `fires < children` rule reads that as
+  // missed dispatches. Reproduced: five subagent `Edit` payloads with no start at
+  // all produced five children, zero fires, and a warn whose named fix repairs
+  // nothing.
+  const identity = store.getCurrentSession()?.scope_key ? agentIdentity(payload) : {};
+  const sessionId = resolveSessionId(store, cwd, options, identity);
   const input = toolInput(payload);
   let event: ReflexEvent | undefined;
   let prompt: string | undefined;

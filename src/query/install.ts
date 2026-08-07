@@ -280,6 +280,8 @@ export function mergeHookWiring(
     // left exactly as it was while the run reported success. `doctor` then
     // named this command as the fix for a condition it could not fix.
     let repaired = false;
+    /** A shared record had this wiring removed, so the append path must build on `updated`. */
+    let splitOut = false;
     const updated = entries.map(entry => {
       if (entry === null || typeof entry !== 'object') return entry;
       const record = { ...(entry as Json) };
@@ -299,11 +301,36 @@ export function mergeHookWiring(
         hook['command'] = command;
         entryChanged = true;
       }
-      if (
-        required.matcher !== undefined &&
-        record['matcher'] !== required.matcher &&
-        !matcherIsContested(inner, required)
-      ) {
+      // A record holding TWO wirings that want different matchers cannot be
+      // repaired in place — the repair pass runs once per required wiring over
+      // the same array, so each pass would overwrite the other's matcher. So
+      // this wiring is SPLIT OUT: removed from the shared record and appended
+      // below as its own correctly-matched entry.
+      //
+      // The first attempt merely declined to touch such a record, which
+      // reintroduced the exact disagreement the guard was written to prevent:
+      // `install` reported success, `doctor` warned that the matcher never
+      // matches `Agent`, and the fix it named — `cortex install` — provably
+      // declined to help. Worse, when the shared matcher happened to include
+      // `Agent`, `reflect-pre` fired on every dispatch and woke the `agent`
+      // reflex into the PARENT's context, with every `doctor` row green.
+      if (required.matcher !== undefined && matcherIsContested(inner, required)) {
+        if (record['matcher'] === required.matcher) {
+          repaired = true;
+          return entry;
+        }
+        const nextInner = inner.filter((_, position) => position !== index);
+        record['hooks'] = nextInner;
+        changed = true;
+        // Not `repaired`: the append path below writes it back properly, and
+        // `splitOut` is what makes that path build on this edited array rather
+        // than on the untouched copy — without it the removal was computed and
+        // then discarded, which is how the first version of this fix passed its
+        // own test while changing nothing.
+        splitOut = true;
+        return record;
+      }
+      if (required.matcher !== undefined && record['matcher'] !== required.matcher) {
         record['matcher'] = required.matcher;
         entryChanged = true;
       }
@@ -327,13 +354,18 @@ export function mergeHookWiring(
 
     // Nothing in this file wires it. If another settings file already does,
     // adding one here would double the invocation rather than fix anything.
-    if (wiredElsewhere.has(wiringKey(required))) continue;
+    // A split record is the exception: the command was just removed from a
+    // shared entry, so declining to re-add it would DELETE a working wiring.
+    if (!splitOut && wiredElsewhere.has(wiringKey(required))) {
+      continue;
+    }
 
-    entries.push({
+    const base = splitOut ? updated : entries;
+    base.push({
       ...(required.matcher === undefined ? {} : { matcher: required.matcher }),
       hooks: [{ type: 'command', command }],
     });
-    hooks[required.event] = entries;
+    hooks[required.event] = base;
     changed = true;
   }
 
@@ -345,13 +377,13 @@ export function mergeHookWiring(
  * event that want DIFFERENT matchers.
  *
  * Story 5.2 put a second required wiring on `PreToolUse`, and the repair pass
- * runs once per required wiring over the same event array. A hand-written record
- * packing both commands under one matcher would therefore be repaired twice,
- * each pass overwriting the other's matcher — leaving one of the two hooks
- * firing on the wrong tool, silently, because `hook-wiring` never inspects a
- * matcher. `install` never writes that shape, but it must not make an existing
- * one worse. Leaving the matcher alone keeps whatever the user chose, and
- * `capture-matcher` / `dispatch-matcher` report the consequence by name.
+ * runs once per required wiring over the same event array — so a hand-written
+ * record packing both commands under one matcher would be repaired twice, each
+ * pass overwriting the other's matcher and leaving one hook firing on the wrong
+ * tool. `install` never writes that shape; a user can. The caller SPLITS such a
+ * record rather than declining to touch it, because declining left `doctor`
+ * warning about a matcher and naming `cortex install` as the fix that had just
+ * refused to apply it.
  */
 function matcherIsContested(inner: readonly unknown[], required: RequiredWiring): boolean {
   const matchers = new Set<string | undefined>();

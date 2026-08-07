@@ -528,7 +528,8 @@ CREATE TABLE IF NOT EXISTS subagent_dispatches (
   prompt_prefix   TEXT,
   prompt_chars    INTEGER NOT NULL DEFAULT 0,
   captured_at     TEXT NOT NULL,
-  consumed_at     TEXT
+  consumed_at     TEXT,
+  consumed_by_agent_id TEXT
 );
 `;
 
@@ -869,8 +870,28 @@ export function applySchema(db: Database.Database): void {
   ensureSessionScopeColumns(db);
   ensureMemoryReferenceColumns(db);
   ensureContentDigestColumns(db);
+  ensureSubagentDispatchColumns(db);
   db.exec(INDEXES);
   ensureSessionAgentIndex(db);
+}
+
+/**
+ * `consumed_by_agent_id`, added after the table shipped in Story 5.2's first
+ * build (review round, 2026-08-07).
+ *
+ * `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so a
+ * store that saw the first build keeps the old five-column shape — and the query
+ * that reads this column would throw on every dispatch. `ensureColumn` is the
+ * established answer (`memory_references.moved_to`, the `token_ledger` evidence
+ * columns), and it costs one `PRAGMA table_info` per open.
+ *
+ * It records WHICH subagent consumed a capture, so a `SubagentStart` that fires
+ * twice for one agent id cannot claim a second capture. Reproduced before the
+ * fix: alpha briefed twice — the second time with bravo's topic — bravo silent,
+ * and both injections billed to alpha.
+ */
+function ensureSubagentDispatchColumns(db: Database.Database): void {
+  ensureColumn(db, 'subagent_dispatches', 'consumed_by_agent_id', 'consumed_by_agent_id TEXT');
 }
 
 /**

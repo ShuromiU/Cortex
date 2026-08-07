@@ -296,16 +296,23 @@ export const SUBAGENT_DISPATCH_COUNT_KEY = 'subagent_dispatch_count';
 export const SUBAGENT_PAIRED_COUNT_KEY = 'subagent_paired_count';
 
 /**
- * Pairings where more than one capture matched the key, so only dispatch order
- * separated them — N same-type subagents dispatched in one assistant message.
+ * Starts REFUSED because more than one capture matched the key.
  *
- * REPORTED, never warned on. That fan-out is routine rather than exotic (this
- * repository's own review workflow dispatches three same-type agents in a single
- * message), so a warn here would fire on a healthy install every time the
- * feature did its job — the "cries wolf" half of AD-12, which costs exactly the
- * attention the other half is meant to buy. What the counter buys is evidence:
- * if it stays low the FIFO assumption is sound, and if it climbs against the
- * pairing count the design needs revisiting before it can be trusted.
+ * The story shipped FIFO-on-ambiguity and justified it with "refusing would
+ * silence exactly the fan-out case, which is where briefing is worth most".
+ * **Review proved that premise false.** Under the MEASURED host ordering —
+ * `PreToolUse(a) → SubagentStart(a) → PreToolUse(b) → SubagentStart(b)`, strictly
+ * interleaved — a genuine same-message fan-out never has more than one capture
+ * pending, so it was booking ZERO. What FIFO actually resolved was the broken
+ * cases: an `Agent` call the user denied leaves an orphan capture, the assistant
+ * re-dispatches in the SAME turn, and FIFO hands the real subagent the orphan.
+ * Reproduced: a subagent sent to audit the read ledger was told its most relevant
+ * memory was `Decision [kafka pipeline]` — SM-C3, from an ordinary user action.
+ *
+ * Ruling (ShuromiU, 2026-08-07): SAY NOTHING WHEN UNSURE. So this counts refusals,
+ * and it is REPORTED, never warned on — the refusal is the safe outcome, and
+ * silence is this feature's documented default. A climbing count means murky
+ * dispatch shapes are common here, which is a design signal, not a fault.
  */
 export const SUBAGENT_AMBIGUOUS_COUNT_KEY = 'subagent_ambiguous_count';
 
@@ -333,24 +340,35 @@ export function recordSubagentDispatch(store: CortexStore): void {
 }
 
 /**
- * Record the outcome of one pairing attempt that found a capture.
+ * Record that a capture was claimed.
  *
- * One call, three counters, so a caller cannot book a brief without booking the
- * pairing that produced it — the shape that made `doctor` numbers disagree in
- * Story 5.1.
+ * Called IMMEDIATELY after the claim, before the brief is built. Booking it
+ * afterwards meant a brief that threw left the capture consumed and `paired`
+ * un-incremented — reproduced in review with retrieval stubbed to throw: four
+ * consumed rows, `paired` unset, and `doctor` then warning "no dispatch has ever
+ * paired" with a named fix wrong for that cause.
  */
-export function recordSubagentPairing(
-  store: CortexStore,
-  outcome: { ambiguous: boolean; briefed: boolean },
-): void {
+export function recordSubagentPairing(store: CortexStore): void {
   try {
     store.incrementMetaCounter(SUBAGENT_PAIRED_COUNT_KEY);
-    if (outcome.ambiguous) {
-      store.incrementMetaCounter(SUBAGENT_AMBIGUOUS_COUNT_KEY);
-    }
-    if (outcome.briefed) {
-      store.incrementMetaCounter(SUBAGENT_BRIEFED_COUNT_KEY);
-    }
+  } catch {
+    // Advisory only.
+  }
+}
+
+/** Record that a start was refused because more than one capture matched. */
+export function recordSubagentAmbiguity(store: CortexStore): void {
+  try {
+    store.incrementMetaCounter(SUBAGENT_AMBIGUOUS_COUNT_KEY);
+  } catch {
+    // Advisory only.
+  }
+}
+
+/** Record that a claimed capture actually produced a brief. */
+export function recordSubagentBriefed(store: CortexStore): void {
+  try {
+    store.incrementMetaCounter(SUBAGENT_BRIEFED_COUNT_KEY);
   } catch {
     // Advisory only — the brief has already been produced by this point.
   }

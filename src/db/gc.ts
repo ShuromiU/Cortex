@@ -77,13 +77,20 @@ const DEFAULTS = {
   // shipped with the table rather than deferred, the 3.1 lesson).
   negativeDays: 30,
   // Shortest window here, because a dispatch capture is the shortest-lived thing
-  // in the store: it is consumed about 800 ms after it is written, and the
-  // pairing horizon that governs correctness is five MINUTES. Everything past
-  // that is spent staging, kept only long enough that a `doctor` run the next
-  // morning still has rows to describe. This rule ships WITH the table rather
-  // than after it — `content_digests` shipped in Story 3.1 with no GC rule at
-  // all, grew monotonically for the life of a project, and became an action item
-  // a later story had to absorb.
+  // in the store: on the happy path it is consumed within about a second, and
+  // the pairing horizon that governs correctness is five MINUTES.
+  //
+  // The happy path is NOT the only path, and the first version of this comment
+  // justified the number as if it were. A capture goes unconsumed whenever the
+  // `Agent` call is denied, whenever more than one candidate makes the start
+  // refuse (the 2026-08-07 ruling), and whenever a type never matches — and
+  // those rows then sit for the full seven days. Growth stays bounded either
+  // way, which is what this rule is for; the window is chosen to outlive a
+  // weekend so a Monday `doctor` still has rows to describe.
+  //
+  // Ships WITH the table rather than after it: `content_digests` shipped in
+  // Story 3.1 with no GC rule at all, grew monotonically for the life of a
+  // project, and became an action item a later story had to absorb.
   dispatchDays: 7,
 } as const;
 

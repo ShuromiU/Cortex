@@ -318,8 +318,32 @@ export function readTemplateStamp(scriptText: string): string | null {
  * counter rather than continuing it.
  */
 function metaCount(db: ReturnType<typeof openDatabaseReadOnly>, key: string): number {
-  const raw = Number(getMetaValue(db, key));
-  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 0;
+  return readMetaCount(db, key).value;
+}
+
+/**
+ * A counter plus whether the stored value was CORRUPT, as opposed to absent.
+ *
+ * The distinction is load-bearing wherever a zero drives a warn. `doctor`'s
+ * "captures accumulated but nothing ever paired" rule reads `paired === 0`, and
+ * a corrupt `paired` reading as 0 manufactures that warn on a healthy, briefing
+ * install — reproduced with a valid `dispatch_count` of 9 beside an unparseable
+ * `paired_count`. The existing test could not catch it because it seeded BOTH
+ * keys corrupt, so `captured` read 0 too and the predicate could never fire.
+ */
+function readMetaCount(
+  db: ReturnType<typeof openDatabaseReadOnly>,
+  key: string,
+): { value: number; corrupt: boolean } {
+  const stored = getMetaValue(db, key);
+  if (stored === undefined || stored.length === 0) {
+    return { value: 0, corrupt: false };
+  }
+  const raw = Number(stored);
+  if (!Number.isFinite(raw) || raw < 0) {
+    return { value: 0, corrupt: true };
+  }
+  return { value: Math.floor(raw), corrupt: false };
 }
 
 /**
@@ -770,7 +794,10 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
           id: 'hook-wiring',
           label: 'Hook wiring',
           status: 'pass',
-          detail: `all ${REQUIRED_WIRING.length} events wired`,
+          // WIRINGS, not events. `PreToolUse` carries two entries since Story
+          // 5.2, so `REQUIRED_WIRING.length` stopped being an event count — and
+          // this line was printing "all 7 events wired" on a six-event install.
+          detail: `all ${REQUIRED_WIRING.length} wirings present across ${new Set(REQUIRED_WIRING.map(w => w.event)).size} events`,
         }
       : {
           id: 'hook-wiring',
@@ -1273,6 +1300,7 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
   let dispatchPaired = 0;
   let dispatchBriefed = 0;
   let dispatchAmbiguous = 0;
+  let dispatchCountersCorrupt = false;
   if (storeExists) {
     try {
       const db = openDatabaseReadOnly(identity.dbPath);
@@ -1285,8 +1313,11 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
         const firstDispatch = getMetaValue(db, SUBAGENT_DISPATCH_KEY) ?? '';
         dispatchFirstSeen = firstDispatch.length > 0 ? firstDispatch : null;
         if (dispatchFirstSeen !== null) {
-          dispatchCaptured = metaCount(db, SUBAGENT_DISPATCH_COUNT_KEY);
-          dispatchPaired = metaCount(db, SUBAGENT_PAIRED_COUNT_KEY);
+          const captured = readMetaCount(db, SUBAGENT_DISPATCH_COUNT_KEY);
+          const paired = readMetaCount(db, SUBAGENT_PAIRED_COUNT_KEY);
+          dispatchCaptured = captured.value;
+          dispatchPaired = paired.value;
+          dispatchCountersCorrupt = captured.corrupt || paired.corrupt;
           dispatchBriefed = metaCount(db, SUBAGENT_BRIEFED_COUNT_KEY);
           dispatchAmbiguous = metaCount(db, SUBAGENT_AMBIGUOUS_COUNT_KEY);
         }
@@ -1402,15 +1433,14 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
     }
 
     if (dispatchFirstSeen !== null) {
-      // Ambiguity is REPORTED, never warned on. N same-type agents dispatched in
-      // one assistant message share the whole pairing key, and that fan-out is
-      // routine — this repository's own review workflow does exactly it — so a
-      // warn would fire on a healthy install every time the feature did its job.
-      // That is the "cries wolf" half of AD-12, and it costs precisely the
-      // attention the other half is meant to buy.
+      // Refusals are REPORTED, never warned on. A refusal is the SAFE outcome
+      // under the 2026-08-07 ruling — more than one candidate means say nothing —
+      // and silence is this feature's documented default, so warning on it would
+      // fire whenever the design worked as ruled. That is the "cries wolf" half
+      // of AD-12, and it costs precisely the attention the other half buys.
       const ambiguity =
         dispatchAmbiguous > 0
-          ? ` (${plural(dispatchAmbiguous, 'ambiguous pairing', 'ambiguous pairings')} resolved in dispatch order)`
+          ? ` (${plural(dispatchAmbiguous, 'start', 'starts')} refused as ambiguous)`
           : '';
       details.push(
         `${plural(dispatchCaptured, 'dispatch', 'dispatches')} captured since ${dispatchFirstSeen}, ${dispatchPaired} paired, ${dispatchBriefed} briefed${ambiguity}`,
@@ -1422,7 +1452,15 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
       // pairing EVER is not a transient; it is a broken pairing, and at this
       // repository's measured rate (56 dispatches in four days) it is reached
       // within hours of the fault.
-      if (dispatchCaptured >= 3 && dispatchPaired === 0) {
+      //
+      // Suppressed on a CORRUPT counter, because a corrupt `paired` reads as 0
+      // and would manufacture this warn on a healthy, briefing install. The
+      // corruption is reported on its own terms instead.
+      if (dispatchCountersCorrupt) {
+        warnings.push(
+          'a dispatch counter holds a value that is not a number, so these figures understate reality',
+        );
+      } else if (dispatchCaptured >= 3 && dispatchPaired === 0) {
         warnings.push('no dispatch has ever paired with a subagent, so nothing is being briefed');
       }
     }

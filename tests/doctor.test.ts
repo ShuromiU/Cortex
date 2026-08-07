@@ -1658,11 +1658,11 @@ describe('subagent dispatch counters (FR-18)', () => {
     expect(detail).toContain('5 briefed');
   });
 
-  it('reports ambiguity without warning about it', () => {
-    // N same-type agents in one assistant message share the whole pairing key,
-    // and that fan-out is routine — this repository's own review workflow does
-    // exactly it. A warn here would fire on a healthy install every time the
-    // feature did its job, which is the "cries wolf" half of AD-12.
+  it('reports refusals without warning about them', () => {
+    // A refusal is the SAFE outcome under the 2026-08-07 ruling — more than one
+    // candidate means say nothing — and silence is this feature's documented
+    // default, so warning on it would fire whenever the design worked as ruled.
+    // That is the "cries wolf" half of AD-12.
     const fixture = buildFixture();
     seedDispatchMeta(fixture, {
       [SUBAGENT_DISPATCH_KEY]: '2026-08-06T10:00:00Z',
@@ -1674,7 +1674,7 @@ describe('subagent dispatch counters (FR-18)', () => {
 
     const report = doctor(fixture);
     expect(statusOf(report, 'subagent-sessions')).toBe('pass');
-    expect(detailOf(report, 'subagent-sessions')).toContain('18 ambiguous pairings');
+    expect(detailOf(report, 'subagent-sessions')).toContain('18 starts refused as ambiguous');
     expect(report.ok).toBe(true);
   });
 
@@ -1721,8 +1721,27 @@ describe('subagent dispatch counters (FR-18)', () => {
     // `Number`, never `parseInt`: a prefix parse would read 12 and then warn on
     // `12 captured, 0 paired`, inventing a fault out of corruption.
     const report = doctor(fixture);
-    expect(statusOf(report, 'subagent-sessions')).toBe('pass');
     expect(detailOf(report, 'subagent-sessions')).toContain('0 dispatches captured');
+    expect(detailOf(report, 'subagent-sessions')).toContain('not a number');
+    expect(report.ok).toBe(true);
+  });
+
+  it('does not manufacture the never-paired warn from ONE corrupt counter', () => {
+    // The asymmetric case, which the both-corrupt test above cannot reach: a
+    // VALID capture count beside an unparseable paired count reads as
+    // "9 captured, 0 paired" and would warn on a healthy, briefing install.
+    const fixture = buildFixture();
+    seedDispatchMeta(fixture, {
+      [SUBAGENT_DISPATCH_KEY]: '2026-08-06T10:00:00Z',
+      [SUBAGENT_DISPATCH_COUNT_KEY]: '9',
+      [SUBAGENT_PAIRED_COUNT_KEY]: 'lots',
+    });
+
+    const report = doctor(fixture);
+    // MUTATION ANCHOR: dropping the `dispatchCountersCorrupt` branch in
+    // `runDoctor` must turn this red.
+    expect(detailOf(report, 'subagent-sessions')).not.toContain('no dispatch has ever paired');
+    expect(detailOf(report, 'subagent-sessions')).toContain('not a number');
   });
 });
 

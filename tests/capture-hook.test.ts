@@ -663,6 +663,34 @@ describe('cortex-subagent.sh — structure', () => {
     expect(arms.slice().sort()).toEqual([...wiredActions].sort());
   });
 
+  it('passes each arm its OWN action token through to Node', () => {
+    // The gap review found: the structure test above checks arm NAMES and that
+    // each arm invokes Node exactly once, and the shell-level suite runs only
+    // `subagent-start`. Swap the two argument tokens in the script and every
+    // dispatch runs the wrong handler — no session is created and no dispatch is
+    // captured — while lint, vitest and `doctor` all stay green.
+    const lines = fs.readFileSync(SUBAGENT_SCRIPT, 'utf8').split(/\r?\n/);
+    let arm: string | null = null;
+    const seen = new Map<string, string>();
+    for (const line of lines) {
+      const opened = /^\s{2}([a-z][a-z-]*)\)\s*$/.exec(line);
+      if (opened) {
+        arm = opened[1]!;
+        continue;
+      }
+      if (arm !== null && line.includes('__CORTEX_NODE__')) {
+        const tokens = line.trim().split(/\s+/);
+        seen.set(arm, (tokens[tokens.length - 1] ?? '').replace(/["']/g, ''));
+        arm = null;
+      }
+    }
+
+    expect(seen.size).toBeGreaterThan(0);
+    for (const [name, passed] of seen) {
+      expect(passed, `the \`${name}\` arm passes \`${passed}\` to Node`).toBe(name);
+    }
+  });
+
   // The property that matters is the INSTALLED script's line endings, not the
   // template's. There is no `.gitattributes` and `core.autocrlf` is on for this
   // platform, so a Windows checkout legitimately has CRLF templates —

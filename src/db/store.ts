@@ -298,6 +298,7 @@ export interface SubagentDispatchRow {
   prompt_chars: number;
   captured_at: string;
   consumed_at: string | null;
+  consumed_by_agent_id: string | null;
 }
 
 /**
@@ -320,6 +321,7 @@ export interface ParsedSubagentDispatch {
   promptChars: number;
   capturedAt: string;
   consumedAt: string | null;
+  consumedByAgentId: string | null;
 }
 
 export interface InsertSubagentDispatchOpts {
@@ -356,6 +358,7 @@ function parseSubagentDispatchRow(row: SubagentDispatchRow): ParsedSubagentDispa
     promptChars: row.prompt_chars,
     capturedAt: row.captured_at,
     consumedAt: row.consumed_at,
+    consumedByAgentId: row.consumed_by_agent_id ?? null,
   };
 }
 
@@ -4143,15 +4146,25 @@ export class CortexStore {
    * once per 24 hours, so a capture orphaned at 09:00 — a dispatch the user
    * denied, or one the host never started — would otherwise stay eligible to
    * mis-brief a later same-type subagent all day.
+   *
+   * The `NOT EXISTS` clause is ONE SUBAGENT, ONE CAPTURE. `SubagentStart` can
+   * fire more than once for a single `agent_id` — the host supports continuing
+   * an existing agent, and Story 5.1's deferred work already records a re-fire
+   * onto a recycled id as reachable — and the claim is otherwise per-CAPTURE, not
+   * per-agent. Reproduced in review: two captures pending, `SubagentStart(alpha)`
+   * twice and `SubagentStart(bravo)` once gave alpha TWO briefs (the second
+   * carrying bravo's topic), bravo none, and both injections billed to alpha.
+   * Kept inside the same statement so it stays atomic across hook processes.
    */
   consumeSubagentDispatch(
     key: SubagentDispatchKey,
     notOlderThan: string,
+    agentId: string,
     consumedAt: string = new Date().toISOString(),
   ): ParsedSubagentDispatch | undefined {
     const row = this.db
       .prepare(
-        `UPDATE subagent_dispatches SET consumed_at = ?
+        `UPDATE subagent_dispatches SET consumed_at = ?, consumed_by_agent_id = ?
          WHERE id = (
            SELECT id FROM subagent_dispatches
            WHERE host_session_id = ? AND prompt_id = ? AND agent_type = ?
@@ -4160,11 +4173,25 @@ export class CortexStore {
            LIMIT 1
          )
            AND consumed_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM subagent_dispatches AS prior
+             WHERE prior.host_session_id = ? AND prior.prompt_id = ?
+               AND prior.agent_type = ? AND prior.consumed_by_agent_id = ?
+           )
          RETURNING *`,
       )
-      .get(consumedAt, key.hostSessionId, key.promptId, key.agentType, notOlderThan) as
-      | SubagentDispatchRow
-      | undefined;
+      .get(
+        consumedAt,
+        agentId,
+        key.hostSessionId,
+        key.promptId,
+        key.agentType,
+        notOlderThan,
+        key.hostSessionId,
+        key.promptId,
+        key.agentType,
+        agentId,
+      ) as SubagentDispatchRow | undefined;
     return row ? parseSubagentDispatchRow(row) : undefined;
   }
 }

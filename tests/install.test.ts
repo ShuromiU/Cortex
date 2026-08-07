@@ -1202,12 +1202,19 @@ describe('PreToolUse carries two wirings', () => {
     expect(new Set(keys).size, `wiringKey collision: ${keys.join(', ')}`).toBe(keys.length);
   });
 
-  it('leaves the matcher alone when one record packs both PreToolUse commands', () => {
+  it('SPLITS a record that packs both PreToolUse commands under one matcher', () => {
     // `install` never writes that shape; a hand-edited settings file can. The
     // repair pass runs once per required wiring over the same event array, so
-    // without a guard each pass would overwrite the other's matcher and leave
-    // one of the two hooks firing on the wrong tool — silently, because
-    // `hook-wiring` never inspects a matcher.
+    // repairing in place would have each pass overwrite the other's matcher and
+    // leave one hook firing on the wrong tool — silently, because `hook-wiring`
+    // never inspects a matcher.
+    //
+    // The first fix merely DECLINED to touch such a record, which review showed
+    // reintroduced the very disagreement it was written to prevent: `install`
+    // reported success while `doctor` warned about the matcher and named
+    // `cortex install` as the fix that had just refused to apply it. Worse, with
+    // `Agent` in the shared matcher, `reflect-pre` fired on every dispatch and
+    // woke the `agent` reflex into the PARENT's context with every row green.
     const fixture = buildFixture();
     const posixHooks = fixture.hooksDir.split(path.sep).join('/');
     writeFile(
@@ -1231,7 +1238,27 @@ describe('PreToolUse carries two wirings', () => {
 
     const settings = JSON.parse(
       fs.readFileSync(path.join(fixture.homeDir, '.claude', 'settings.json'), 'utf8'),
-    ) as { hooks: Record<string, Array<{ matcher?: string }>> };
-    expect(settings.hooks['PreToolUse']![0]!.matcher).toBe('Edit|Write|Agent');
+    ) as { hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>> };
+    const entries = settings.hooks['PreToolUse']!;
+
+    // MUTATION ANCHOR: replacing the split with a decline must turn this red.
+    for (const required of REQUIRED_WIRING.filter(w => w.event === 'PreToolUse')) {
+      const owning = entries.filter(entry =>
+        entry.hooks.some(hook => commandSatisfiesWiring(hook.command, required)),
+      );
+      expect(owning, `${wiringKey(required)} is not wired exactly once`).toHaveLength(1);
+      expect(owning[0]!.matcher, `${wiringKey(required)} kept the shared matcher`).toBe(
+        required.matcher,
+      );
+      // And each now sits alone, so a later repair cannot fight the other.
+      expect(owning[0]!.hooks).toHaveLength(1);
+    }
+
+    // Idempotent: a second run changes nothing.
+    const before = fs.readFileSync(path.join(fixture.homeDir, '.claude', 'settings.json'), 'utf8');
+    install(fixture);
+    expect(fs.readFileSync(path.join(fixture.homeDir, '.claude', 'settings.json'), 'utf8')).toBe(
+      before,
+    );
   });
 });

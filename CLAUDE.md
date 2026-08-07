@@ -5,7 +5,7 @@ A trust, freshness, and economy layer for coding-agent memory, not a transcript 
 ## Current Model
 - Cortex is retrieval-first, not transcript-first, and pull-based, not push-based: a tiny validated session brief at startup plus the high-confidence reflex are the memory channels; coercion is reduced to one one-line hint per session.
 - Sessions are branch/worktree-aware. A dispatched subagent gets its own child session **at `SubagentStart`**, before it does anything, so a subagent that only thinks is still attributable; its captured tool activity then files under that same session.
-- A dispatched subagent is **briefed automatically** from its dispatch description (FR-18): the description is captured at `PreToolUse` on the `Agent` tool, paired at `SubagentStart` on `(session_id, prompt_id, agent_type)`, and injected as a ≤150-token `additionalContext` brief billed to the child session. Silence is the default — no matching memory, no pairing, a brief the parent already pasted, or any failure emits nothing. `CORTEX_SUBAGENT_BRIEF=off` disables it.
+- A dispatched subagent is **briefed automatically** from its dispatch description (FR-18): the description is captured at `PreToolUse` on the `Agent` tool, paired at `SubagentStart` on `(session_id, prompt_id, agent_type)`, and injected as a ≤150-token `additionalContext` brief billed to the child session. The cap is enforced on this surface rather than inherited — `assembleBudgeted` keeps its first line whatever its size. **More than one candidate means say nothing** (ruling, ShuromiU, 2026-08-07): the story's FIFO premise was measured false, and FIFO's real effect was handing a denied dispatch's context to the next same-type subagent. Silence is the default throughout — no matching memory, no unambiguous pairing, a brief the parent already pasted, or any failure emits nothing. `CORTEX_SUBAGENT_BRIEF=off` disables both the brief and the capture.
 - `memory_items` is the canonical search/retrieval layer.
 - Default state starts with current-session load-bearing notes, then uses the scored working set, within a token budget.
 - Cortex tracks a lightweight current app graph, validates file/path references extracted from memory, and resolves renamed files through a git rename map (`[moved:]`) instead of treating them as missing.
@@ -76,9 +76,9 @@ A trust, freshness, and economy layer for coding-agent memory, not a transcript 
 - `src/eval/seed.ts` — hermetic scenario seeding for quality suites
 - `src/eval/gate.ts` — the locked retrieval-quality gate (suite discovery, comparison, AD-5 kind coverage, baseline regeneration)
 - `src/transports/cli.ts` — `inject-header`, `route`, `reflect`, `flush-spool`, `gc`, `install` (alias `install-hooks`), `doctor`, `substitution`, evaluation
-- `src/transports/hook-entry.ts` — JSON hook bridge (reflex, one-shot consult hint, `subagent-start`, `end-of-turn`)
+- `src/transports/hook-entry.ts` — JSON hook bridge (reflex, one-shot consult hint, `dispatch-pre`, `subagent-start`, `end-of-turn`)
 - `src/transports/mcp.ts` — MCP tools used by Claude (incl. engagement state at `<project>/.cortex.state`)
-- `hooks/claude/cortex-subagent.sh` — the `SubagentStart` bridge (FR-17): engagement guard, action validation, one Node spawn per subagent dispatch, emits nothing
+- `hooks/claude/cortex-subagent.sh` — the subagent bridge (FR-17 + FR-18), on TWO events: engagement guard, action validation, one Node spawn per arm and one arm per fire. `dispatch-pre` (`PreToolUse` on `Agent`) records the dispatch and prints nothing; `subagent-start` (`SubagentStart`) creates the child session and may emit the brief envelope
 - `hooks/claude/*.sh` — canonical hook script templates installed by `cortex install-hooks`; each carries a `# cortex-hook-template:` stamp that `doctor` recompares
 - `eval/suites/` + `eval/baselines/` — locked retrieval-quality fixtures and reference results
 - `~/.claude/CLAUDE.md` — global user guidance that must stay aligned with Cortex consult policy for new projects outside this repo

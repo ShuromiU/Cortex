@@ -1825,9 +1825,10 @@ function seedFakeBinDir(): string {
  * no third repair — this and `doctor.test.ts`'s `healthyWiring` were the two
  * places that had to be edited by hand.
  *
- * The matcher is deliberately omitted: an absent matcher matches every tool,
- * which is broader than the canonical wiring and passes the matcher checks, so
- * this fixture stays about wiring and script currency rather than routing.
+ * Each entry carries the matcher its wiring declares. The first version omitted
+ * them all — an absent matcher matches every tool, so it passed — which left the
+ * sandbox-home path never exercising a real matcher shape at all. Review named
+ * that as the one gap the derived fixtures did not close.
  */
 function seedSandboxHome(hooksDir: string): string {
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-home-'));
@@ -1841,7 +1842,10 @@ function seedSandboxHome(hooksDir: string): string {
         ? 'cortex inject-header --quiet'
         : `bash "${posixHooks}/${required.script}"${required.action === undefined ? '' : ` ${required.action}`}`;
     const entries = hooks[required.event] ?? [];
-    entries.push({ hooks: [{ type: 'command', command }] });
+    entries.push({
+      ...(required.matcher === undefined ? {} : { matcher: required.matcher }),
+      hooks: [{ type: 'command', command }],
+    });
     hooks[required.event] = entries;
   }
 

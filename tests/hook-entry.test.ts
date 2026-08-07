@@ -994,6 +994,52 @@ describe('handleHookPayload dispatch-pre', () => {
     expect(dispatchCount(store)).toBe(0);
   });
 
+  it('records the tool_use_id Story 5.3 will audit the pairing against', () => {
+    // It is the ONLY thing this story ships for the clause deferred to 5.3, and
+    // review found it written but never asserted: deleting the `toolUseId` line
+    // from `captureDispatch` left the whole suite green, and 5.3's audit would
+    // have found nothing to check.
+    const { store } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+
+    handleHookPayload(store, 'dispatch-pre', dispatchPrePayload('audit me'), cwd, {
+      requireEngagement: false,
+    });
+
+    const row = store.db
+      .prepare('SELECT tool_use_id FROM subagent_dispatches')
+      .get() as { tool_use_id: string | null };
+    expect(row.tool_use_id).toBe('toolu_dispatch_1');
+  });
+
+  it('captures nothing at all when the brief is switched off', () => {
+    // Reproduced in review: the off switch was checked only where the brief is
+    // EMITTED, so rows still accumulated unconsumed and `doctor` then warned
+    // forever on a deliberately configured install, naming a fix that repairs
+    // nothing — the cries-wolf half of AD-12, through the one switch documented
+    // to prevent all of this.
+    const { store } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+
+    const previous = process.env[SUBAGENT_BRIEF_ENV];
+    process.env[SUBAGENT_BRIEF_ENV] = 'off';
+    try {
+      for (let index = 0; index < 3; index += 1) {
+        handleHookPayload(store, 'dispatch-pre', dispatchPrePayload(`job ${index}`), cwd, {
+          requireEngagement: false,
+        });
+      }
+    } finally {
+      if (previous === undefined) delete process.env[SUBAGENT_BRIEF_ENV];
+      else process.env[SUBAGENT_BRIEF_ENV] = previous;
+    }
+
+    // MUTATION ANCHOR: removing the `subagentBriefEnabled()` guard from
+    // `captureDispatch` must turn this red.
+    expect(dispatchCount(store)).toBe(0);
+    expect(store.getMeta('subagent_dispatch_count')).toBeUndefined();
+  });
+
   it('stores a bounded prompt summary rather than the prompt itself', () => {
     const { store } = createTestStore();
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
@@ -1122,34 +1168,138 @@ describe('handleHookPayload subagent-start brief', () => {
     expect(start(store, cwd, 'agent-alpha')).toBe('');
   });
 
-  it('gives two same-type siblings their own dispatches, in order', () => {
+  /** Two notes with NO shared vocabulary, so each brief can only match its own. */
+  const seedTwoDisjointTopics = (store: CortexStore, sessionId: string): void => {
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'zeppelin mooring',
+      content: 'Zeppelin mooring decision: the mast tension is fixed at eleven.',
+    });
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'quokka census',
+      content: 'Quokka census decision: the island tally happens each equinox.',
+    });
+  };
+
+  it('briefs both same-type siblings under the MEASURED host ordering', () => {
+    // The ordering the host actually produces is strictly interleaved —
+    // `PreToolUse(a) -> Start(a) -> PreToolUse(b) -> Start(b)` — so a genuine
+    // same-message fan-out never has two captures pending at a start and keeps
+    // both briefs. This is the evidence that refusing on ambiguity costs the
+    // fan-out case nothing, which the story's original premise got backwards.
     const { store, sessionId } = createTestStore();
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
-    store.insertNote({
-      sessionId,
-      kind: 'decision',
-      subject: 'alpha subject',
-      content: 'Alpha subject decision: the alpha path uses re-hashing throughout.',
-    });
-    store.insertNote({
-      sessionId,
-      kind: 'decision',
-      subject: 'bravo subject',
-      content: 'Bravo subject decision: the bravo path uses mtime and must not.',
-    });
+    seedTwoDisjointTopics(store, sessionId);
 
-    dispatch(store, cwd, 'alpha subject');
-    dispatch(store, cwd, 'bravo subject');
-
+    dispatch(store, cwd, 'zeppelin mooring');
     const first = start(store, cwd, 'agent-alpha');
+    dispatch(store, cwd, 'quokka census');
     const second = start(store, cwd, 'agent-bravo');
 
-    expect(first).toContain('alpha subject');
-    expect(second).toContain('bravo subject');
-    // Ambiguity is COUNTED, not refused: the first start saw two candidates.
-    expect(store.getMeta(SUBAGENT_AMBIGUOUS_COUNT_KEY)).toBe('1');
+    // Disjoint vocabularies: the earlier version seeded two notes that both
+    // matched both topics, so it passed under LIFO, under a swap, and even if
+    // both starts got the same capture.
+    expect(first).toContain('zeppelin');
+    expect(first).not.toContain('quokka');
+    expect(second).toContain('quokka');
+    expect(second).not.toContain('zeppelin');
+
     expect(store.getMeta(SUBAGENT_PAIRED_COUNT_KEY)).toBe('2');
     expect(store.getMeta(SUBAGENT_BRIEFED_COUNT_KEY)).toBe('2');
+    expect(store.getMeta(SUBAGENT_AMBIGUOUS_COUNT_KEY)).toBeUndefined();
+  });
+
+  it('says NOTHING when two captures could be this subagent (ruling, 2026-08-07)', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    seedTwoDisjointTopics(store, sessionId);
+
+    dispatch(store, cwd, 'zeppelin mooring');
+    dispatch(store, cwd, 'quokka census');
+
+    // MUTATION ANCHOR: removing the `pending > 1` refusal must turn this red.
+    expect(start(store, cwd, 'agent-alpha')).toBe('');
+    expect(store.getMeta(SUBAGENT_AMBIGUOUS_COUNT_KEY)).toBe('1');
+    expect(store.getMeta(SUBAGENT_PAIRED_COUNT_KEY)).toBeUndefined();
+    // Nothing was consumed: draining to one would be the same guess with an
+    // extra step, and which row is the orphan is exactly what is unknowable.
+    expect(
+      store.countPendingSubagentDispatches(
+        { hostSessionId: 'host-session-id', promptId: 'prompt-1', agentType: 'Explore' },
+        '1970-01-01T00:00:00.000Z',
+      ),
+    ).toBe(2);
+  });
+
+  it('never briefs a subagent from a dispatch the user denied (SM-C3)', () => {
+    // The reproduced case, and the reason the ruling exists. An `Agent` call the
+    // user denies fires `PreToolUse` and never starts; the assistant re-dispatches
+    // in the SAME turn, so every key part matches and the horizon has not moved.
+    // Before the ruling the real subagent opened with the denied job's topic.
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    seedTwoDisjointTopics(store, sessionId);
+
+    dispatch(store, cwd, 'zeppelin mooring'); // denied — never starts
+    dispatch(store, cwd, 'quokka census'); // the real one
+    const output = start(store, cwd, 'agent-real');
+
+    expect(output).not.toContain('zeppelin');
+    expect(output).toBe('');
+  });
+
+  it('books the pairing even when the brief generator throws (AC #4)', () => {
+    // The counters must not disagree with the rows. Booking `paired` after the
+    // brief left a throwing generator with the capture consumed and `paired`
+    // unset — which `doctor` then reads as "nothing ever pairs".
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    seedBriefableMemory(store, sessionId);
+    dispatch(store, cwd, 'read ledger freshness');
+
+    const broken = Object.create(store) as typeof store;
+    broken.searchMemoryItems = () => {
+      throw new Error('FTS index is corrupt');
+    };
+    broken.listRecentMemoryItems = () => {
+      throw new Error('FTS index is corrupt');
+    };
+
+    let output = 'unset';
+    expect(() => {
+      output = handleHookPayload(
+        broken,
+        'subagent-start',
+        subagentStartPayload('agent-alpha', 'Explore'),
+        cwd,
+        { requireEngagement: false },
+      );
+    }).not.toThrow();
+
+    expect(output).toBe('');
+    expect(store.getMeta(SUBAGENT_PAIRED_COUNT_KEY)).toBe('1');
+    expect(store.getMeta(SUBAGENT_BRIEFED_COUNT_KEY)).toBeUndefined();
+  });
+
+  it('refuses to brief one agent twice, and leaves the sibling its capture', () => {
+    // Reproduced in review: alpha briefed twice — the second time with bravo's
+    // topic — bravo silent, and both injections billed to alpha.
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    seedTwoDisjointTopics(store, sessionId);
+
+    dispatch(store, cwd, 'zeppelin mooring');
+    const first = start(store, cwd, 'agent-alpha');
+    expect(first).toContain('zeppelin');
+
+    dispatch(store, cwd, 'quokka census');
+    // MUTATION ANCHOR: removing the `NOT EXISTS` clause from
+    // `consumeSubagentDispatch` must turn this red.
+    expect(start(store, cwd, 'agent-alpha')).toBe('');
+    expect(start(store, cwd, 'agent-bravo')).toContain('quokka');
   });
 
   it('suppresses a brief the parent already pasted into the dispatch prompt (AC #3)', () => {
@@ -1332,6 +1482,37 @@ describe('reflex attribution for a subagent (Story 5.2, Task 6)', () => {
     expect(written, 'the subagent wrote the parent marker').not.toContain(
       markerKey(parent.id),
     );
+  });
+
+  it('drops subagent identity when no primary is active', () => {
+    // With an `agentId` and no active primary, `ensureScopedSession` falls
+    // through to `ensurePrimarySession` and MINTS one from the SUBAGENT's cwd —
+    // the hazard `createSubagentSession` and `dispatchPre` both refuse — and the
+    // child it then creates has no `SubagentStart` fire behind it, which
+    // `doctor` reads as missed dispatches. Reproduced before the guard: five
+    // subagent `Edit` payloads with no start at all gave five children, zero
+    // fires, and a warn whose named fix repairs nothing.
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    applySchema(db);
+    initializeMeta(db, '/repo');
+    const store = new CortexStore(db);
+    expect(store.getCurrentSession()).toBeUndefined();
+
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-attr-'));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-attr-state-'));
+
+    handleHookPayload(store, 'reflect-pre', editPayload('src/db/store.ts', 'ghost-agent'), cwd, {
+      stateDir,
+      requireEngagement: false,
+    });
+
+    // MUTATION ANCHOR: dropping the `getCurrentSession()?.scope_key` condition
+    // in `reflectFromPayload` must turn this red.
+    const children = db
+      .prepare('SELECT COUNT(*) AS n FROM sessions WHERE parent_session_id IS NOT NULL')
+      .get() as { n: number };
+    expect(children.n, 'a child was created with no primary to parent it').toBe(0);
   });
 
   it('bills a subagent reflex to the subagent', () => {

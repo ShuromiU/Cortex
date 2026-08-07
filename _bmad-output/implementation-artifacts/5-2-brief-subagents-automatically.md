@@ -431,9 +431,157 @@ dispatch cannot trip it.
 - `_bmad-output/implementation-artifacts/deferred-work.md` — the re-filed `reflect-pre` item closed
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
 
+## Review Findings (three-layer, 2026-08-07)
+
+Blind Hunter, Edge Case Hunter and Acceptance Auditor ran in parallel against
+`c0df4b0..b3ebebd`. **The seven most consequential findings were re-verified
+against the built `dist/` before any of them was acted on** — 7/7 confirmed
+(`scratchpad/verify-review.mjs`). Nothing below is taken from a reviewer's word.
+
+### Two rulings (ShuromiU, 2026-08-07)
+
+**R1 — More than one candidate means say nothing.** The story shipped FIFO and
+justified it with "refusing would silence exactly the fan-out case". **Measured
+false.** The host ordering is strictly interleaved (`PreToolUse(a) → Start(a) →
+PreToolUse(b) → Start(b)`), so a genuine same-message fan-out never has two
+captures pending at a start — the ambiguity counter was booking **zero** for it,
+while my test and my sandbox driver both dispatched BOTH before starting either,
+which is not what the host does. That artifact is what made FIFO look like the
+fan-out's friend. What FIFO actually resolved was the broken shapes, wrongly:
+an `Agent` call the user DENIES leaves an orphan, the assistant re-dispatches in
+the same turn, and the real subagent is handed the orphan. Reproduced — a
+subagent sent to audit the read ledger opened with `Decision [kafka pipeline]`.
+Refusing costs the fan-out nothing and closes the SM-C3 case.
+Rejected: keep FIFO; withdraw the feature pending 5.3's verification.
+
+**R2 — The reflex whisper stays per participant.** Re-routing `reflect-pre`
+through agent identity turned "once per anchor" into "once per anchor per
+session": measured, a parent and three subagents editing one file produce four
+whispers where one fired before. Kept, because each subagent has a fresh context
+and genuinely has not seen it. Rejected: whispers to the primary only — a
+subagent about to edit a specific file would get no warning about a decision
+attached to that file, since its dispatch brief is built from a job description.
+
+### Three HIGH defects, all reproduced, all fixed
+
+1. **The 150-token cap was not a cap.** `assembleBudgeted` keeps its first
+   evidence line unconditionally and `renderMemoryLine` does not truncate note
+   text: one 3,436-character note rendered **895 tokens**. Four documents
+   asserted the cap as fact. The budget test could not see it — twelve SHORT
+   notes, so trimming binds before any single line does. Fixed with
+   `enforceBriefBudget` on this surface only (the shared trimmer is pulled by
+   agents who asked and can ask for less; this one pushes unprompted), plus a
+   test seeded with ONE LARGE item.
+2. **`CORTEX_SUBAGENT_BRIEF=off` did not stop the capture.** Rows accumulated
+   unconsumed and `doctor` then warned FOREVER on a deliberately configured
+   install, naming a fix that repairs nothing — the cries-wolf half of AD-12
+   arriving through the one switch documented to prevent all of this.
+3. **A re-fired start stole a sibling's capture.** Alpha briefed twice (the
+   second time with bravo's topic), bravo silent, both billed to alpha. Fixed by
+   recording `consumed_by_agent_id` and refusing a repeat inside the same atomic
+   `UPDATE`; the column is added by `ensureColumn`, because
+   `CREATE TABLE IF NOT EXISTS` does nothing to a table the first build created.
+
+### Also fixed
+
+- **`matcherIsContested` reintroduced the disagreement it was written to
+  prevent.** It declined to repair even when the matcher was WRONG, so `doctor`
+  warned and named `cortex install` as the fix that had just refused. Worse, a
+  shared matcher containing `Agent` made `reflect-pre` fire on every dispatch and
+  woke the `agent` reflex INTO THE PARENT — the dormant path Task 1 forbids
+  waking — with every row green. Now `install` SPLITS the record. My first split
+  computed the removal and then discarded it, passing its own test while
+  changing nothing; the test now asserts each wiring sits alone under its own
+  matcher and that a second run is byte-identical.
+- **A throwing brief consumed the row and booked no pairing.** The pairing is now
+  booked at the claim.
+- **An asymmetric corrupt counter manufactured the never-paired warn.** The old
+  test seeded BOTH keys corrupt, so the predicate could never fire.
+- **`reflect-pre` could mint a primary from a subagent's cwd** and create children
+  with no fire behind them. Identity is dropped when no primary is active.
+- **`doctor` printed "all 7 events wired" on a six-event install.**
+- **Tests that asserted less than their names claimed:** the sibling-ordering test
+  passed under LIFO (both seeded notes matched both topics — now disjoint
+  vocabularies); the suppression test seeded ONE note, so "every item present"
+  degenerated; `cli.test.ts`'s fixture never exercised a real matcher shape;
+  `tool_use_id` was written and never asserted; no test checked that a shell arm
+  passes its OWN action token.
+- **Prose:** `CLAUDE.md`'s "the `SubagentStart` bridge … emits nothing" (both
+  clauses false), its hook-action list, two stale Story 5.1 invariants, `gc.ts`'s
+  "consumed about 800 ms after it is written" (true only on the happy path),
+  `prompt_chars` as the NORMALIZED length, and "two lines when `forAgent` is set"
+  (it can be more).
+
+### The measurement the story bound itself to and the first build skipped
+
+Through the rendered hooks under bash, quiescent, real repo and real store, 40
+runs after 5 warmup, work asserted (45 captured, 45 paired, 45 children, 45/45
+briefed): `dispatch-pre` **min 573.0 / median 606.1 / p95 698.4 ms**,
+`subagent-start` **min 578.9 / median 622.2 / p95 703.1 ms**, together **median
+1272.8 / p95 1343.9 ms** per dispatch, against a bash floor of median 69.1 ms.
+
+**A fact the Story 5.1 ruling did not cover: `PreToolUse` GATES the tool call,
+where `SubagentStart` cannot block the subagent.** So ~600 ms now sits in front
+of every dispatch. The comparison that makes it tolerable is `reflect-pre`, which
+carries the same Node-startup cost on every `Edit` and `Write` and has shipped
+all release; a dispatch is orders of magnitude rarer (56 in four days here
+against 4,881 captured commands). Priced honestly too: the briefed path runs
+retrieval TWICE — the pre-check, then inside `brief()` — roughly 5% of the path
+against a ~480 ms Node floor, and the direct cost of the ordering that keeps
+`No context found` out of a fresh subagent's context. **Brought as a fact, not
+resolved: no budget covers either event.**
+
+### Deferred, with owners
+
+- **Reflex dedupe state files now proliferate per subagent** in `os.tmpdir()`
+  with no cleanup in `reflex.ts` or `gc.ts` — ~14 per project per day at this
+  repo's cited rate. NEW growth this change created. Owner: whichever story next
+  touches `reflex.ts`; recorded in `deferred-work.md`.
+- **The first-fire marker repair is forward-only.** Eleven live stores keep a
+  marker one millisecond past their first child and keep under-reporting by one,
+  silently, as a `pass`. Recorded rather than migrated.
+- **`subagent_dispatches.scope_key` is written and read by nothing**, and the
+  `!primary?.scope_key` guard costs a real miss to populate it.
+- **No `reflex-matcher` doctor row** (pre-existing gap, newly reachable).
+- **A backwards clock jump ≥ the GC window re-opens old orphans.**
+
+### What reproduced clean, and what all three layers verified
+
+The Auditor re-ran every number in the first Dev Agent Record and **all
+reproduced exactly**. Its sharpest correction stands: "27/27 KILLED describes a
+chosen anchor set, not guard coverage" — which is why round two added anchors for
+every guard the review created, and why `tool_use_id`, the shell arm token and
+the no-primary guard each gained the test they never had.
+
+Symbol-tool verifications, each naming its tool: `find_referencing_symbols(brief)`
+returns only `mcp.ts`, the barrel and `subagent-brief.ts` — no eval-harness
+caller, so the gate's zero delta is a real signal; `bookHookInjection` has exactly
+three callers, each booking correctly; `upsertMemoryItem` plus
+`certify_refs("subagent_dispatches")` confirm no `memory_items` writer, so there
+is no AD-5 obligation; `reflectMemory` uses `options.sessionId` in exactly two
+places, neither rendered. `UPDATE … RETURNING` was probed directly on
+better-sqlite3 12.8.0 and is atomic. `SCHEMA_VERSION` stays 6; AD-1, N-4 and
+`Number`-never-`parseInt` all hold.
+
+### Verification after the round
+
+- `npm run build`, `npm run lint`, `npx vitest run` → **1716 passed, 1 skipped**
+  (47 files), `npm run gate` → **9/9 at zero delta**.
+- Mutation campaign round 2 → **35/35 KILLED**, sha-proven and restored
+  byte-identically, EOL-aware. One survivor on the first pass (the no-primary
+  guard, which had only a manual probe) closed by writing the test.
+- Sandbox proof → **16/16**, now including a denied-dispatch case and a fan-out
+  driven in the MEASURED interleaving rather than the artifact ordering.
+- Byte scan → 111 files, **0 offenders**.
+- Live `doctor` → the same two expected pre-install failures, both naming
+  `cortex install`.
+- Gate 3 (`cortex install` machine-wide) still **not run**.
+
+
 ### Change Log
 
 | Date | Change |
 | --- | --- |
 | 2026-08-06 | Story created against `453e7f2`, on ACs re-based against measurement beforehand rather than discovered during implementation. Independent validation then found seven issues in the first draft, all folded in: the pairing key was rebuilt on `(session_id, prompt_id, agent_type)` — both ids were in the measured payloads, transcribed into the story, and not mined — which converts most of the refuse-to-guess machinery into a narrow, counted residual; the installer cannot currently write a second `REQUIRED_WIRING` entry on one event (`wiredElsewhere` is keyed by event name), and the "reflect-pre / reflect-prompt precedent" cited for it does not exist; both test fixtures DO need repair, the opposite of what the draft claimed; a missing `handleHookPayload` branch is type-clean and would inject reflex context into the parent; the eval-gate expectation was inverted and pre-authorised a moved gate; `logRetrieval` reinforces memory, making an auto-brief a ranking decision rather than a reporting one; and a second re-filed defect had been dropped. One AC clause (exact pairing verification via the sidecar's `toolUseId`) is now explicitly deferred to Story 5.3 rather than quietly narrowed. Status → ready-for-dev. |
 | 2026-08-07 | Dev complete. All four ACs met as amended. Two unpredicted defects found and fixed: `install`'s matcher repair would overwrite itself across two wirings on one event, and Story 5.1's first-fire marker was stamped one millisecond after the child it describes so `doctor` under-counted by one, permanently — found by the sandbox proof, not by any test. The re-filed `reflect-pre` defect was fixed rather than deferred again, and the cost the note feared did not materialise (nothing rendered depends on the session id; gate unmoved). Reinforcement, the strict `subagent_type`, and the report-don't-warn treatment of pairing ambiguity are stated decisions with their residuals recorded. 1703 tests / 1 skipped, gate 9/9 zero delta, mutation campaign 27/27 killed after strengthening one test that survived, byte scan clean across 111 files, sandbox proof 15/15 against the real rendered hook. Gate 3 (`cortex install` machine-wide) deliberately not run — it follows the three-layer review. Status → review. |
+| 2026-08-07 | THREE-LAYER REVIEW RECONCILED. Seven headline findings re-verified against the built `dist/` before any was acted on — 7/7 confirmed. TWO RULINGS (ShuromiU): (a) more than one candidate capture means SAY NOTHING — the story's FIFO premise was measured false, because the host ordering is strictly interleaved so a genuine fan-out never looks ambiguous, while FIFO was reproducibly handing a DENIED dispatch's context to the next same-type subagent (SM-C3); (b) the reflex whisper stays per participant, with its measured fan-out cost stated. THREE HIGH DEFECTS, all reproduced and fixed: the 150-token cap was not a cap (one 3,436-char note rendered 895 tokens; four documents asserted it as fact; the budget test seeded twelve SHORT notes so trimming bound first); `CORTEX_SUBAGENT_BRIEF=off` did not stop the capture, so rows accumulated and `doctor` warned forever on a deliberately configured install; and a re-fired start stole a sibling's capture, briefing one agent twice and the other never. ALSO FIXED: `matcherIsContested` reintroduced the very installer/diagnostic disagreement it was written to prevent, and its first split computed a removal then discarded it — passing its own test while changing nothing; a throwing brief consumed the row and booked no pairing; an asymmetric corrupt counter manufactured the never-paired warn; `reflect-pre` could mint a primary from a subagent's cwd; `doctor` printed "all 7 events wired" on six events; five tests asserted less than their names claimed. THE SKIPPED MEASUREMENT WAS TAKEN: `dispatch-pre` median 606.1 / p95 698.4 ms, `subagent-start` median 622.2 / p95 703.1 ms, together median 1272.8 ms per dispatch — and a fact Story 5.1's ruling did not cover, that `PreToolUse` GATES the tool call. 1716 tests, gate 9/9 zero delta, mutation campaign 35/35 killed after writing the one test a survivor exposed, sandbox 16/16 including the denied-dispatch case, byte scan clean. Status stays `review` pending ShuromiU's read; gate 3 not run. |

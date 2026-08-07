@@ -3,7 +3,7 @@ import * as crypto from 'node:crypto';
 import type { CortexStore, ParsedMemoryItem } from '../db/store.js';
 import { brief } from './brief.js';
 import { renderMemoryLine } from './render.js';
-import { retrieveMemory } from './retrieval.js';
+import { estimateTokens, retrieveMemory } from './retrieval.js';
 import { DEFAULT_SESSION_BRIEF_BUDGET } from './session-brief.js';
 
 /**
@@ -173,6 +173,57 @@ export function briefAlreadyInPrompt(
   );
 }
 
+/**
+ * Make the budget an actual ceiling.
+ *
+ * `assembleBudgeted` keeps the FIRST evidence line unconditionally — its guard
+ * is `if (included > 0 && used + cost > budget) break`, so the guard cannot
+ * engage on line one — and `renderMemoryLine` does not truncate a note's text.
+ * One long note therefore produces an arbitrarily large brief. Reproduced in
+ * review: a single 3,436-character `note:decision` rendered **895 tokens against
+ * a budget of 150**, injected automatically into every matching subagent. The
+ * existing budget test could not see it, because it seeds twelve SHORT notes so
+ * trimming binds before any single line does — "a cap above the seeded content
+ * is decoration", in a new shape.
+ *
+ * Enforced HERE rather than in `assembleBudgeted`, deliberately. That function is
+ * shared with `recall`, `cortex_brief` and the session brief, all of which are
+ * pulled by an agent that asked for them and can ask for less; this is the only
+ * surface that PUSHES unprompted into a context nobody chose. Changing the
+ * shared one would also move the locked eval baselines for a reason that has
+ * nothing to do with retrieval quality.
+ *
+ * Whole lines are kept while they fit, so the result is never a fragment of a
+ * sentence — unless even the first line is too long, in which case it is cut and
+ * marked, because a cap that yields nothing is not a brief.
+ */
+export function enforceBriefBudget(text: string, budget: number): string {
+  if (text.length === 0 || estimateTokens(text) <= budget) {
+    return text;
+  }
+
+  const lines = text.split('\n');
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    const cost = estimateTokens(line) + (kept.length > 0 ? 1 : 0);
+    if (kept.length > 0 && used + cost > budget) {
+      break;
+    }
+    kept.push(line);
+    used += cost;
+  }
+
+  if (kept.length > 1 || estimateTokens(kept[0] ?? '') <= budget) {
+    return kept.join('\n');
+  }
+
+  // `estimateTokens` is `ceil(length / 4)`, so this is the largest prefix that
+  // still prices inside the budget once the ellipsis is counted.
+  const maxChars = Math.max(1, budget * 4 - 1);
+  return `${(kept[0] ?? '').slice(0, maxChars).trimEnd()}…`;
+}
+
 export interface SubagentBriefOptions {
   /**
    * The dispatch DESCRIPTION, not the prompt. The description is the
@@ -245,9 +296,10 @@ export function buildSubagentBrief(
     return { text: '', matched: retrieval.results.length, suppressed: true };
   }
 
-  const text = brief(store, topic, options.agentType, {
-    budget: options.budget ?? SUBAGENT_BRIEF_BUDGET,
-    limit,
-  });
+  const budget = options.budget ?? SUBAGENT_BRIEF_BUDGET;
+  const text = enforceBriefBudget(
+    brief(store, topic, options.agentType, { budget, limit }),
+    budget,
+  );
   return { text, matched: retrieval.results.length, suppressed: false };
 }

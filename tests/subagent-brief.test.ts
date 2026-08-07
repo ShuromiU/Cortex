@@ -13,6 +13,7 @@ import {
   SUBAGENT_BRIEF_BUDGET,
   SUBAGENT_BRIEF_ENV,
   briefAlreadyInPrompt,
+  enforceBriefBudget,
   buildSubagentBrief,
   dispatchCutoff,
   dispatchHorizonSeconds,
@@ -90,7 +91,7 @@ describe('subagent dispatch pairing', () => {
     const { store } = createTestStore();
     const row = capture(store);
 
-    const claimed = store.consumeSubagentDispatch(key(), OPEN_HORIZON);
+    const claimed = store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'a1');
     expect(claimed?.id).toBe(row.id);
     expect(claimed?.description).toBe('trace the read ledger');
     expect(store.getSubagentDispatch(row.id)?.consumedAt).not.toBeNull();
@@ -102,7 +103,7 @@ describe('subagent dispatch pairing', () => {
     const { store } = createTestStore();
     capture(store, { hostSessionId: 'host-2' });
 
-    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON)).toBeUndefined();
+    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'a1')).toBeUndefined();
   });
 
   it('does not claim a capture from an earlier turn', () => {
@@ -111,21 +112,21 @@ describe('subagent dispatch pairing', () => {
     const { store } = createTestStore();
     capture(store, { promptId: 'prompt-0' });
 
-    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON)).toBeUndefined();
+    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'a1')).toBeUndefined();
   });
 
   it('does not claim a capture for a different agent type', () => {
     const { store } = createTestStore();
     capture(store, { agentType: 'Plan' });
 
-    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON)).toBeUndefined();
+    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'a1')).toBeUndefined();
   });
 
-  it('claims the OLDEST capture when several match, and reports the ambiguity', () => {
-    // N same-type agents dispatched in one assistant message share the whole
-    // key, so only dispatch order separates them. FIFO over silence, because
-    // refusing here would silence exactly the fan-out where briefing is worth
-    // most — and the count is what makes the assumption checkable.
+  it('claims the OLDEST capture when several match', () => {
+    // The STORE still claims oldest-first; the REFUSAL when several match is a
+    // hook-level rule (ruling, ShuromiU, 2026-08-07), so this pins the ordering the
+    // hook depends on when it does claim. Sequential claims by distinct agents
+    // are the shape a drained queue takes.
     const { store } = createTestStore();
     const first = capture(store, {
       description: 'first dispatch',
@@ -137,22 +138,22 @@ describe('subagent dispatch pairing', () => {
     });
 
     expect(store.countPendingSubagentDispatches(key(), OPEN_HORIZON)).toBe(2);
-    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON)?.id).toBe(first.id);
+    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'a1')?.id).toBe(first.id);
     expect(store.countPendingSubagentDispatches(key(), OPEN_HORIZON)).toBe(1);
-    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON)?.id).toBe(second.id);
+    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'a2')?.id).toBe(second.id);
     expect(store.countPendingSubagentDispatches(key(), OPEN_HORIZON)).toBe(0);
   });
 
   it('breaks a same-millisecond tie by insert order rather than at random', () => {
-    // FIFO is the whole basis for the fan-out residual, and two captures written
-    // in the same millisecond are ordinary — a `captured_at`-only ordering would
-    // make which subagent got which brief depend on SQLite's row order.
+    // Two captures written in the same millisecond are ordinary, and a
+    // `captured_at`-only ordering would make which capture is claimed depend on
+    // SQLite's row order.
     const { store } = createTestStore();
     const stamp = '2026-08-06T10:00:00.000Z';
     const first = capture(store, { description: 'alpha', capturedAt: stamp });
     capture(store, { description: 'bravo', capturedAt: stamp });
 
-    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON)?.id).toBe(first.id);
+    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'a1')?.id).toBe(first.id);
   });
 
   it('refuses a capture older than the pairing horizon', () => {
@@ -163,7 +164,33 @@ describe('subagent dispatch pairing', () => {
 
     const cutoff = '2026-08-06T09:55:00.000Z';
     expect(store.countPendingSubagentDispatches(key(), cutoff)).toBe(0);
-    expect(store.consumeSubagentDispatch(key(), cutoff)).toBeUndefined();
+    expect(store.consumeSubagentDispatch(key(), cutoff, 'a1')).toBeUndefined();
+  });
+
+  it('refuses a second claim by an agent that already has one', () => {
+    // ONE SUBAGENT, ONE CAPTURE. `SubagentStart` can fire more than once for a
+    // single agent id, and the claim is otherwise per-CAPTURE — reproduced in
+    // review: alpha briefed twice (the second time with bravo's topic), bravo
+    // silent, both injections billed to alpha.
+    const { store } = createTestStore();
+    capture(store, { description: 'alpha work', capturedAt: '2026-08-06T10:00:00.000Z' });
+    capture(store, { description: 'bravo work', capturedAt: '2026-08-06T10:00:01.000Z' });
+
+    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'agent-a')?.description).toBe(
+      'alpha work',
+    );
+    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'agent-a')).toBeUndefined();
+    // And the sibling's capture is still there for the sibling.
+    expect(store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'agent-b')?.description).toBe(
+      'bravo work',
+    );
+  });
+
+  it('records which agent consumed a capture', () => {
+    const { store } = createTestStore();
+    const row = capture(store);
+    store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'agent-zed');
+    expect(store.getSubagentDispatch(row.id)?.consumedByAgentId).toBe('agent-zed');
   });
 
   it('hands one capture to exactly one claimant', () => {
@@ -173,8 +200,8 @@ describe('subagent dispatch pairing', () => {
     const { store } = createTestStore();
     capture(store);
 
-    const first = store.consumeSubagentDispatch(key(), OPEN_HORIZON);
-    const second = store.consumeSubagentDispatch(key(), OPEN_HORIZON);
+    const first = store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'a1');
+    const second = store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'a2');
 
     expect(first).toBeDefined();
     expect(second).toBeUndefined();
@@ -185,8 +212,8 @@ describe('subagent dispatch pairing', () => {
     const row = capture(store);
     const claimedAt = '2026-08-06T10:00:05.000Z';
 
-    store.consumeSubagentDispatch(key(), OPEN_HORIZON, claimedAt);
-    store.consumeSubagentDispatch(key(), OPEN_HORIZON, '2026-08-06T10:00:06.000Z');
+    store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'a1', claimedAt);
+    store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'a2', '2026-08-06T10:00:06.000Z');
 
     // The first claim's stamp survives: replay produces identical state.
     expect(store.getSubagentDispatch(row.id)?.consumedAt).toBe(claimedAt);
@@ -343,6 +370,48 @@ describe('buildSubagentBrief', () => {
     // The budget genuinely binds here — the unbudgeted render is larger.
     expect(estimateTokens(unbudgeted.text)).toBeGreaterThan(SUBAGENT_BRIEF_BUDGET);
     expect(estimateTokens(result.text)).toBeLessThanOrEqual(SUBAGENT_BRIEF_BUDGET);
+  });
+
+  it('caps a SINGLE oversized memory, which the twelve-note fixture cannot catch', () => {
+    // The defect the review found and the twelve-short-notes test could not see.
+    // `assembleBudgeted` keeps the FIRST evidence line unconditionally — its
+    // guard is `included > 0 && …`, so it cannot engage on line one — and
+    // `renderMemoryLine` does not truncate a note's text. Measured before the
+    // fix: one 3,436-character note rendered 895 tokens against a budget of 150.
+    const { store, sessionId } = createTestStore();
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'read ledger',
+      content: `The read ledger decision. ${'unchanged-since is verified by re-hashing the file contents rather than trusting mtime, and a read by a sibling session is attributed rather than claimed. '.repeat(22)}`,
+    });
+
+    const result = buildSubagentBrief(store, {
+      description: 'read ledger unchanged-since re-hashing',
+      agentType: 'Explore',
+    });
+
+    expect(result.text).not.toBe('');
+    // MUTATION ANCHOR: removing the `enforceBriefBudget` call in
+    // `buildSubagentBrief` must turn this red.
+    expect(estimateTokens(result.text)).toBeLessThanOrEqual(SUBAGENT_BRIEF_BUDGET);
+  });
+
+  it('keeps whole lines while they fit, and marks a cut it had to make', () => {
+    expect(enforceBriefBudget('', 150)).toBe('');
+    expect(enforceBriefBudget('short', 150)).toBe('short');
+
+    // Three lines, budget for roughly one: whole lines survive, no fragment.
+    const lines = ['a'.repeat(40), 'b'.repeat(40), 'c'.repeat(40)].join('\n');
+    const trimmed = enforceBriefBudget(lines, 12);
+    expect(trimmed).toBe('a'.repeat(40));
+    expect(estimateTokens(trimmed)).toBeLessThanOrEqual(12);
+
+    // A single line too long for the budget is cut and marked, because a cap
+    // that yields nothing is not a brief.
+    const cut = enforceBriefBudget('z'.repeat(400), 10);
+    expect(cut.endsWith('…')).toBe(true);
+    expect(estimateTokens(cut)).toBeLessThanOrEqual(10);
   });
 
   it('reinforces the memory it delivered, and nothing when it delivered none', () => {
@@ -510,7 +579,7 @@ describe('pruneSubagentDispatches via runGc', () => {
   it('keeps a capture inside the horizon, consumed or not', () => {
     const { store } = createTestStore();
     const recent = capture(store, at('2026-08-06T09:00:00.000Z'));
-    store.consumeSubagentDispatch(key(), OPEN_HORIZON);
+    store.consumeSubagentDispatch(key(), OPEN_HORIZON, 'a1');
     expect(store.getSubagentDispatch(recent.id)?.consumedAt).not.toBeNull();
 
     const report = runGc(store.db, {
@@ -559,6 +628,6 @@ describe('pruneSubagentDispatches via runGc', () => {
     expect(report.subagent_dispatches.deleted, 'GC is not the correctness bound').toBe(0);
 
     const cutoff = dispatchCutoff(new Date('2026-08-06T09:06:00.000Z'), 300);
-    expect(store.consumeSubagentDispatch(key(), cutoff)).toBeUndefined();
+    expect(store.consumeSubagentDispatch(key(), cutoff, 'a1')).toBeUndefined();
   });
 });
