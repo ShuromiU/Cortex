@@ -8,7 +8,10 @@ Status: ready-for-dev
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
-> **BLOCKING PREREQUISITE: Story 5.2 must ship first.** At this baseline 5.2 is specified but
+> **~~BLOCKING PREREQUISITE: Story 5.2 must ship first.~~ SATISFIED 2026-08-07** — 5.2 is `done`,
+> reviewed and installed machine-wide (`b3ebebd`, `195eec4`, `f73aac2`). Everything below marked
+> "5.2 will…" was written BEFORE 5.2 existed; the 2026-08-07 re-check note in Dev Notes records
+> which predictions held and which did not. Original text: at this baseline 5.2 was specified but
 > not implemented. This story's Task 1 depends on 5.2's `wiredElsewhere` fix and its fixture
 > repair, and Task 5 closes an audit 5.2 defers. Do not start until 5.2 is `done`.
 
@@ -181,10 +184,10 @@ Story 5.1's Appendix A carries the full `SubagentStop` key set. The parts this s
 
 - [ ] **Task 1 — Wire `SubagentStop`** (AC: #1)
   - [ ] New `subagent-stop` action; a new arm in `hooks/claude/cortex-subagent.sh`'s `case`; a `handleHookPayload` branch.
-  - [ ] **The branch is not optional and a test must prove it.** `handleHookPayload` ends in `return reflectFromPayload(...)` with no exhaustive `switch` and no `never` guard, and `main()` casts `argv[2]` unchecked — so adding the union member without the branch **compiles cleanly** and routes every subagent completion into the reflex path. Assert `subagent-stop` returns `''`. This is the second instance of the trap (5.2 has the first, for `dispatch-pre`) — write one shared test over every `HookAction` member rather than a third one-off.
-  - [ ] New `REQUIRED_WIRING` entry. `SubagentStop` is a genuinely **new event**, so it escapes the `wiredElsewhere`-keyed-by-event defect 5.2 fixes — `install.ts` skips by event key and `doctor`'s `missingWiring` discriminates on `entry.event`, so a second entry sharing `cortex-subagent.sh` under a different event is unambiguous.
+  - [ ] **The branch is not optional and a test must prove it.** `handleHookPayload` ends in `return reflectFromPayload(...)` with no exhaustive `switch` and no `never` guard, and `main()` casts `argv[2]` unchecked — so adding the union member without the branch **compiles cleanly** and routes every subagent completion into the reflex path. Assert `subagent-stop` returns `''`. This is the second instance of the trap (5.2 has the first, for `dispatch-pre`). *Confirmed 2026-08-07: 5.2 did NOT build the shared test — its coverage is a `dispatch-pre`-specific case in `tests/hook-entry.test.ts`.* So this story owns it: **one test that iterates every `HookAction` member** and asserts each returns what its branch promises, retro-fitting `dispatch-pre` and `subagent-start` into it rather than adding a third one-off.
+  - [ ] New `REQUIRED_WIRING` entry. *Corrected 2026-08-07 against shipped 5.2 — the conclusion holds, the reason given here did not.* `install.ts` no longer skips by event key: 5.2 re-keyed `wiredElsewhere` on `wiringKey(required)` (event **plus** `action ?? script ?? token`), so entries are discriminated by action everywhere, and `SubagentStop` is unambiguous for a stronger reason than the one originally written. Two consequences for this task: give the entry an explicit `action: 'subagent-stop'` with **no** `actionOptionalUnless` — that action token is what tells it apart from its two siblings on `cortex-subagent.sh` — and add its key to the `wiringKey` collision test 5.2 added to `tests/install.test.ts`.
   - [ ] **This hook can block a subagent.** Emit nothing, exit 0 unconditionally, and swallow every error **inside the action** rather than relying on `main()`, which rethrows anything that is not `UnopenableStoreError`. Honour `stop_hook_active` — return success while it is true, per the host's own guidance.
-  - [ ] Both fixtures (`tests/doctor.test.ts`'s `buildFixture`, `tests/cli.test.ts`'s `seedSandboxHome`) hand-write their hooks object and fail on a new wiring entry. 5.2 needs the same repair; if it made them derive from `REQUIRED_WIRING`, confirm — do not repeat.
+  - [ ] **Fixtures: ANSWERED, do not repeat.** 5.2 made both derive from `REQUIRED_WIRING` — `healthyWiring` in `tests/doctor.test.ts` and the loop in `tests/cli.test.ts`’s `seedSandboxHome`, each carrying the matcher its wiring declares. A new entry is picked up automatically. Confirm it, and confirm the third derived fixture 5.2 added: `tests/capture-hook.test.ts` asserts the script’s `case` arms are EXACTLY the actions `REQUIRED_WIRING` points at `cortex-subagent.sh`, and that each arm passes its OWN token to Node — so a new arm without a wiring entry, or vice versa, fails there.
 
 - [ ] **Task 2 — Capture the conclusion as an episode on the child** (AC: #1)
   - [ ] Resolve the child by `(scope_key, agent_id)` and **handle the recorded hazard**: `getSessionByAgentId` filters by neither parent nor status, deliberately (Story 0.2 AC #3 requires a child to stay findable after its parent ends). `deferred-work.md` records this reproduced — *"a re-fire for a recycled `agent_id` after the session tree ended lands on the ended child"* — and the same property caused a HIGH defect in 5.1, where a reused child back-dated the first-fire marker. Decide what happens when the resolved child is `ended` or belongs to a previous primary, and say so.
@@ -219,7 +222,7 @@ Story 5.1's Appendix A carries the full `SubagentStop` key set. The parts this s
 - [ ] **Task 5 — Close Story 5.2's deferred pairing audit** (AC: #1)
   - [ ] At `SubagentStop` the per-agent sidecar exists and its `toolUseId` equals the `PreToolUse.tool_use_id` 5.2 recorded. Compare them; record agreement or disagreement.
   - [ ] Read the sidecar defensively — host-internal, undocumented, derived path. If it cannot be read, record **nothing** and report nothing: an absent audit is not a failed audit, and conflating them produces the false-alarm class 5.1's review found twice.
-  - [ ] Surface the mispairing count where 5.1's and 5.2's counters live, under the same rules: conditional, silent until there is something to say, `warn` never `fail`, no flapping on a healthy install.
+  - [ ] Surface the mispairing count where 5.1’s and 5.2’s counters live, under the same rules — and *those rules grew during 5.2’s review (2026-08-07), so inherit the current set, not the one written here*: conditional, silent until there is something to say, `warn` never `fail`, no flapping on a healthy install, **an expected-but-safe outcome is REPORTED and never warned on** (5.2’s refusal count — warning on the design working as ruled is the cries-wolf half of AD-12), and **a corrupt counter must not manufacture a warn** (`readMetaCount` returns a `corrupt` flag; a valid capture count beside an unparseable paired count read as "captured, never paired" and invented a fault out of corruption). A mispairing count is the one number here that genuinely SHOULD warn — say why it differs from the refusal count.
 
 - [ ] **Task 6 — Delete `promoteSubagentNotes`** (AC: #2)
   - [ ] **Recommended disposition: delete it.** It has zero runtime callers (`find_referencing_symbols`: only the `src/index.ts` barrel), it **mutates** — re-activating an arbitrary prior same-kind, same-subject parent note via `Array.prototype.find` over `getNotesBySession`, which returns all statuses — and AC #2 mandates the non-mutating path, so this story must not give it a caller. Keeping it means maintaining dead code that contradicts the AC it sits next to.
@@ -257,6 +260,35 @@ Story 5.1's Appendix A carries the full `SubagentStop` key set. The parts this s
 
 ## Dev Notes
 
+### Re-checked against shipped 5.2 (2026-08-07)
+
+This story was written on 2026-08-06 against `0c60aa4`, **before 5.2 existed**, so every
+statement about 5.2 was a prediction. 5.2 then changed materially in review. Re-checked
+against the shipped code; the delta is small and none of it is design-breaking, which is the
+point of doing this before building rather than during.
+
+| Prediction | Verdict |
+|---|---|
+| `wiredElsewhere` is keyed by event | **Stale.** 5.2 re-keyed it on `wiringKey` (event + `action ?? script ?? token`). Conclusion unchanged, reason corrected in Task 1. |
+| Both test fixtures hand-write their hooks and need repair | **Answered.** 5.2 derives both from `REQUIRED_WIRING`, plus a third derived fixture over the script’s `case` arms. Confirm, do not repeat. |
+| 5.2 wrote a shared test over every `HookAction` member | **False.** 5.2’s coverage is `dispatch-pre`-specific. This story owns the shared test. |
+| The doctor counter rules are 5.1’s | **Incomplete.** 5.2’s review added report-don’t-warn for expected-but-safe outcomes and corrupt-counter suppression. |
+| `collectEvidence` never reads `last_assistant_message` | **Holds** — still absent from `src/query/suggest-notes.ts`, so finding #3’s ordering requirement stands. |
+| `endOfTurn` already walks `getSessionTreeIds`, so do not add a second caller | **Holds** — exactly one occurrence in `src/transports/hook-entry.ts`. |
+| `promoteSubagentNotes` is dormant | **Holds** — still at `src/capture/consolidate.ts`, no runtime caller. |
+
+**Two things 5.2 leaves that this story should treat as precedent, not re-derive.**
+(1) A design premise that rests on an event ORDERING must be proven against the MEASURED
+ordering: 5.2’s FIFO justification survived a whole build because its test and its sandbox
+driver both encoded an ordering the host does not use. (2) A budget or size test seeded with
+many small items cannot see a cap that fails on ONE large item — 5.2’s 150-token cap was not a
+cap, and its test could not tell.
+
+**Open and NOT closed by this story:** no budget covers `SubagentStart`, `dispatch-pre`, or the
+`SubagentStop` hook this story adds. 5.2 measured its two (median 606.1 and 622.2 ms, together
+1272.8 ms per dispatch) and raised a fact Story 5.1’s ruling did not cover — `PreToolUse` gates
+the tool call. This story adds a third per-dispatch spawn on an event that CAN block a
+subagent. Measure it and bring the number; do not invent a ceiling.
 ### What 5.1 and 5.2 leave for this story
 
 5.1 wired `SubagentStart`, created the child session at dispatch, and left the script's `case`
