@@ -1,0 +1,48 @@
+{
+  "_comment": "AD-5 lock for episode:subagent_conclusion (FR-19, Story 5.3). Two properties, both of which the kind's weighting was chosen to produce and either of which would break silently: a subagent's conclusion must be RETRIEVABLE on its own topic — it is the whole product of a dispatch and must not sink below the raw command noise from the same run — and it must NOT outrank a decision the user authored on the same subject, because a conclusion is one agent's read of a task while a decision is a commitment somebody made. episodeState and episodeImportance in src/memory/items.ts both fall through to warm/0.6 with no error and no gate failure, so a kind that forgets to register there ships mis-ranked and nothing reports it; this suite is what turns that into a red build.",
+  "seed": {
+    "scope": { "type": "branch", "key": "eval/subagent-conclusion" },
+    "focus": "retry backoff",
+    "items": [
+      {
+        "id": "backoff-conclusion",
+        "kind": "episode:subagent_conclusion",
+        "subject": "retry backoff",
+        "text": "Investigated the retry backoff path end to end. The exponential retry backoff never reaches its ceiling because the attempt counter resets inside the catch block, so every failure restarts at the base delay.",
+        "state": "hot",
+        "importance": 0.75,
+        "age_days": 0
+      },
+      {
+        "id": "backoff-cmd-run",
+        "kind": "command_run",
+        "subject": null,
+        "text": "Command (test): npm test -- retry backoff ceiling (exit 1)",
+        "state": "warm",
+        "importance": 0.6,
+        "age_days": 0
+      },
+      {
+        "id": "backoff-decision",
+        "kind": "note:decision",
+        "subject": "retry ceiling",
+        "text": "Decision: the retry ceiling stays at sixty seconds and is enforced by the caller, not by the retry helper.",
+        "state": "hot",
+        "importance": 2.5,
+        "age_days": 4
+      }
+    ]
+  },
+  "fixtures": [
+    {
+      "topic": "retry backoff attempt counter",
+      "expected_top": "backoff-conclusion",
+      "allowed": ["backoff-cmd-run"]
+    },
+    {
+      "topic": "retry ceiling enforced by the caller",
+      "expected_top": "backoff-decision",
+      "allowed": ["backoff-conclusion"]
+    }
+  ]
+}

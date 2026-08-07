@@ -35,6 +35,10 @@ import {
   subagentBriefEnabled,
   summarizeDispatchPrompt,
 } from '../query/subagent-brief.js';
+import {
+  recordSubagentConclusion,
+  resolveConclusionText,
+} from '../query/subagent-conclusion.js';
 import { configureEngagementPath, readEngagement, writeEngagement } from './mcp.js';
 
 const CORTEX_CONSULTED_KEY = 'cortex_consulted';
@@ -73,16 +77,32 @@ function toHookJson(
   });
 }
 
-export type HookAction =
-  | 'post'
-  | 'reflect-prompt'
-  | 'reflect-pre'
-  | 'reflect-edit'
-  | 'reflect-cmd'
-  | 'reflect-agent'
-  | 'dispatch-pre'
-  | 'subagent-start'
-  | 'end-of-turn';
+/**
+ * Every action the bridge accepts, as a runtime VALUE.
+ *
+ * A bare union exists only at compile time, and this function's dispatch is a
+ * chain of `if`s with no exhaustive `switch` and no `never` guard — so a new
+ * member without its branch compiles cleanly and falls through to the reflex
+ * path. That trap has now been hit twice (`dispatch-pre` in Story 5.2,
+ * `subagent-stop` here), and each time the only thing standing between it and
+ * production was a hand-written per-action test somebody remembered to add.
+ * Deriving the type FROM the array lets one test iterate every member, so the
+ * third instance is caught by a test nobody has to remember to write.
+ */
+export const HOOK_ACTIONS = [
+  'post',
+  'reflect-prompt',
+  'reflect-pre',
+  'reflect-edit',
+  'reflect-cmd',
+  'reflect-agent',
+  'dispatch-pre',
+  'subagent-start',
+  'subagent-stop',
+  'end-of-turn',
+] as const;
+
+export type HookAction = (typeof HOOK_ACTIONS)[number];
 
 export interface HookRuntimeOptions {
   sessionId?: string;
@@ -694,6 +714,103 @@ function renderSubagentBrief(
   return toHookJson('SubagentStart', result.text);
 }
 
+/**
+ * `SubagentStop` (FR-19, Story 5.3): record what the subagent concluded, so a
+ * long investigation leaves more behind than one paragraph in a context that is
+ * about to be discarded.
+ *
+ * **This is the one hook in the epic that can damage a run.** The host
+ * dispatches `hook_blocking_error` for `Stop` and `SubagentStop`, so an escaping
+ * throw does not merely make noise — it can stop a subagent finishing. Every
+ * failure is swallowed HERE rather than in `main()`, which rethrows anything
+ * that is not `UnopenableStoreError`, and the function returns `void` because
+ * there is nothing this path may ever say.
+ *
+ * `stop_hook_active` is honoured per the host's own operator guidance: while it
+ * is true the host is already re-running a stopped agent, and doing the work
+ * again would double-write the conclusion.
+ */
+function subagentStop(
+  store: CortexStore,
+  payload: Record<string, unknown>,
+  cwd: string,
+): void {
+  try {
+    if (payload['stop_hook_active'] === true) {
+      return;
+    }
+    captureConclusion(store, payload, cwd);
+  } catch {
+    // AD-12 / N-3, and harder here than anywhere else in this epic: a throw that
+    // reaches the host on this event is dispatched as a blocking error. A lost
+    // conclusion is a miss; a blocked subagent is the user's work broken.
+  }
+}
+
+/**
+ * Resolve the child this stop belongs to and record its conclusion.
+ *
+ * **The child is required to be parented to the ACTIVE primary, and that is a
+ * decision, not an oversight.** `getSessionByAgentId` filters by neither parent
+ * nor status — deliberately, because Story 0.2 AC #3 requires a child to stay
+ * findable after its parent ends — so a recycled `agent_id` resolves to a row
+ * from an earlier conversation. `deferred-work.md` records that reproduced, and
+ * the same property produced a HIGH defect in Story 5.1 where a reused child
+ * back-dated the first-fire marker. Writing this run's conclusion onto a
+ * previous conversation's child would attach it to a timeline it did not happen
+ * in, and the Stop nudge — which walks the CURRENT tree — would never surface it
+ * anyway. So a mismatch records nothing.
+ *
+ * Status is deliberately NOT checked: a child can be ended by `endSessionTree`
+ * while its subagent is still finishing, and an ended child of the current
+ * primary is still the right row. The cost of the parent check is a miss when
+ * the primary genuinely rotated mid-run (a branch switch), which is the safe
+ * direction.
+ */
+function captureConclusion(
+  store: CortexStore,
+  payload: Record<string, unknown>,
+  cwd: string,
+): void {
+  void cwd;
+  const identity = agentIdentity(payload);
+  if (!identity.agentId) {
+    return;
+  }
+
+  const primary = store.getCurrentSession();
+  if (!primary?.scope_key) {
+    return;
+  }
+
+  const child = store.getSessionByAgentId(primary.scope_key, identity.agentId);
+  if (!child || child.parent_session_id !== primary.id) {
+    return;
+  }
+
+  const conclusion = resolveConclusionText(
+    firstString(payload['last_assistant_message'], payload['lastAssistantMessage']),
+    firstString(payload['agent_transcript_path'], payload['agentTranscriptPath']),
+  );
+  if (!conclusion) {
+    return;
+  }
+
+  recordSubagentConclusion(store, {
+    child,
+    conclusion,
+    ...(identity.agentType ? { agentType: identity.agentType } : {}),
+    ...(firstString(payload['agent_transcript_path'], payload['agentTranscriptPath'])
+      ? {
+          transcriptPath: firstString(
+            payload['agent_transcript_path'],
+            payload['agentTranscriptPath'],
+          ) as string,
+        }
+      : {}),
+  });
+}
+
 function truncateSuggestion(text: string, maxChars = 140): string {
   const collapsed = text.replace(/\s+/g, ' ').trim();
   return collapsed.length <= maxChars
@@ -916,6 +1033,11 @@ export function handleHookPayload(
 
   if (action === 'subagent-start') {
     return subagentStart(store, payload, cwd);
+  }
+
+  if (action === 'subagent-stop') {
+    subagentStop(store, payload, cwd);
+    return '';
   }
 
   if (action === 'end-of-turn') {

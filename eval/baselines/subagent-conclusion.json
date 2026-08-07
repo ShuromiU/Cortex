@@ -1,0 +1,218 @@
+{
+  "quality": {
+    "fixtures": [
+      {
+        "topic": "retry backoff attempt counter",
+        "expected_top": "backoff-conclusion",
+        "top_result_id": "backoff-conclusion",
+        "top1_hit": true,
+        "recall_at_3": 1,
+        "noise_count": 0,
+        "stale_count": 0,
+        "output": {
+          "chars": 529,
+          "est_tokens": 133,
+          "preview": "Most relevant — Subagent conclusion [retry backoff] (today, no file refs)\nSubagent conclusion: [retry backoff] Investigated the retry backoff path end to end. The exponential retry backoff never reaches its ceiling because the attempt counter resets inside the catch block, so every failure restarts at the base delay.\nD"
+        },
+        "token_budget": {
+          "max_tokens": null,
+          "actual_tokens": 133,
+          "passed": true
+        },
+        "output_assertions": {
+          "contains_missed": [],
+          "excludes_violated": [],
+          "passed": true
+        },
+        "score_breakdown": [
+          {
+            "id": "backoff-conclusion",
+            "subject": "retry backoff",
+            "text_preview": "Investigated the retry backoff path end to end. The exponential retry backoff never reaches its ceiling because the attempt counter resets inside the catch bloc",
+            "scores": {
+              "retrieval_score": 36.932381934636545,
+              "lexical_score": 19.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2.4,
+              "recency_bonus": 2.2,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 4,
+              "exact_phrase": false,
+              "fts_rank": -1.0361465495228277
+            }
+          },
+          {
+            "id": "backoff-decision",
+            "subject": "retry ceiling",
+            "text_preview": "Decision: the retry ceiling stays at sixty seconds and is enforced by the caller, not by the retry helper.",
+            "scores": {
+              "retrieval_score": 29.499998273143223,
+              "lexical_score": 6,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0,
+              "token_hits": 1,
+              "exact_phrase": false,
+              "fts_rank": -0.000001988119312436805
+            }
+          },
+          {
+            "id": "backoff-cmd-run",
+            "subject": null,
+            "text_preview": "Command (test): npm test -- retry backoff ceiling (exit 1)",
+            "scores": {
+              "retrieval_score": 22.899997362886765,
+              "lexical_score": 7.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 1.2,
+              "recency_bonus": 2.2,
+              "hotness_bonus": 1.2,
+              "access_bonus": 0,
+              "token_hits": 2,
+              "exact_phrase": false,
+              "fts_rank": -0.0000030360934182590236
+            }
+          }
+        ],
+        "passed": true
+      },
+      {
+        "topic": "retry ceiling enforced by the caller",
+        "expected_top": "backoff-decision",
+        "top_result_id": "backoff-decision",
+        "top1_hit": true,
+        "recall_at_3": 1,
+        "noise_count": 0,
+        "stale_count": 0,
+        "output": {
+          "chars": 519,
+          "est_tokens": 130,
+          "preview": "Most relevant — Decision [retry ceiling] (4d ago, no file refs)\nDecision [2026-08-03 20:34Z]: [retry ceiling] the retry ceiling stays at sixty seconds and is enforced by the caller, not by the retry helper.\nSubagent conclusion: [retry backoff] Investigated the retry backoff path end to end. The exponential retry backof"
+        },
+        "token_budget": {
+          "max_tokens": null,
+          "actual_tokens": 130,
+          "passed": true
+        },
+        "output_assertions": {
+          "contains_missed": [],
+          "excludes_violated": [],
+          "passed": true
+        },
+        "score_breakdown": [
+          {
+            "id": "backoff-decision",
+            "subject": "retry ceiling",
+            "text_preview": "Decision: the retry ceiling stays at sixty seconds and is enforced by the caller, not by the retry helper.",
+            "scores": {
+              "retrieval_score": 40.941157446505976,
+              "lexical_score": 18,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 3.4,
+              "recency_bonus": 1.4,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0.15,
+              "token_hits": 4,
+              "exact_phrase": false,
+              "fts_rank": -1.2616285440154171
+            }
+          },
+          {
+            "id": "backoff-conclusion",
+            "subject": "retry backoff",
+            "text_preview": "Investigated the retry backoff path end to end. The exponential retry backoff never reaches its ceiling because the attempt counter resets inside the catch bloc",
+            "scores": {
+              "retrieval_score": 28.699997470975557,
+              "lexical_score": 10.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 2.4,
+              "recency_bonus": 2.2,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0.15,
+              "token_hits": 2,
+              "exact_phrase": false,
+              "fts_rank": -0.0000029116512246661365
+            }
+          },
+          {
+            "id": "backoff-cmd-run",
+            "subject": null,
+            "text_preview": "Command (test): npm test -- retry backoff ceiling (exit 1)",
+            "scores": {
+              "retrieval_score": 24.049997362886764,
+              "lexical_score": 7.5,
+              "temporal_bonus": 0,
+              "scope_bonus": 6,
+              "kind_bonus": 1.2,
+              "recency_bonus": 2.2,
+              "hotness_bonus": 2.2,
+              "access_bonus": 0.15,
+              "token_hits": 2,
+              "exact_phrase": false,
+              "fts_rank": -0.0000030360934182590236
+            }
+          }
+        ],
+        "passed": true
+      }
+    ],
+    "top1_hit": 1,
+    "recall_at_3": 1,
+    "noise_count": 0,
+    "stale_count": 0,
+    "output_tokens": 263
+  },
+  "generated_at": "2026-08-07T20:34:01.470Z",
+  "schema_version": 6,
+  "tables": {
+    "sessions": 1,
+    "events": 0,
+    "notes": 0,
+    "state": 0,
+    "token_ledger": 0,
+    "command_runs": 0,
+    "episodes": 0,
+    "branch_snapshots": 0,
+    "project_snapshots": 0,
+    "memory_items": 3,
+    "memory_item_semantics": 0,
+    "current_app_graphs": 0,
+    "memory_references": 0,
+    "retrieval_log": 2,
+    "file_renames": 0,
+    "content_digests": 0
+  },
+  "header": {
+    "chars": 731,
+    "est_tokens": 183,
+    "preview": "Cortex: retry backoff | 1 session on project\nHot: Decision [2026-08-03 20:34Z]: [retry ceiling] the retry ceiling stays at sixty seconds and is enforced by the…\nCortex is ambient: prior context may surface automatically as short reflex whispers on focus shifts.\nConsult Cortex before non-trivial familiar or resumed work"
+  },
+  "full_state": {
+    "chars": 155,
+    "est_tokens": 39,
+    "preview": "Decisions:\n- Decision [2026-08-03 20:34Z]: [retry ceiling] the retry ceiling stays at sixty seconds and is enforced by the caller, not by the retry helper."
+  },
+  "session_brief": {
+    "chars": 186,
+    "est_tokens": 47,
+    "preview": "Cortex memory (project):\n- [4d ago] decision: [retry ceiling] the retry ceiling stays at sixty seconds and is enforced by the caller, not by the retry helper.\nMore: cortex_recall(topic)."
+  },
+  "topics": [
+    {
+      "topic": "retry backoff",
+      "output": {
+        "chars": 529,
+        "est_tokens": 133,
+        "preview": "Most relevant — Subagent conclusion [retry backoff] (today, no file refs)\nSubagent conclusion: [retry backoff] Investigated the retry backoff path end to end. The exponential retry backoff never reaches its ceiling because the attempt counter resets inside the catch block, so every failure restarts at the base delay.\nC"
+      }
+    }
+  ]
+}

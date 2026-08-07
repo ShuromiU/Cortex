@@ -11,10 +11,17 @@
 #                    an additionalContext envelope carrying its brief. Silence is
 #                    the default (N-1); Node prints nothing when there is nothing
 #                    to say, so no arm here needs to suppress a blank line.
+#   subagent-stop    SubagentStop. Records what the subagent concluded. Prints
+#                    nothing, ever.
 #
-# Neither arm can break a turn. SubagentStart cannot block a subagent (the host
-# renders a non-zero exit as a notice and proceeds), and PreToolUse here returns
-# no permission decision at all, so the worst either can do is noise.
+# The first two arms cannot break a turn: SubagentStart cannot block a subagent
+# (the host renders a non-zero exit as a notice and proceeds) and PreToolUse here
+# returns no permission decision at all, so the worst either does is noise.
+#
+# THE THIRD IS DIFFERENT AND IS THE REASON THIS SCRIPT'S FINAL `exit 0` MATTERS.
+# The host dispatches a blocking error for Stop and SubagentStop, so a non-zero
+# exit here can stop a subagent finishing. The Node action swallows its own
+# failures, and this script exits 0 unconditionally regardless of what Node did.
 
 # No default. `install` and `doctor` share REQUIRED_WIRING so that what one
 # writes is what the other checks, and both entries set an explicit `action`
@@ -38,6 +45,9 @@ case "$ACTION" in
     ;;
   subagent-start)
     printf '%s' "$INPUT" | "__CORTEX_NODE__" "__CORTEX_HOOK_ENTRY__" subagent-start
+    ;;
+  subagent-stop)
+    printf '%s' "$INPUT" | "__CORTEX_NODE__" "__CORTEX_HOOK_ENTRY__" subagent-stop
     ;;
   *)
     # An unrecognised action must not reach Node. `handleHookPayload` routes

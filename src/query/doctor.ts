@@ -216,6 +216,19 @@ export const REQUIRED_WIRING: readonly RequiredWiring[] = [
   },
   { event: 'Stop', label: 'Stop (flush + nudge)', script: 'cortex-end-of-turn.sh' },
   {
+    // The third wiring on `cortex-subagent.sh`, and the reason its explicit
+    // `action` token matters: `wiringKey` discriminates on it, so three entries
+    // sharing one script stay distinct in `install`, in `doctor`, and in the
+    // script's own `case`. No `actionOptionalUnless` — an arg-less wiring must
+    // satisfy none of the three.
+    event: 'SubagentStop',
+    label: 'SubagentStop (subagent conclusion)',
+    script: 'cortex-subagent.sh',
+    action: 'subagent-stop',
+    // No matcher, for the same reason `SubagentStart` has none: a matcher on
+    // this event matches the AGENT TYPE, and every subagent's conclusion counts.
+  },
+  {
     event: 'SubagentStart',
     label: 'SubagentStart (subagent session)',
     script: 'cortex-subagent.sh',

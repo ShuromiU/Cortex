@@ -25,6 +25,11 @@ export const KIND_WEIGHTS: Record<string, KindWeight> = {
   'episode:command_failure': { retrieval: 3.2, workingSet: 2.6 },
   'episode:test_cycle': { retrieval: 2.8, workingSet: 2.3 },
   'episode:session_summary': { retrieval: 1.6, workingSet: 1.6 },
+  // A subagent's conclusion (FR-19, Story 5.3). Weighted between a test cycle
+  // and a session summary: it is a deliberate finding rather than an automatic
+  // digest, so it outranks a summary — but it is one agent's read of a task,
+  // not an authored decision, so it must not outrank a captured failure.
+  'episode:subagent_conclusion': { retrieval: 2.4, workingSet: 2.0 },
   // session_state never had a retrieval entry; 1.0 preserves the old fallback.
   session_state: { retrieval: 1.0, workingSet: 1.6 },
   branch_snapshot: { retrieval: 2.4, workingSet: 1.4 },

@@ -43,7 +43,7 @@ export const CENSUS_DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
  * ceiling into a near-zero one (the third repo occurrence of this rule).
  * Anything non-integral, non-positive, or non-numeric falls back.
  */
-function resolveEnvCeiling(name: string, fallback: number): number {
+export function resolveEnvCeiling(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
   const trimmed = raw.trim();

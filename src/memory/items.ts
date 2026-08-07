@@ -202,6 +202,13 @@ export function episodeState(kind: string): MemoryItemState {
   if (kind === 'command_failure') {
     return 'hot';
   }
+  // A subagent's conclusion is the freshest thing in the store at the moment it
+  // is written and the whole reason the subagent was dispatched, so it starts
+  // hot and decays like anything else. Registered explicitly because the
+  // fall-through below is silent.
+  if (kind === 'subagent_conclusion') {
+    return 'hot';
+  }
   return 'warm';
 }
 
@@ -213,6 +220,12 @@ export function episodeImportance(kind: string): number {
       return 0.8;
     case 'session_summary':
       return 0.68;
+    // Registered explicitly, because the default is SILENT. This switch and
+    // `episodeState` above both fall through with no error and no gate failure,
+    // so a new kind that forgets them ships with the wrong tier and importance
+    // and nothing reports it.
+    case 'subagent_conclusion':
+      return 0.75;
     default:
       return 0.6;
   }
