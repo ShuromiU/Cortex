@@ -167,6 +167,22 @@ The cap is enforced on this brief specifically, rather than inherited from the s
 
 Two limits worth knowing. **Session trees are one level deep:** a subagent that itself dispatches a subagent has the top-level session recorded as its parent, not its dispatcher, because "the current session" is primary-only by definition. And **the parent is whichever primary is active in the store**, which is shared by every worktree of a repository — so with two engaged windows on two worktrees, a dispatch in one can be filed under the other's session. Both are recorded in `_bmad-output/implementation-artifacts/deferred-work.md`.
 
+### What survives a subagent
+
+A dispatched subagent can burn a very large context and leave one paragraph behind. Cortex keeps that paragraph: when the subagent finishes, its final answer is recorded against its own session, and the machinery that decides what is worth remembering can finally see it.
+
+That last part is the whole feature. Cortex decides what a session produced by reading three things — the episodes recorded for it, the events it generated, and the commands it ran — and a subagent's final message was never one of them. For a subagent that mostly thinks and reads, the other two are nearly empty: its file reads record only which lines were opened, and its commands count only when they fail. So the very case subagent sessions exist to make visible produced *nothing*. Recording the conclusion where that machinery reads is what makes everything downstream work.
+
+**It is offered, never written.** The conclusion itself is kept automatically — that is a record of what happened, and Cortex records what happens. Anything that looks like a durable decision, blocker or intent is surfaced to you at the end of the turn as a *suggestion*; it becomes memory only if you choose to save it. A subagent proposes; it does not author. And it is offered **once**: a suggestion that keeps coming back trains you to dismiss the prompt, which costs more than the prompt ever earned.
+
+Long answers are trimmed at roughly a thousand words, and the record says when it trimmed, so you are never shown a cut answer that looks complete.
+
+### Cortex refuses a subagent retiring memory from an earlier session
+
+Saving a decision retires older decisions on the same subject — that is how memory stays current rather than accumulating contradictions. It also means a subagent, which knows only its own narrow task, could retire something a previous week's work established. Cortex refuses that: a subagent cannot retire, rewrite or delete memory belonging to an earlier session, whether through the Cortex tools or the command line. It gets a plain refusal explaining what to do instead — report the finding, which is recorded automatically, and let the parent act on it.
+
+**You are not affected.** The refusal applies only to subagents. Your own calls are never blocked, and neither is a subagent acting on memory from the conversation it is part of. Where Cortex cannot establish with certainty that a target belongs to an earlier session, it allows the call and says nothing: blocking your work by mistake is a worse outcome than the one this prevents.
+
 Branch snapshots, scoped session listings and the recent-session tail read primary sessions only; child timelines are reached explicitly. If you upgraded the package but subagent activity still lands on the parent, one of two things is stale: the installed `cortex-capture.sh` predates the change, or the `PostToolUse` matcher in your settings no longer lists `Agent`. `cortex doctor` reports both — the first as a failing hook-currency check, the second as a capture-matcher warning. Running `cortex install` fixes both — it rewrites the script and writes the matcher.
 
 ## Installing in one command
@@ -175,7 +191,7 @@ Branch snapshots, scoped session listings and the recent-session tail read prima
 cortex install
 ```
 
-Writes the three hook scripts with your Node and Cortex paths baked in, merges the hook wiring into `~/.claude/settings.json`, registers the MCP server, and adds Cortex's runtime artifacts to `.gitignore` — then runs `cortex doctor` and exits with its verdict. `cortex install-hooks` is the same command under its old name.
+Writes the four hook scripts with your Node and Cortex paths baked in, merges the hook wiring into `~/.claude/settings.json`, registers the MCP server, and adds Cortex's runtime artifacts to `.gitignore` — then runs `cortex doctor` and exits with its verdict. `cortex install-hooks` is the same command under its old name.
 
 `--scope project` writes `<project>/.claude/settings.json` and registers the server in `<project>/.mcp.json` instead; an unrecognised scope is rejected rather than silently treated as `user`. `--dry-run` reports every outcome and writes nothing, and does not run the diagnostic — it has nothing to diagnose. `--json` emits the result for scripting, with the diagnostic embedded, so a scripted caller can see why a run exited non-zero.
 

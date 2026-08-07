@@ -250,14 +250,25 @@ describe('cortex substitution (CLI)', () => {
 
 // ── AC #7 / D8: PreToolUse never denies for economics ────────────────
 
-describe('no hook surface can emit a permission decision (AC #7, AD-7)', () => {
-  // AC #7 is a negative, and negatives rot quietly. This story adds the
-  // repo's first decision-influencing hook stdout, which is exactly when a
-  // later change could reach for `permissionDecision: "deny"` — the one
-  // mechanism AD-7 forbids for economics. A source-negative is the honest
-  // form here: the guarantee is that the string appears NOWHERE, so the scan
-  // failing on a new occurrence is the regression signal D8 asked for.
-  it('appears in no shipped hook template', () => {
+describe('no ECONOMICS surface can emit a permission decision (AC #7, AD-7)', () => {
+  // AC #7 is a negative, and negatives rot quietly. Story 4.5 added the repo's
+  // first decision-influencing hook stdout, which is exactly when a later
+  // change could reach for `permissionDecision: "deny"` — the one mechanism
+  // AD-7 forbids for economics.
+  //
+  // **Narrowed by Story 5.3 (FR-19), deliberately and with the reason stated.**
+  // That story adds a `PreToolUse` guard that DOES deny: a subagent may not
+  // retire memory belonging to an earlier session. The original form of this
+  // scan — the string appears nowhere in the bridge at all — would have failed
+  // on a capability AD-7 never forbade, and the wrong response would have been
+  // to hide the denial behind a helper in another file so the scan stayed green
+  // while the property it named stopped being true. AD-7's actual guarantee is
+  // narrower and still holds: nothing on the ECONOMICS path denies. So the scan
+  // now pins where a decision may come from rather than whether one exists.
+  it('appears in no shipped hook template on an economics path', () => {
+    // `cortex-subagent.sh` is excluded BY NAME: it carries the Story 5.3 guard
+    // arm and is not a substitution surface. The other three are the whole
+    // read/refund path and must stay decision-free.
     for (const name of ['cortex-capture.sh', 'cortex-reflect.sh', 'cortex-end-of-turn.sh']) {
       const script = fs.readFileSync(
         path.resolve(__dirname, '..', 'hooks', 'claude', name),
@@ -268,16 +279,39 @@ describe('no hook surface can emit a permission decision (AC #7, AD-7)', () => {
     }
   });
 
-  it('appears nowhere in the hook bridge, whose stdout is the only other hook channel', () => {
+  it('appears in the hook bridge only inside the memory guard', () => {
     const source = fs.readFileSync(
       path.resolve(__dirname, '..', 'src', 'transports', 'hook-entry.ts'),
       'utf8',
     );
-    expect(source).not.toContain('permissionDecision');
-    // The bridge's PreToolUse output shape is additionalContext-only; pin the
-    // envelope key so a new decision field cannot ride in unnoticed.
+
+    // The guard function's extent, start of `function guardMemory` to the start
+    // of the next top-level declaration.
+    const start = source.indexOf('function guardMemory(');
+    expect(start, 'hook-entry.ts has no guardMemory function').toBeGreaterThan(-1);
+    const after = source.slice(start + 1);
+    const nextDecl = after.search(/\n(?:export )?(?:async )?function /);
+    const end = nextDecl < 0 ? source.length : start + 1 + nextDecl;
+
+    const occurrences: number[] = [];
+    for (let index = source.indexOf('permissionDecision'); index >= 0; ) {
+      occurrences.push(index);
+      index = source.indexOf('permissionDecision', index + 1);
+    }
+    // Present at all — a guard that stopped denying would be the other failure.
+    expect(occurrences.length).toBeGreaterThan(0);
+    for (const index of occurrences) {
+      expect(
+        index >= start && index < end,
+        `permissionDecision at offset ${index} is outside guardMemory`,
+      ).toBe(true);
+    }
+
+    // The substitution path's own output shape is unchanged: additionalContext,
+    // and no `decision` key riding in beside it.
     expect(source).toContain('additionalContext');
     expect(source).not.toContain('"decision"');
+    expect(source).not.toContain('permission_decision');
   });
 });
 

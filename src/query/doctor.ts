@@ -7,9 +7,11 @@ import { fileURLToPath } from 'node:url';
 import { deriveSpoolPath, SCAN_STATUS_KEY } from '../capture/spool.js';
 import {
   SUBAGENT_AMBIGUOUS_COUNT_KEY,
+  SUBAGENT_AUDITED_COUNT_KEY,
   SUBAGENT_BRIEFED_COUNT_KEY,
   SUBAGENT_DISPATCH_COUNT_KEY,
   SUBAGENT_DISPATCH_KEY,
+  SUBAGENT_MISPAIRED_COUNT_KEY,
   SUBAGENT_PAIRED_COUNT_KEY,
   SUBAGENT_START_COUNT_KEY,
   SUBAGENT_START_KEY,
@@ -22,7 +24,13 @@ import {
   openDatabaseReadOnly,
 } from '../db/schema.js';
 import { resolveStoreIdentity } from '../scope/identity.js';
+import { tokenizeCommand } from './command-tokens.js';
+import { MEMORY_GUARD_MATCHER, MEMORY_GUARD_TOOLS } from './memory-guard.js';
 import type { GitCommandRunner } from '../scope/git.js';
+
+// Re-exported so the public barrel and every existing importer keep working
+// after the tokenizer moved out to break an import cycle with the memory guard.
+export { tokenizeCommand };
 import {
   MIGRATED_FROM_KEY,
   MIGRATION_FAILED_KEY,
@@ -203,6 +211,22 @@ export const REQUIRED_WIRING: readonly RequiredWiring[] = [
     script: 'cortex-subagent.sh',
     action: 'dispatch-pre',
     matcher: 'Agent',
+  },
+  {
+    // The THIRD entry on `PreToolUse` (FR-19, Story 5.3), and the first whose
+    // hook can DENY. Same discriminator rule as the two above: an explicit
+    // `action` token, no `actionOptionalUnless`.
+    //
+    // A separate matcher rather than folding into `Agent`: this one has to see
+    // the two memory-writing MCP tools and every `Bash` call, and `Bash` is the
+    // reason the script's arm runs a pure-shell text check before it will spawn
+    // Node at all (N-4). The matcher is a regex against tool-name variants, so
+    // an `mcp__cortex__*` name matches literally.
+    event: 'PreToolUse',
+    label: 'PreToolUse (memory guard)',
+    script: 'cortex-subagent.sh',
+    action: 'guard-memory',
+    matcher: MEMORY_GUARD_MATCHER,
   },
   {
     event: 'UserPromptSubmit',
@@ -386,40 +410,6 @@ export function expandHookPath(target: string, homeDir: string, projectDir: stri
     .replaceAll('$CLAUDE_PROJECT_DIR', projectDir);
 
   return expanded;
-}
-
-/**
- * Split a settings hook command into shell-ish tokens, honouring both quote
- * styles. Needed because the SessionStart command quotes two absolute paths
- * that contain spaces (`"C:/Program Files/nodejs/node.exe"`).
- */
-export function tokenizeCommand(command: string): string[] {
-  const tokens: string[] = [];
-  let current = '';
-  let quote: '"' | "'" | null = null;
-  let started = false;
-
-  for (const char of command) {
-    if (quote) {
-      if (char === quote) quote = null;
-      else current += char;
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      started = true;
-      continue;
-    }
-    if (/\s/.test(char)) {
-      if (started || current.length > 0) tokens.push(current);
-      current = '';
-      started = false;
-      continue;
-    }
-    current += char;
-  }
-  if (started || current.length > 0) tokens.push(current);
-  return tokens;
 }
 
 function statIsFile(target: string): boolean {
@@ -898,14 +888,18 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
   //
   // Only added when such a command is configured: with nothing wired there is
   // nothing to say, and `hook-wiring` already fails on the entry by name.
-  const dispatchMatchers = commands
-    .filter(
-      entry =>
-        entry.event === 'PreToolUse' &&
-        entry.command.includes('cortex-subagent.sh') &&
-        tokenizeCommand(entry.command).includes('dispatch-pre'),
-    )
-    .map(entry => entry.matcher);
+  /** The matchers configured for one `cortex-subagent.sh` action on PreToolUse. */
+  const matchersForAction = (action: string): (string | null)[] =>
+    commands
+      .filter(
+        entry =>
+          entry.event === 'PreToolUse' &&
+          entry.command.includes('cortex-subagent.sh') &&
+          tokenizeCommand(entry.command).includes(action),
+      )
+      .map(entry => entry.matcher);
+
+  const dispatchMatchers = matchersForAction('dispatch-pre');
   if (dispatchMatchers.length > 0) {
     // An empty or absent matcher matches every tool, which is broader than the
     // canonical wiring and therefore fine.
@@ -928,6 +922,50 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
             status: 'warn',
             detail: `the PreToolUse dispatch hook is wired with matcher \`${dispatchMatchers.filter(m => m !== null).join('`, `') || '(none)'}\`, which never matches Agent — no dispatch is captured, so no subagent is briefed`,
             fix: 'Set that entry\'s matcher to `Agent`, or run `cortex install`, which writes it.',
+          },
+    );
+  }
+
+  // ── Memory-guard matcher (FR-19, Story 5.3) ─────────────────────────
+  //
+  // Same failure shape as above and a worse consequence. The guard is the only
+  // thing standing between a subagent and an earlier session's memory, and a
+  // matcher that misses a route disables it for that route while `hook-wiring`,
+  // `hook-currency` and every other row stay green. AD-12 names exactly this: a
+  // bound nobody can see is a lie about coverage.
+  //
+  // Reported per MISSING route rather than as one boolean, because the routes
+  // fail independently — a matcher covering the two MCP tools but not `Bash`
+  // leaves `cortex delete-memory` wide open and is the likeliest hand-edit.
+  const guardMatchers = matchersForAction('guard-memory');
+  if (guardMatchers.length > 0) {
+    // An empty or absent matcher matches every tool, which is broader than the
+    // canonical wiring and therefore fine.
+    const catchAll = guardMatchers.some(
+      matcher => matcher === null || matcher.trim().length === 0,
+    );
+    const uncovered = catchAll
+      ? []
+      : MEMORY_GUARD_TOOLS.filter(
+          tool => !guardMatchers.some(matcher => matcher !== null && matcher.includes(tool)),
+        );
+    add(
+      uncovered.length === 0
+        ? {
+            id: 'guard-matcher',
+            label: 'Memory-guard matcher',
+            status: 'pass',
+            detail: 'PreToolUse fires the memory guard on every route it protects',
+          }
+        : {
+            // `warn`, not `fail`, matching the two matcher rows above: narrowing
+            // a matcher is a supported choice and a deliberate one must not
+            // break CI.
+            id: 'guard-matcher',
+            label: 'Memory-guard matcher',
+            status: 'warn',
+            detail: `the PreToolUse memory guard never sees ${uncovered.join(', ')} — a subagent can retire memory from an earlier session through ${uncovered.includes('Bash') ? 'the shell' : 'that tool'} unchecked`,
+            fix: `Set that entry's matcher to \`${MEMORY_GUARD_MATCHER}\`, or run \`cortex install\`, which writes it.`,
           },
     );
   }
@@ -1313,6 +1351,8 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
   let dispatchPaired = 0;
   let dispatchBriefed = 0;
   let dispatchAmbiguous = 0;
+  let dispatchAudited = 0;
+  let dispatchMispaired = 0;
   let dispatchCountersCorrupt = false;
   if (storeExists) {
     try {
@@ -1333,6 +1373,16 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
           dispatchCountersCorrupt = captured.corrupt || paired.corrupt;
           dispatchBriefed = metaCount(db, SUBAGENT_BRIEFED_COUNT_KEY);
           dispatchAmbiguous = metaCount(db, SUBAGENT_AMBIGUOUS_COUNT_KEY);
+          // Read through `readMetaCount` for its corrupt flag, not `metaCount`.
+          // The mispairing figure is the one number here that WARNS, and a
+          // corrupt `audited` reading as 0 beside a live `mispaired` would state
+          // a fault rate over a population of nothing.
+          const audited = readMetaCount(db, SUBAGENT_AUDITED_COUNT_KEY);
+          const mispaired = readMetaCount(db, SUBAGENT_MISPAIRED_COUNT_KEY);
+          dispatchAudited = audited.value;
+          dispatchMispaired = mispaired.value;
+          dispatchCountersCorrupt =
+            dispatchCountersCorrupt || audited.corrupt || mispaired.corrupt;
         }
         const firstSeen = getMetaValue(db, SUBAGENT_START_KEY) ?? '';
         subagentFirstSeen = firstSeen.length > 0 ? firstSeen : null;
@@ -1475,6 +1525,28 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
         );
       } else if (dispatchCaptured >= 3 && dispatchPaired === 0) {
         warnings.push('no dispatch has ever paired with a subagent, so nothing is being briefed');
+      }
+
+      // The pairing audit (FR-19, Story 5.3). Reported only once it has
+      // actually run: the sidecar is host-internal and reached by a derived
+      // path, so "not audited" is a routine state that says nothing about the
+      // install, and announcing it every time is noise on a healthy machine.
+      //
+      // **This one WARNS, and it is the only counter in this epic that should.**
+      // A refusal (above) is the design working as ruled. A mispairing means a
+      // subagent was briefed from somebody else's dispatch and told something
+      // untrue about its own task — SM-C3, the worst failure this product can
+      // produce — and it is invisible without this number: the brief was
+      // emitted, every counter incremented, and every other row reads green.
+      if (dispatchAudited > 0 && !dispatchCountersCorrupt) {
+        details.push(
+          `${plural(dispatchAudited, 'pairing', 'pairings')} checked against the host's own record, ${dispatchMispaired} mismatched`,
+        );
+        if (dispatchMispaired > 0) {
+          warnings.push(
+            `${plural(dispatchMispaired, 'subagent was', 'subagents were')} briefed from the wrong dispatch`,
+          );
+        }
       }
     }
 

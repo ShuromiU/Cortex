@@ -18,6 +18,28 @@ import {
 import { extractMemoryReferences, type ExtractedMemoryReference } from '../memory/references.js';
 import { analyzeNote, compareAnalyzed } from '../memory/conflict.js';
 
+/**
+ * A note subject as the `notes` table stores it: trimmed, lower-cased, and
+ * `null` when nothing is left.
+ *
+ * Exported because `insertNote` is no longer the only caller — the Story 5.3
+ * memory guard has to ask about a subject before the write happens, and
+ * `deferred-work.md` already records one incident of exactly this normalisation
+ * drifting between two subject lookups.
+ */
+export function normalizeNoteSubject(subject: string | null | undefined): string | null {
+  const trimmed = subject?.trim();
+  return trimmed ? trimmed.toLowerCase() : null;
+}
+
+/** What a note write would do to existing notes, without doing it. */
+export interface NoteWritePreview {
+  /** Ids this write would flip to `superseded`. */
+  supersededIds: string[];
+  /** Ids this write would mark as contested. */
+  conflictIds: string[];
+}
+
 /** Row shape the contradiction lookup selects; also feeds the supersede veto. */
 interface NoteConflictCandidate {
   id: string;
@@ -2050,6 +2072,25 @@ export class CortexStore {
     return this.getEpisode(id);
   }
 
+  /**
+   * Replace an episode's metadata, leaving `summary` and `created_at` alone.
+   *
+   * Deliberately narrower than `bumpEpisodeOccurrence`, which is for recording
+   * a new occurrence and therefore refreshes recency. This one is for marking
+   * an episode that has not changed. Touching `created_at` here would re-heat
+   * the row, so a bookkeeping flag would silently promote the thing it is only
+   * supposed to annotate — and the memory item is deliberately not re-synced,
+   * because `buildEpisodeMemoryText` reads no key any caller of this writes.
+   * Returns false when the id matches nothing, so a caller can tell a
+   * successful mark from a no-op instead of assuming.
+   */
+  setEpisodeMetadata(id: string, metadata: Record<string, unknown>): boolean {
+    const result = this.db
+      .prepare('UPDATE episodes SET metadata_json = ? WHERE id = ?')
+      .run(JSON.stringify(metadata), id);
+    return result.changes > 0;
+  }
+
   getEpisode(id: string): ParsedEpisode | undefined {
     const row = this.db
       .prepare('SELECT * FROM episodes WHERE id = ?')
@@ -2068,6 +2109,130 @@ export class CortexStore {
 
   // ── Notes ─────────────────────────────────────────────────────────
 
+  /**
+   * What a note write would do to the notes already in the store, computed
+   * WITHOUT writing it.
+   *
+   * Exists so the Story 5.3 `PreToolUse` guard can ask "would this call retire
+   * somebody else's memory?" and get the same answer `insertNote` would produce
+   * — by running the same code, not by re-deriving the rule. The story ordered
+   * the predicate "mirrored exactly" and named three ways an earlier draft got
+   * it wrong: that auto-supersede is same-kind only (a `decision` retires prior
+   * decisions, never intents — the `kind = 'decision' OR kind = ?` clause in the
+   * query below is the wider set fetched for CONTRADICTION detection and is
+   * partitioned afterwards); that the AD-17 veto excludes contested priors; and
+   * that the subject is `trim().toLowerCase()`. A guard that re-implements any
+   * of those denies writes that would supersede nothing. Sharing the computation
+   * makes the drift the test would have to catch impossible instead.
+   *
+   * Read-only and safe outside a transaction. `insertNote` calls it INSIDE its
+   * own, which is what keeps the detect→supersede→insert sequence atomic.
+   */
+  previewNoteWrite(opts: {
+    kind: string;
+    content: string;
+    subject?: string | null;
+    sessionId: string;
+    skipConflictDetection?: boolean;
+  }): NoteWritePreview {
+    const { conflicts, supersededIds } = this.analyzeNoteWrite(
+      opts.kind,
+      normalizeNoteSubject(opts.subject),
+      opts.content,
+      opts.sessionId,
+      opts.skipConflictDetection === true,
+    );
+    return { supersededIds, conflictIds: conflicts.map(conflict => conflict.id) };
+  }
+
+  /**
+   * The shared body of `previewNoteWrite` and `insertNote`'s decision phase.
+   * `subject` arrives already normalized; passing a raw one is the drift this
+   * extraction exists to prevent.
+   */
+  private analyzeNoteWrite(
+    kind: string,
+    subject: string | null,
+    content: string,
+    sessionId: string,
+    skipConflictDetection: boolean,
+  ): { priors: NoteConflictCandidate[]; conflicts: NoteConflict[]; supersededIds: string[] } {
+    const conflicts: NoteConflict[] = [];
+    const supersededIds: string[] = [];
+
+    // FR-1 contradiction detection. AC #2: a subjectless note issues no query
+    // at all, so everything below is gated on having a subject. AC #1 scopes
+    // the *prior* to an active note:decision; the incoming may be any kind.
+    let priors: NoteConflictCandidate[] = [];
+    if (subject !== null) {
+      // One lookup covers detection (kind='decision') and the supersede
+      // candidates (kind=opts.kind); they are partitioned below rather than
+      // asking twice. Deliberately NOT scope-filtered: auto-supersede has
+      // always been scope-blind and changing that is not this story's to make.
+      // The scope filter applies only to the contest decision below.
+      priors = this.db
+        .prepare(
+          `SELECT n.id, n.kind, n.subject, n.timestamp, n.content, n.conflict, s.scope_key
+             FROM notes n
+             INNER JOIN sessions s ON s.id = n.session_id
+            WHERE n.subject = ?
+              AND n.status = 'active'
+              AND (n.kind = 'decision' OR n.kind = ?)`,
+        )
+        .all(subject, kind) as NoteConflictCandidate[];
+
+      const writerScope = this.scopeKeyForSession(sessionId);
+      const incoming = analyzeNote(content);
+      for (const prior of priors) {
+        if (skipConflictDetection) break;
+        if (prior.kind !== 'decision') continue;
+        // A decision on another branch is not a contradiction of this one —
+        // two branches holding opposite decisions is the ordinary reason
+        // branches exist, and the contest marker would surface in the other
+        // branch's working set.
+        if (prior.scope_key !== writerScope) continue;
+        const evidence = compareAnalyzed(analyzeNote(prior.content), incoming);
+        if (evidence) {
+          conflicts.push({
+            id: prior.id,
+            subject: prior.subject,
+            timestamp: prior.timestamp,
+            content: prior.content,
+            signal: evidence.signal,
+          });
+        }
+      }
+    }
+
+    // AD-17 veto set: what this write contradicts, PLUS anything already
+    // contested. An unresolved contest is not closed by a later unrelated
+    // write — without the second clause, a third non-contradicting decision
+    // superseded and archived *both* sides of an open contest, which is the
+    // exact outcome the veto exists to prevent.
+    const contestedIds = new Set([
+      ...conflicts.map(conflict => conflict.id),
+      // Deliberately NOT scope-filtered, even though detection is. Auto-
+      // supersede is scope-blind, so a decision written on one branch would
+      // otherwise supersede — and therefore archive — one side of an open
+      // contest on another branch, burying a question that branch has not
+      // settled. Scoping this to the writer only looks symmetric with
+      // detection; it hands an unrelated branch the power to close a contest.
+      // The cost is that a contested note on another branch is never
+      // auto-superseded, which is the conservative direction.
+      ...priors.filter(prior => prior.conflict === 1).map(prior => prior.id),
+    ]);
+
+    if ((kind === 'decision' || kind === 'intent') && subject !== null) {
+      supersededIds.push(
+        ...priors
+          .filter(prior => prior.kind === kind && !contestedIds.has(prior.id))
+          .map(prior => prior.id),
+      );
+    }
+
+    return { priors, conflicts, supersededIds };
+  }
+
   insertNote(opts: InsertNoteOpts): InsertedNote {
     const kindsRequiringSubject = ['decision', 'intent', 'blocker', 'focus'];
     // `!opts.subject` passes for "   ", which then normalizes to "" — not null.
@@ -2078,7 +2243,7 @@ export class CortexStore {
       throw new Error(`Subject is required for ${opts.kind} notes`);
     }
 
-    const subject = trimmedSubject ? trimmedSubject.toLowerCase() : null;
+    const subject = normalizeNoteSubject(opts.subject);
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
     const alternativesJson =
@@ -2090,83 +2255,23 @@ export class CortexStore {
     // write just decided to protect, losing the AD-17 veto. Two Claude sessions
     // on one project share a database file, so this is reachable.
     const run = this.db.transaction((): { supersededIds: string[]; conflicts: NoteConflict[] } => {
-      const supersededIds: string[] = [];
-      const conflicts: NoteConflict[] = [];
+      // Detection and the supersede partition, shared verbatim with
+      // `previewNoteWrite` so the Story 5.3 guard cannot drift from what
+      // actually happens here. Still inside the transaction: the sequence
+      // detect → supersede → insert → mark must stay atomic (see below).
+      const { conflicts, supersededIds } = this.analyzeNoteWrite(
+        opts.kind,
+        subject,
+        opts.content,
+        opts.sessionId,
+        opts.skipConflictDetection === true,
+      );
 
-      // FR-1 contradiction detection. AC #2: a subjectless note issues no query
-      // at all, so everything below is gated on having a subject. AC #1 scopes
-      // the *prior* to an active note:decision; the incoming may be any kind.
-      let priors: NoteConflictCandidate[] = [];
-      if (subject !== null) {
-        // One lookup covers detection (kind='decision') and the supersede
-        // candidates (kind=opts.kind); they are partitioned below rather than
-        // asking twice. Deliberately NOT scope-filtered: auto-supersede has
-        // always been scope-blind and changing that is not this story's to make.
-        // The scope filter applies only to the contest decision below.
-        priors = this.db
-          .prepare(
-            `SELECT n.id, n.kind, n.subject, n.timestamp, n.content, n.conflict, s.scope_key
-               FROM notes n
-               INNER JOIN sessions s ON s.id = n.session_id
-              WHERE n.subject = ?
-                AND n.status = 'active'
-                AND (n.kind = 'decision' OR n.kind = ?)`,
-          )
-          .all(subject, opts.kind) as NoteConflictCandidate[];
-
-        const writerScope = this.scopeKeyForSession(opts.sessionId);
-        const incoming = analyzeNote(opts.content);
-        for (const prior of priors) {
-          if (opts.skipConflictDetection) break;
-          if (prior.kind !== 'decision') continue;
-          // A decision on another branch is not a contradiction of this one —
-          // two branches holding opposite decisions is the ordinary reason
-          // branches exist, and the contest marker would surface in the other
-          // branch's working set.
-          if (prior.scope_key !== writerScope) continue;
-          const evidence = compareAnalyzed(analyzeNote(prior.content), incoming);
-          if (evidence) {
-            conflicts.push({
-              id: prior.id,
-              subject: prior.subject,
-              timestamp: prior.timestamp,
-              content: prior.content,
-              signal: evidence.signal,
-            });
-          }
-        }
-      }
-
-      // AD-17 veto set: what this write contradicts, PLUS anything already
-      // contested. An unresolved contest is not closed by a later unrelated
-      // write — without the second clause, a third non-contradicting decision
-      // superseded and archived *both* sides of an open contest, which is the
-      // exact outcome the veto exists to prevent.
-      const contestedIds = new Set([
-        ...conflicts.map(conflict => conflict.id),
-        // Deliberately NOT scope-filtered, even though detection is. Auto-
-        // supersede is scope-blind, so a decision written on one branch would
-        // otherwise supersede — and therefore archive — one side of an open
-        // contest on another branch, burying a question that branch has not
-        // settled. Scoping this to the writer only looks symmetric with
-        // detection; it hands an unrelated branch the power to close a contest.
-        // The cost is that a contested note on another branch is never
-        // auto-superseded, which is the conservative direction.
-        ...priors.filter(prior => prior.conflict === 1).map(prior => prior.id),
-      ]);
-
-      if ((opts.kind === 'decision' || opts.kind === 'intent') && subject !== null) {
-        supersededIds.push(
-          ...priors
-            .filter(prior => prior.kind === opts.kind && !contestedIds.has(prior.id))
-            .map(prior => prior.id),
-        );
-        if (supersededIds.length > 0) {
-          const placeholders = supersededIds.map(() => '?').join(', ');
-          this.db
-            .prepare(`UPDATE notes SET status = 'superseded' WHERE id IN (${placeholders})`)
-            .run(...supersededIds);
-        }
+      if (supersededIds.length > 0) {
+        const placeholders = supersededIds.map(() => '?').join(', ');
+        this.db
+          .prepare(`UPDATE notes SET status = 'superseded' WHERE id IN (${placeholders})`)
+          .run(...supersededIds);
       }
 
       this.db
@@ -4107,6 +4212,37 @@ export class CortexStore {
     const row = this.db
       .prepare('SELECT * FROM subagent_dispatches WHERE id = ?')
       .get(id) as SubagentDispatchRow | undefined;
+    return row ? parseSubagentDispatchRow(row) : undefined;
+  }
+
+  /**
+   * The capture a given subagent consumed, if it consumed one.
+   *
+   * The audit at `SubagentStop` (FR-19, Story 5.3) closes what Story 5.2 could
+   * only defer: 5.2 proved its pairing UNAMBIGUOUS, never RIGHT, because
+   * `SubagentStart` carries no `tool_use_id`. The host's per-agent sidecar does,
+   * and it is written strictly after every `SubagentStart` hook returns — so
+   * `SubagentStop` is the first moment the guess can be checked against ground
+   * truth. This is the lookup that finds the guess.
+   *
+   * Scoped by host session as well as agent id: `agent_id` is recycled across
+   * conversations, and an unscoped lookup would compare this run's sidecar
+   * against a dispatch from a previous one and report a mispairing that never
+   * happened. Newest first, because a re-fire onto a recycled id can leave more
+   * than one row bearing the same consumer.
+   */
+  getSubagentDispatchByConsumer(
+    hostSessionId: string,
+    agentId: string,
+  ): ParsedSubagentDispatch | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM subagent_dispatches
+         WHERE host_session_id = ? AND consumed_by_agent_id = ?
+         ORDER BY consumed_at DESC, rowid DESC
+         LIMIT 1`,
+      )
+      .get(hostSessionId, agentId) as SubagentDispatchRow | undefined;
     return row ? parseSubagentDispatchRow(row) : undefined;
   }
 

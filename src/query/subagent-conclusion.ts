@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 import type { CortexStore, ParsedEpisode, SessionRow } from '../db/store.js';
 import { resolveEnvCeiling } from '../capture/census.js';
@@ -146,6 +147,83 @@ function extractAssistantText(entry: unknown): string | undefined {
 }
 
 /**
+ * The host's own record of what a subagent was dispatched with (FR-19, Task 5).
+ *
+ * `<session dir>/subagents/agent-<agent_id>.meta.json`, carrying
+ * `{agentType, description, toolUseId, spawnDepth}` — verified live on this
+ * machine. Story 5.1 measured that it is written strictly AFTER every
+ * `SubagentStart` hook returns (a 5,259 ms bounded poll inside the hook never
+ * saw it), which is exactly why Story 5.2 could prove its pairing *unambiguous*
+ * and not *right*, and why `SubagentStop` is the first place the check is
+ * possible at all.
+ *
+ * **Everything here is defensive on purpose.** The path is derived, the file is
+ * host-internal and undocumented, and its shape can change without notice.
+ * Every failure returns `undefined`, and the caller must treat that as "no
+ * audit was performed" rather than "the audit failed" — 5.1's review found the
+ * false-alarm class twice, and an absent audit reported as a fault is the same
+ * mistake in a new place.
+ */
+export function readDispatchSidecar(
+  agentTranscriptPath: string | undefined,
+  transcriptPath: string | undefined,
+  agentId: string,
+): { toolUseId?: string; description?: string } | undefined {
+  for (const candidate of sidecarCandidates(agentTranscriptPath, transcriptPath, agentId)) {
+    try {
+      const raw = fs.readFileSync(candidate, 'utf8');
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        continue;
+      }
+      const record = parsed as Record<string, unknown>;
+      const toolUseId = typeof record['toolUseId'] === 'string' ? record['toolUseId'] : undefined;
+      const description =
+        typeof record['description'] === 'string' ? record['description'] : undefined;
+      if (toolUseId === undefined && description === undefined) {
+        continue;
+      }
+      return {
+        ...(toolUseId !== undefined ? { toolUseId } : {}),
+        ...(description !== undefined ? { description } : {}),
+      };
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Two derivations, best first.
+ *
+ * `agent_transcript_path` is the subagent's own JSONL and sits beside its meta
+ * file, so swapping the extension needs no assumption about the session-directory
+ * layout — but that field is measured, NOT documented. The fallback rebuilds the
+ * path from `transcript_path`, which is documented: the parent transcript is
+ * `<dir>/<session>.jsonl` and the session directory is its name without the
+ * extension. Neither is guaranteed; that is what the caller's silence is for.
+ */
+function sidecarCandidates(
+  agentTranscriptPath: string | undefined,
+  transcriptPath: string | undefined,
+  agentId: string,
+): string[] {
+  const candidates: string[] = [];
+
+  if (agentTranscriptPath && agentTranscriptPath.endsWith('.jsonl')) {
+    candidates.push(`${agentTranscriptPath.slice(0, -'.jsonl'.length)}.meta.json`);
+  }
+
+  if (transcriptPath && transcriptPath.endsWith('.jsonl') && agentId.length > 0) {
+    const sessionDir = transcriptPath.slice(0, -'.jsonl'.length);
+    candidates.push(path.join(sessionDir, 'subagents', `agent-${agentId}.meta.json`));
+  }
+
+  return candidates;
+}
+
+/**
  * Choose and bound the conclusion text. Returns `undefined` when there is
  * nothing to record — the ordinary outcome for a subagent that said nothing.
  */
@@ -169,6 +247,67 @@ export function resolveConclusionText(
   }
   const { text, truncated } = clamp(fromTranscript, maxChars);
   return text.length > 0 ? { text, truncated, source: 'transcript' } : undefined;
+}
+
+/**
+ * The metadata key marking a conclusion the Stop nudge has already offered.
+ *
+ * **The bound this story would otherwise need and not have.** `endOfTurn`
+ * collects suggestions across `getSessionTreeIds`, which is the root primary
+ * plus `getChildSessions` — a bare `SELECT * FROM sessions WHERE
+ * parent_session_id = ?` with no status, recency or limit filter. `suggestNotes`
+ * has no recency filter either, and the primary rarely rotates: `endSessionTree`
+ * runs from `ensurePrimarySession` only when the SCOPE KEY changes, so a
+ * SessionStart on the same branch and worktree ends nothing and children stay
+ * `active` for days. Without a marker, every conclusion written here would
+ * re-surface in the nudge on every later turn that used any subagent, for the
+ * life of the primary — `endOfTurn`'s `seen` set dedupes within one invocation
+ * and nothing dedupes across them. An accepted suggestion that keeps being
+ * re-offered is the cries-wolf half of AD-12: it trains the user to dismiss the
+ * nudge, which costs more than the nudge ever earned.
+ *
+ * A marker rather than a time window, because time is the wrong axis. A
+ * subagent can run for half an hour, so any window short enough to bound the
+ * noise is also short enough to discard the conclusion of a long investigation —
+ * exactly the run this story exists to preserve.
+ */
+export const CONCLUSION_SURFACED_KEY = 'surfaced_at';
+
+/** The conclusion episode for a session, if it has one. */
+export function findSubagentConclusion(
+  store: CortexStore,
+  sessionId: string,
+): ParsedEpisode | undefined {
+  return store
+    .getEpisodesBySession(sessionId)
+    .find(episode => episode.kind === SUBAGENT_CONCLUSION_KIND);
+}
+
+/** Whether the Stop nudge has already offered this conclusion. */
+export function conclusionSurfaced(episode: ParsedEpisode): boolean {
+  return typeof episode.metadata[CONCLUSION_SURFACED_KEY] === 'string';
+}
+
+/**
+ * Mark a conclusion as offered. Best-effort by contract: this runs on the turn's
+ * critical path and a failed mark must cost a duplicate nudge, never the turn.
+ */
+export function markConclusionSurfaced(
+  store: CortexStore,
+  episode: ParsedEpisode,
+  now: string = new Date().toISOString(),
+): void {
+  try {
+    if (conclusionSurfaced(episode)) {
+      return;
+    }
+    store.setEpisodeMetadata(episode.id, {
+      ...episode.metadata,
+      [CONCLUSION_SURFACED_KEY]: now,
+    });
+  } catch {
+    // Re-offering a conclusion is noise; throwing here would block turn end.
+  }
 }
 
 export interface RecordConclusionOptions {

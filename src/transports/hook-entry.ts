@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { CortexStore, type SessionRow } from '../db/store.js';
+import { CortexStore, type ParsedEpisode, type SessionRow } from '../db/store.js';
 import {
   handleAgentEvent,
   handleCmdEvent,
@@ -22,6 +22,7 @@ import { writeDigestIndex } from '../capture/digest-index.js';
 import {
   ensureScopedSession,
   recordSubagentAmbiguity,
+  recordSubagentAudit,
   recordSubagentBriefed,
   recordSubagentDispatch,
   recordSubagentPairing,
@@ -36,9 +37,14 @@ import {
   summarizeDispatchPrompt,
 } from '../query/subagent-brief.js';
 import {
+  conclusionSurfaced,
+  findSubagentConclusion,
+  markConclusionSurfaced,
+  readDispatchSidecar,
   recordSubagentConclusion,
   resolveConclusionText,
 } from '../query/subagent-conclusion.js';
+import { evaluateMemoryGuard } from '../query/memory-guard.js';
 import { configureEngagementPath, readEngagement, writeEngagement } from './mcp.js';
 
 const CORTEX_CONSULTED_KEY = 'cortex_consulted';
@@ -99,6 +105,7 @@ export const HOOK_ACTIONS = [
   'dispatch-pre',
   'subagent-start',
   'subagent-stop',
+  'guard-memory',
   'end-of-turn',
 ] as const;
 
@@ -740,6 +747,7 @@ function subagentStop(
       return;
     }
     captureConclusion(store, payload, cwd);
+    auditPairing(store, payload);
   } catch {
     // AD-12 / N-3, and harder here than anywhere else in this epic: a throw that
     // reaches the host on this event is dispatched as a blocking error. A lost
@@ -811,6 +819,107 @@ function captureConclusion(
   });
 }
 
+/**
+ * Refuse a subagent retiring memory from an earlier session (AC #3, ruling (a)
+ * and (b)). The ONLY place this bridge emits a permission decision.
+ *
+ * That exclusivity is asserted by a source scan in `tests/substitution.test.ts`,
+ * which before this story required the string to appear nowhere in this file at
+ * all. AD-7 is unaffected and the two do not contradict: AD-7 forbids denying
+ * for ECONOMICS — refunds are `PostToolUse` substitution and never a
+ * `PreToolUse` deny — while this denies for a different reason on a different
+ * path, and books no refund. The scan now pins the narrower, still-true
+ * property: a decision comes from here and from nowhere else.
+ *
+ * **Fail open at every step**, including this catch. Every uncertainty allows:
+ * a blocking hook that errs toward blocking stops the user's own work, which is
+ * a worse outcome than the one it prevents.
+ */
+function guardMemory(store: CortexStore, payload: Record<string, unknown>): string {
+  try {
+    // No `agent_id` means the parent, and the parent is deliberately exempt —
+    // it is the acceptance path AD-4 routes a subagent's findings through.
+    const identity = agentIdentity(payload);
+    if (!identity.agentId) {
+      return '';
+    }
+
+    const denial = evaluateMemoryGuard(store, {
+      toolName: toolName(payload),
+      toolInput: toolInput(payload),
+      agentId: identity.agentId,
+    });
+    if (!denial) {
+      return '';
+    }
+
+    const output = JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: denial.reason,
+      },
+    });
+
+    // The reason lands in the SUBAGENT's context, so it is billed to the
+    // subagent's session — the same rule Story 5.2 applied to the brief. A
+    // channel nobody accounts for is how the ledger stops describing reality.
+    const primary = store.getCurrentSession();
+    const child = primary?.scope_key
+      ? store.getSessionByAgentId(primary.scope_key, identity.agentId)
+      : undefined;
+    bookHookInjection(store, 'memory_guard_deny', denial.reason, child?.id);
+
+    return output;
+  } catch {
+    // FAIL OPEN. See the note above: this catch is load-bearing, not tidiness.
+    return '';
+  }
+}
+
+/**
+ * Close Story 5.2's deferred pairing audit (FR-19, Task 5).
+ *
+ * 5.2 could prove its pairing *unambiguous* — one capture matched the key — but
+ * never *right*, because `SubagentStart` carries no `tool_use_id`. The host's
+ * per-agent sidecar does, and it lands strictly after every `SubagentStart` hook
+ * returns, so this is the first moment the guess is checkable at all.
+ *
+ * **Absent is not failed.** A sidecar that cannot be read, a capture with no
+ * `tool_use_id` (rows written before Story 5.2 recorded one), or a subagent that
+ * consumed no capture all record NOTHING. Counting those as audits would put a
+ * denominator under a fault rate that was never measured, and counting them as
+ * mispairings would manufacture the false alarm 5.1's review found twice.
+ */
+function auditPairing(store: CortexStore, payload: Record<string, unknown>): void {
+  try {
+    const identity = agentIdentity(payload);
+    const hostSessionId = firstString(payload['session_id'], payload['sessionId']);
+    if (!identity.agentId || !hostSessionId) {
+      return;
+    }
+
+    const dispatch = store.getSubagentDispatchByConsumer(hostSessionId, identity.agentId);
+    if (!dispatch?.toolUseId) {
+      return;
+    }
+
+    const sidecar = readDispatchSidecar(
+      firstString(payload['agent_transcript_path'], payload['agentTranscriptPath']),
+      firstString(payload['transcript_path'], payload['transcriptPath']),
+      identity.agentId,
+    );
+    if (!sidecar?.toolUseId) {
+      return;
+    }
+
+    recordSubagentAudit(store, sidecar.toolUseId === dispatch.toolUseId);
+  } catch {
+    // Advisory, and on the one event that can break a subagent. The conclusion
+    // is the deliverable; an audit that throws must cost neither it nor the run.
+  }
+}
+
 function truncateSuggestion(text: string, maxChars = 140): string {
   const collapsed = text.replace(/\s+/g, ' ').trim();
   return collapsed.length <= maxChars
@@ -879,14 +988,39 @@ function endOfTurn(
   writeEngagement(AGENT_USED_KEY, 'false');
 
   let suggestions;
+  // The conclusions considered on this pass. Marked only if the nudge actually
+  // fires — a pass that surfaces nothing must not consume them.
+  const offeredConclusions: ParsedEpisode[] = [];
   try {
     const sessionId = resolveSessionId(store, cwd, options);
     // The nudge fires only when a subagent ran, and a subagent's evidence lives
     // in its own session — so collecting from the primary alone would blind it
     // in exactly the case it exists for. Walk the whole tree and dedupe.
+    //
+    // `getSessionTreeIds` is the root primary followed by every child ever
+    // parented to it, unfiltered by status, recency or count. The root stays in
+    // scope unconditionally: it is the live session and its evidence changes
+    // every turn. A CHILD is finished and its evidence is fixed, so offering it
+    // a second time is nagging — drop the ones already offered.
+    const treeIds = store.getSessionTreeIds(sessionId);
+    const rootId = treeIds[0];
+    const eligible = treeIds.filter(id => {
+      if (id === rootId) {
+        return true;
+      }
+      const conclusion = findSubagentConclusion(store, id);
+      if (!conclusion) {
+        return true;
+      }
+      if (conclusionSurfaced(conclusion)) {
+        return false;
+      }
+      offeredConclusions.push(conclusion);
+      return true;
+    });
+
     const seen = new Set<string>();
-    suggestions = store
-      .getSessionTreeIds(sessionId)
+    suggestions = eligible
       .flatMap(id => suggestNotes(store, id))
       .filter(suggestion => suggestion.confidence >= STOP_NUDGE_CONFIDENCE_THRESHOLD)
       .filter(suggestion => {
@@ -913,6 +1047,13 @@ function endOfTurn(
     ...shown,
     'Write the load-bearing ones with cortex_note(kind, content); if none apply, reply DONE.',
   ].join('\n');
+
+  // Consumed here and nowhere earlier: the nudge is about to fire, so these
+  // conclusions have genuinely been offered. Marking them at collection time
+  // instead would burn a conclusion on a pass that showed the user nothing.
+  for (const conclusion of offeredConclusions) {
+    markConclusionSurfaced(store, conclusion);
+  }
 
   bookHookInjection(store, 'stop_nudge', reason);
   return JSON.stringify({ decision: 'block', reason });
@@ -1038,6 +1179,10 @@ export function handleHookPayload(
   if (action === 'subagent-stop') {
     subagentStop(store, payload, cwd);
     return '';
+  }
+
+  if (action === 'guard-memory') {
+    return guardMemory(store, payload);
   }
 
   if (action === 'end-of-turn') {

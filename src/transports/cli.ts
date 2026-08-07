@@ -1045,7 +1045,22 @@ export function createProgram(): Command {
     .description('Token P&L (injected/saved/net/ratio, per session and scope) and retrieval health')
     .action(() => {
       const { store, dbPath } = openCortexDb(process.cwd());
-      const recentSessions = store.getRecentSessions(10);
+      // PRIMARY sessions only (FR-19, Story 5.3, Task 7). `getRecentSessions`
+      // is not parentage-filtered and a child carries no focus, so ten subagent
+      // dispatches pushed every focused session out of the window and this line
+      // read `unfocused` on a project actively being worked on — reproduced.
+      // Pre-existing shape, but Story 5.1 made it trivially reachable: before,
+      // ten subagents each had to make a captured tool call to fill the window;
+      // now every dispatch creates a session.
+      //
+      // Fixed rather than deferred with its sibling, and the split is the
+      // judgement Task 7 asked for. "Stop children polluting the focus line" is
+      // a rendering DEFECT on an accessor that already has a filtered twin;
+      // "surface child activity to a reader" is a feature needing a surface, a
+      // budget and a ranking rule. Fixing this does not foreclose that — the
+      // feature adds a read path rather than changing this one. See
+      // `deferred-work.md` for the deferred half and its owner.
+      const recentSessions = store.getRecentPrimarySessions(10);
       let focus = 'unfocused';
       for (const session of recentSessions) {
         if (session.focus !== null) {

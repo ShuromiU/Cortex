@@ -13,10 +13,16 @@
 #                    to say, so no arm here needs to suppress a blank line.
 #   subagent-stop    SubagentStop. Records what the subagent concluded. Prints
 #                    nothing, ever.
+#   guard-memory     PreToolUse on the two memory-writing MCP tools and Bash.
+#                    Refuses a SUBAGENT retiring memory from an earlier session
+#                    (FR-19, Story 5.3). Silent unless it denies.
 #
 # The first two arms cannot break a turn: SubagentStart cannot block a subagent
-# (the host renders a non-zero exit as a notice and proceeds) and PreToolUse here
-# returns no permission decision at all, so the worst either does is noise.
+# (the host renders a non-zero exit as a notice and proceeds) and PreToolUse
+# there returns no permission decision at all, so the worst either does is
+# noise. The guard arm CAN deny, on purpose, and everything about it is built to
+# fail open: Node emits nothing unless it can positively establish the target is
+# outside the tree, and this script exits 0 regardless.
 #
 # THE THIRD IS DIFFERENT AND IS THE REASON THIS SCRIPT'S FINAL `exit 0` MATTERS.
 # The host dispatches a blocking error for Stop and SubagentStop, so a non-zero
@@ -48,6 +54,36 @@ case "$ACTION" in
     ;;
   subagent-stop)
     printf '%s' "$INPUT" | "__CORTEX_NODE__" "__CORTEX_HOOK_ENTRY__" subagent-stop
+    ;;
+  guard-memory)
+    # N-4 / AD-2 IS THE WHOLE DESIGN OF THIS ARM. Its matcher includes `Bash`,
+    # so it fires on every command the agent runs — and spawning Node per tool
+    # call is the one thing the capture architecture forbids outright. Two pure
+    # shell checks stand in front of Node, ordered cheapest first.
+    #
+    # 1. No agent_id means the PARENT, and the parent is exempt: it is the
+    #    acceptance path a subagent's findings are supposed to travel through.
+    #    Measured: a subagent's tool call carries agent_id; the parent's does
+    #    not. This alone exits for every command the primary agent runs.
+    GUARD_AGENT_ID=$(printf '%s' "$INPUT" | jq -r '.agent_id // .agentId // empty')
+    [ -z "$GUARD_AGENT_ID" ] && exit 0
+
+    # 2. For Bash, the command text must mention a memory-mutating subcommand.
+    #    Kept as a literal `case` here and as SHELL_MEMORY_COMMANDS in
+    #    src/query/memory-guard.ts, with a test asserting the two agree — the
+    #    cheap check and the real one must not drift, or the guard silently
+    #    stops covering a route. The MCP tools skip this and go straight to
+    #    Node: they are already rare and always memory writes.
+    GUARD_TOOL=$(printf '%s' "$INPUT" | jq -r '.tool_name // .toolName // empty')
+    if [ "$GUARD_TOOL" = "Bash" ]; then
+      GUARD_CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty')
+      case "$GUARD_CMD" in
+        *note-resolve*|*edit-memory*|*delete-memory*) ;;
+        *) exit 0 ;;
+      esac
+    fi
+
+    printf '%s' "$INPUT" | "__CORTEX_NODE__" "__CORTEX_HOOK_ENTRY__" guard-memory
     ;;
   *)
     # An unrecognised action must not reach Node. `handleHookPayload` routes

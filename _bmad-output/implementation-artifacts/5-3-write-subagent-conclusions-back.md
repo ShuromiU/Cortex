@@ -4,7 +4,7 @@ baseline_commit: 0c60aa42999fa87ca1d79222a002f63d11afc8a3
 
 # Story 5.3: Write subagent conclusions back
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -182,81 +182,81 @@ Story 5.1's Appendix A carries the full `SubagentStop` key set. The parts this s
 
 ## Tasks / Subtasks
 
-- [ ] **Task 1 — Wire `SubagentStop`** (AC: #1)
-  - [ ] New `subagent-stop` action; a new arm in `hooks/claude/cortex-subagent.sh`'s `case`; a `handleHookPayload` branch.
-  - [ ] **The branch is not optional and a test must prove it.** `handleHookPayload` ends in `return reflectFromPayload(...)` with no exhaustive `switch` and no `never` guard, and `main()` casts `argv[2]` unchecked — so adding the union member without the branch **compiles cleanly** and routes every subagent completion into the reflex path. Assert `subagent-stop` returns `''`. This is the second instance of the trap (5.2 has the first, for `dispatch-pre`). *Confirmed 2026-08-07: 5.2 did NOT build the shared test — its coverage is a `dispatch-pre`-specific case in `tests/hook-entry.test.ts`.* So this story owns it: **one test that iterates every `HookAction` member** and asserts each returns what its branch promises, retro-fitting `dispatch-pre` and `subagent-start` into it rather than adding a third one-off.
-  - [ ] New `REQUIRED_WIRING` entry. *Corrected 2026-08-07 against shipped 5.2 — the conclusion holds, the reason given here did not.* `install.ts` no longer skips by event key: 5.2 re-keyed `wiredElsewhere` on `wiringKey(required)` (event **plus** `action ?? script ?? token`), so entries are discriminated by action everywhere, and `SubagentStop` is unambiguous for a stronger reason than the one originally written. Two consequences for this task: give the entry an explicit `action: 'subagent-stop'` with **no** `actionOptionalUnless` — that action token is what tells it apart from its two siblings on `cortex-subagent.sh` — and add its key to the `wiringKey` collision test 5.2 added to `tests/install.test.ts`.
-  - [ ] **This hook can block a subagent.** Emit nothing, exit 0 unconditionally, and swallow every error **inside the action** rather than relying on `main()`, which rethrows anything that is not `UnopenableStoreError`. Honour `stop_hook_active` — return success while it is true, per the host's own guidance.
-  - [ ] **Fixtures: ANSWERED, do not repeat.** 5.2 made both derive from `REQUIRED_WIRING` — `healthyWiring` in `tests/doctor.test.ts` and the loop in `tests/cli.test.ts`’s `seedSandboxHome`, each carrying the matcher its wiring declares. A new entry is picked up automatically. Confirm it, and confirm the third derived fixture 5.2 added: `tests/capture-hook.test.ts` asserts the script’s `case` arms are EXACTLY the actions `REQUIRED_WIRING` points at `cortex-subagent.sh`, and that each arm passes its OWN token to Node — so a new arm without a wiring entry, or vice versa, fails there.
+- [x] **Task 1 — Wire `SubagentStop`** (AC: #1)
+  - [x] New `subagent-stop` action; a new arm in `hooks/claude/cortex-subagent.sh`'s `case`; a `handleHookPayload` branch.
+  - [x] **The branch is not optional and a test must prove it.** `handleHookPayload` ends in `return reflectFromPayload(...)` with no exhaustive `switch` and no `never` guard, and `main()` casts `argv[2]` unchecked — so adding the union member without the branch **compiles cleanly** and routes every subagent completion into the reflex path. Assert `subagent-stop` returns `''`. This is the second instance of the trap (5.2 has the first, for `dispatch-pre`). *Confirmed 2026-08-07: 5.2 did NOT build the shared test — its coverage is a `dispatch-pre`-specific case in `tests/hook-entry.test.ts`.* So this story owns it: **one test that iterates every `HookAction` member** and asserts each returns what its branch promises, retro-fitting `dispatch-pre` and `subagent-start` into it rather than adding a third one-off.
+  - [x] New `REQUIRED_WIRING` entry. *Corrected 2026-08-07 against shipped 5.2 — the conclusion holds, the reason given here did not.* `install.ts` no longer skips by event key: 5.2 re-keyed `wiredElsewhere` on `wiringKey(required)` (event **plus** `action ?? script ?? token`), so entries are discriminated by action everywhere, and `SubagentStop` is unambiguous for a stronger reason than the one originally written. Two consequences for this task: give the entry an explicit `action: 'subagent-stop'` with **no** `actionOptionalUnless` — that action token is what tells it apart from its two siblings on `cortex-subagent.sh` — and add its key to the `wiringKey` collision test 5.2 added to `tests/install.test.ts`.
+  - [x] **This hook can block a subagent.** Emit nothing, exit 0 unconditionally, and swallow every error **inside the action** rather than relying on `main()`, which rethrows anything that is not `UnopenableStoreError`. Honour `stop_hook_active` — return success while it is true, per the host's own guidance.
+  - [x] **Fixtures: ANSWERED, do not repeat.** 5.2 made both derive from `REQUIRED_WIRING` — `healthyWiring` in `tests/doctor.test.ts` and the loop in `tests/cli.test.ts`’s `seedSandboxHome`, each carrying the matcher its wiring declares. A new entry is picked up automatically. Confirm it, and confirm the third derived fixture 5.2 added: `tests/capture-hook.test.ts` asserts the script’s `case` arms are EXACTLY the actions `REQUIRED_WIRING` points at `cortex-subagent.sh`, and that each arm passes its OWN token to Node — so a new arm without a wiring entry, or vice versa, fails there.
 
-- [ ] **Task 2 — Capture the conclusion as an episode on the child** (AC: #1)
-  - [ ] Resolve the child by `(scope_key, agent_id)` and **handle the recorded hazard**: `getSessionByAgentId` filters by neither parent nor status, deliberately (Story 0.2 AC #3 requires a child to stay findable after its parent ends). `deferred-work.md` records this reproduced — *"a re-fire for a recycled `agent_id` after the session tree ended lands on the ended child"* — and the same property caused a HIGH defect in 5.1, where a reused child back-dated the first-fire marker. Decide what happens when the resolved child is `ended` or belongs to a previous primary, and say so.
-  - [ ] **Write the conclusion into `episode.summary`.** This is the ordering requirement from § finding #3: `collectEvidence` reads `episode.summary`, so the conclusion must exist as an episode on the child **before** any suggestion pass runs, or nothing downstream can see it.
-  - [ ] The child is still `active` at `SubagentStop` — but **not for the reason a reader might assume.** `find_referencing_symbols` on `endSessionTree` returns two callers, and the `ensurePrimarySession` one fires **only when the scope key changes**. A SessionStart on the same branch and worktree ends nothing, so children can stay `active` for days. That is fine here and is the cause of the noise problem in Task 3.
-  - [ ] Bound what is stored. A final message can be long and `agent_transcript_path` can be megabytes. State the ceiling; parse any `CORTEX_*` option with **`Number`, never `parseInt`** (five incidents) and reuse an existing helper — `resolveEnvCeiling` (`src/capture/census.ts`) or `envNumber`/`envCount` (`src/db/gc.ts`) — rather than writing a sixth.
-  - [ ] Read `agent_transcript_path` only if present and readable; never make a finding depend on it.
+- [x] **Task 2 — Capture the conclusion as an episode on the child** (AC: #1)
+  - [x] Resolve the child by `(scope_key, agent_id)` and **handle the recorded hazard**: `getSessionByAgentId` filters by neither parent nor status, deliberately (Story 0.2 AC #3 requires a child to stay findable after its parent ends). `deferred-work.md` records this reproduced — *"a re-fire for a recycled `agent_id` after the session tree ended lands on the ended child"* — and the same property caused a HIGH defect in 5.1, where a reused child back-dated the first-fire marker. Decide what happens when the resolved child is `ended` or belongs to a previous primary, and say so.
+  - [x] **Write the conclusion into `episode.summary`.** This is the ordering requirement from § finding #3: `collectEvidence` reads `episode.summary`, so the conclusion must exist as an episode on the child **before** any suggestion pass runs, or nothing downstream can see it.
+  - [x] The child is still `active` at `SubagentStop` — but **not for the reason a reader might assume.** `find_referencing_symbols` on `endSessionTree` returns two callers, and the `ensurePrimarySession` one fires **only when the scope key changes**. A SessionStart on the same branch and worktree ends nothing, so children can stay `active` for days. That is fine here and is the cause of the noise problem in Task 3.
+  - [x] Bound what is stored. A final message can be long and `agent_transcript_path` can be megabytes. State the ceiling; parse any `CORTEX_*` option with **`Number`, never `parseInt`** (five incidents) and reuse an existing helper — `resolveEnvCeiling` (`src/capture/census.ts`) or `envNumber`/`envCount` (`src/db/gc.ts`) — rather than writing a sixth.
+  - [x] Read `agent_transcript_path` only if present and readable; never make a finding depend on it.
 
-- [ ] **Task 3 — Draw the episode/suggestion line, and bound the noise it creates** (AC: #1, #2)
-  - [ ] **The ACs answer the design question; the PRD glossary is the rule:** *"episodes are captured, notes are authored."* The record that a subagent ran and what it concluded is an **episode** — automatic, and it projects. A durable decision, blocker or insight is **note-shaped** — suggestion only, projecting when the parent writes it.
-  - [ ] Getting this wrong either way is the story's main risk: too permissive and a subagent's opinion becomes durable memory nobody agreed to (the AD-4/FR-19 failure); too strict and a 200k-token investigation leaves nothing.
-  - [ ] **Do not add a second `suggestNotes` caller.** `endOfTurn` already walks `getSessionTreeIds` and flatMaps `suggestNotes` over every child. Once Task 2 writes the episode, the existing Stop nudge picks it up. This story's job is the episode; the suggestion path is already wired.
-  - [ ] **Bound the re-nagging, which this story would otherwise create.** `getSessionTreeIds` → `getChildSessions` is a bare `SELECT * FROM sessions WHERE parent_session_id = ?` with no status, recency or limit filter; `suggestNotes` has no recency filter; and the primary rarely rotates (above). So every conclusion episode this story writes would re-surface in the Stop nudge on **every subsequent turn that uses any subagent**, for the life of the primary. `endOfTurn`'s `seen` dedupe is per-invocation only. Add a recency window or a shown-marker, and pin it — an accepted suggestion that keeps being re-offered trains the user to ignore the nudge, which is the same attention cost `docs/invariants.md` records for a check that cries wolf.
-  - [ ] Register the new episode kind in **all three** places: `KIND_WEIGHTS` (`src/memory/kind-weights.ts`), and `episodeState` + `episodeImportance` (`src/memory/items.ts`). The latter two switch on kind and fall through to `'warm'` / `0.6` silently — no error, no gate failure, just wrong ranking.
+- [x] **Task 3 — Draw the episode/suggestion line, and bound the noise it creates** (AC: #1, #2)
+  - [x] **The ACs answer the design question; the PRD glossary is the rule:** *"episodes are captured, notes are authored."* The record that a subagent ran and what it concluded is an **episode** — automatic, and it projects. A durable decision, blocker or insight is **note-shaped** — suggestion only, projecting when the parent writes it.
+  - [x] Getting this wrong either way is the story's main risk: too permissive and a subagent's opinion becomes durable memory nobody agreed to (the AD-4/FR-19 failure); too strict and a 200k-token investigation leaves nothing.
+  - [x] **Do not add a second `suggestNotes` caller.** `endOfTurn` already walks `getSessionTreeIds` and flatMaps `suggestNotes` over every child. Once Task 2 writes the episode, the existing Stop nudge picks it up. This story's job is the episode; the suggestion path is already wired.
+  - [x] **Bound the re-nagging, which this story would otherwise create.** `getSessionTreeIds` → `getChildSessions` is a bare `SELECT * FROM sessions WHERE parent_session_id = ?` with no status, recency or limit filter; `suggestNotes` has no recency filter; and the primary rarely rotates (above). So every conclusion episode this story writes would re-surface in the Stop nudge on **every subsequent turn that uses any subagent**, for the life of the primary. `endOfTurn`'s `seen` dedupe is per-invocation only. Add a recency window or a shown-marker, and pin it — an accepted suggestion that keeps being re-offered trains the user to ignore the nudge, which is the same attention cost `docs/invariants.md` records for a check that cries wolf.
+  - [x] Register the new episode kind in **all three** places: `KIND_WEIGHTS` (`src/memory/kind-weights.ts`), and `episodeState` + `episodeImportance` (`src/memory/items.ts`). The latter two switch on kind and fall through to `'warm'` / `0.6` silently — no error, no gate failure, just wrong ranking.
 
-- [ ] **Task 4 — Refuse a subagent editing memory outside its session tree** (AC: #3)
+- [x] **Task 4 — Refuse a subagent editing memory outside its session tree** (AC: #3)
 
   **RULES — binding:**
-  - [ ] **Probe first.** Confirm `PreToolUse` fires for `mcp__cortex__cortex_note` with `agent_id` present before building anything on it. Measured evidence exists only for a `Read`.
-  - [ ] Act **only when `agent_id` is present**. No `agent_id` means the parent, and the parent is untouched by this story. Reuse `agentIdentity`; do not re-derive it.
-  - [ ] Compare the target against **`getSessionTreeIds`** of the calling subagent's session — ruling (a). Not the child id: no note is ever stamped with one.
-  - [ ] Matcher covers **three MCP routes and the shell**: `mcp__cortex__cortex_note`, `mcp__cortex__cortex_resolve`, and `Bash`. Nothing else — not the read-only tools.
-  - [ ] For `Bash`, a **pure-shell text check runs first** and exits without spawning Node unless the command text looks like `cortex note-resolve`, `cortex edit-memory` or `cortex delete-memory`. N-4: no Node per tool call.
-  - [ ] Deny with `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`. Not `decision: "block"`, which the host marks deprecated for `PreToolUse`. The reason is user-facing: say plainly that a subagent may not retire memory from an earlier session, and name what the parent can do instead.
-  - [ ] **Fail OPEN.** Any inability to establish that the target lies outside the tree — unreadable store, missing note, unparseable payload, thrown error — **allows** the call, emits nothing, exits 0.
-  - [ ] Mirror `insertNote`'s supersede predicate **exactly**, per § finding #2: same-kind only, AD-17 veto excluded, subject `trim().toLowerCase()`. Pin it with a test so the guard and the behaviour it guards cannot drift.
+  - [x] **Probe first.** Confirm `PreToolUse` fires for `mcp__cortex__cortex_note` with `agent_id` present before building anything on it. Measured evidence exists only for a `Read`.
+  - [x] Act **only when `agent_id` is present**. No `agent_id` means the parent, and the parent is untouched by this story. Reuse `agentIdentity`; do not re-derive it.
+  - [x] Compare the target against **`getSessionTreeIds`** of the calling subagent's session — ruling (a). Not the child id: no note is ever stamped with one.
+  - [x] Matcher covers **three MCP routes and the shell**: `mcp__cortex__cortex_note`, `mcp__cortex__cortex_resolve`, and `Bash`. Nothing else — not the read-only tools.
+  - [x] For `Bash`, a **pure-shell text check runs first** and exits without spawning Node unless the command text looks like `cortex note-resolve`, `cortex edit-memory` or `cortex delete-memory`. N-4: no Node per tool call.
+  - [x] Deny with `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`. Not `decision: "block"`, which the host marks deprecated for `PreToolUse`. The reason is user-facing: say plainly that a subagent may not retire memory from an earlier session, and name what the parent can do instead.
+  - [x] **Fail OPEN.** Any inability to establish that the target lies outside the tree — unreadable store, missing note, unparseable payload, thrown error — **allows** the call, emits nothing, exits 0.
+  - [x] Mirror `insertNote`'s supersede predicate **exactly**, per § finding #2: same-kind only, AD-17 veto excluded, subject `trim().toLowerCase()`. Pin it with a test so the guard and the behaviour it guards cannot drift.
 
   **WHY — context, not instructions:**
-  - [ ] Three routes retire other people's decisions, not one; `cortex_resolve --replacement` calls `insertNote` and carries the auto-supersede, so a named-target check alone passes it through.
-  - [ ] AD-7 scopes refunds to `PostToolUse` substitution and explicitly not to `PreToolUse` deny. This is a different capability on a different path — add a companion clause to `docs/invariants.md` so a reader does not find an apparent contradiction.
+  - [x] Three routes retire other people's decisions, not one; `cortex_resolve --replacement` calls `insertNote` and carries the auto-supersede, so a named-target check alone passes it through.
+  - [x] AD-7 scopes refunds to `PostToolUse` substitution and explicitly not to `PreToolUse` deny. This is a different capability on a different path — add a companion clause to `docs/invariants.md` so a reader does not find an apparent contradiction.
 
-- [ ] **Task 5 — Close Story 5.2's deferred pairing audit** (AC: #1)
-  - [ ] At `SubagentStop` the per-agent sidecar exists and its `toolUseId` equals the `PreToolUse.tool_use_id` 5.2 recorded. Compare them; record agreement or disagreement.
-  - [ ] Read the sidecar defensively — host-internal, undocumented, derived path. If it cannot be read, record **nothing** and report nothing: an absent audit is not a failed audit, and conflating them produces the false-alarm class 5.1's review found twice.
-  - [ ] Surface the mispairing count where 5.1’s and 5.2’s counters live, under the same rules — and *those rules grew during 5.2’s review (2026-08-07), so inherit the current set, not the one written here*: conditional, silent until there is something to say, `warn` never `fail`, no flapping on a healthy install, **an expected-but-safe outcome is REPORTED and never warned on** (5.2’s refusal count — warning on the design working as ruled is the cries-wolf half of AD-12), and **a corrupt counter must not manufacture a warn** (`readMetaCount` returns a `corrupt` flag; a valid capture count beside an unparseable paired count read as "captured, never paired" and invented a fault out of corruption). A mispairing count is the one number here that genuinely SHOULD warn — say why it differs from the refusal count.
+- [x] **Task 5 — Close Story 5.2's deferred pairing audit** (AC: #1)
+  - [x] At `SubagentStop` the per-agent sidecar exists and its `toolUseId` equals the `PreToolUse.tool_use_id` 5.2 recorded. Compare them; record agreement or disagreement.
+  - [x] Read the sidecar defensively — host-internal, undocumented, derived path. If it cannot be read, record **nothing** and report nothing: an absent audit is not a failed audit, and conflating them produces the false-alarm class 5.1's review found twice.
+  - [x] Surface the mispairing count where 5.1’s and 5.2’s counters live, under the same rules — and *those rules grew during 5.2’s review (2026-08-07), so inherit the current set, not the one written here*: conditional, silent until there is something to say, `warn` never `fail`, no flapping on a healthy install, **an expected-but-safe outcome is REPORTED and never warned on** (5.2’s refusal count — warning on the design working as ruled is the cries-wolf half of AD-12), and **a corrupt counter must not manufacture a warn** (`readMetaCount` returns a `corrupt` flag; a valid capture count beside an unparseable paired count read as "captured, never paired" and invented a fault out of corruption). A mispairing count is the one number here that genuinely SHOULD warn — say why it differs from the refusal count.
 
-- [ ] **Task 6 — Delete `promoteSubagentNotes`** (AC: #2)
-  - [ ] **Recommended disposition: delete it.** It has zero runtime callers (`find_referencing_symbols`: only the `src/index.ts` barrel), it **mutates** — re-activating an arbitrary prior same-kind, same-subject parent note via `Array.prototype.find` over `getNotesBySession`, which returns all statuses — and AC #2 mandates the non-mutating path, so this story must not give it a caller. Keeping it means maintaining dead code that contradicts the AC it sits next to.
-  - [ ] Deleting it also requires removing the `src/index.ts` barrel export and its four call sites plus `describe` block in `tests/consolidate.test.ts`. Prefer `safe_delete_symbol` over hand-editing.
-  - [ ] **Before deleting, check one thing:** Story 1.1 records that auto-supersede being scope-blind is *"load-bearing for … `promoteSubagentNotes`, which relies on `insertNote` superseding the parent note it then re-activates."* Removing it removes one of the two documented reasons that behaviour exists. Confirm the other reason still stands, and record it — the scope-blind supersede is what § finding #2 is entirely about.
-  - [ ] If the dev disagrees and keeps it, fix the re-activation defect and say why keeping it beat deleting it. Do not leave it re-filed a third time.
+- [x] **Task 6 — Delete `promoteSubagentNotes`** (AC: #2)
+  - [x] **Recommended disposition: delete it.** It has zero runtime callers (`find_referencing_symbols`: only the `src/index.ts` barrel), it **mutates** — re-activating an arbitrary prior same-kind, same-subject parent note via `Array.prototype.find` over `getNotesBySession`, which returns all statuses — and AC #2 mandates the non-mutating path, so this story must not give it a caller. Keeping it means maintaining dead code that contradicts the AC it sits next to.
+  - [x] Deleting it also requires removing the `src/index.ts` barrel export and its four call sites plus `describe` block in `tests/consolidate.test.ts`. Prefer `safe_delete_symbol` over hand-editing.
+  - [x] **Before deleting, check one thing:** Story 1.1 records that auto-supersede being scope-blind is *"load-bearing for … `promoteSubagentNotes`, which relies on `insertNote` superseding the parent note it then re-activates."* Removing it removes one of the two documented reasons that behaviour exists. Confirm the other reason still stands, and record it — the scope-blind supersede is what § finding #2 is entirely about.
+  - [x] If the dev disagrees and keeps it, fix the re-activation defect and say why keeping it beat deleting it. Do not leave it re-filed a third time.
 
-- [ ] **Task 7 — Child-timeline rendering: judge it, with a live defect in hand** (AC: #1)
-  - [ ] **Recommended disposition: defer with an owner**, unless the evidence below changes the call. AC #1 requires findings to be *recorded*, not raw child activity to be *rendered*, so this is adjacent scope.
-  - [ ] Judge it against a defect that already exists: `deferred-work.md` records *"`cortex stats` reports `Focus: unfocused` after ten subagent dispatches"*, caused by `getRecentSessions(10)` — the first name in this item's own unfiltered enumeration. "Surface child activity" and "stop children polluting the focus line" are two directions on the same accessor, and fixing one without deciding the other is how this returns a third time.
-  - [ ] **Do not drop it silently.** 5.2's validation caught exactly that in its predecessor.
+- [x] **Task 7 — Child-timeline rendering: judge it, with a live defect in hand** (AC: #1)
+  - [x] **Recommended disposition: defer with an owner**, unless the evidence below changes the call. AC #1 requires findings to be *recorded*, not raw child activity to be *rendered*, so this is adjacent scope.
+  - [x] Judge it against a defect that already exists: `deferred-work.md` records *"`cortex stats` reports `Focus: unfocused` after ten subagent dispatches"*, caused by `getRecentSessions(10)` — the first name in this item's own unfiltered enumeration. "Surface child activity" and "stop children polluting the focus line" are two directions on the same accessor, and fixing one without deciding the other is how this returns a third time.
+  - [x] **Do not drop it silently.** 5.2's validation caught exactly that in its predecessor.
 
-- [ ] **Task 8 — Tests** (AC: #1, #2, #3, #4)
-  - [ ] AD-5: a locked fixture exercising the new kind, in **this** change. The gate reads `seed.items[].kind` in `eval/suites/*.json` — a fixture `topic` alone does not satisfy `checkKindCoverage`. Adding the kind to `eval/kind-coverage.json`'s grandfathered list is explicitly not how to pass; the file says so itself.
-  - [ ] AC #1: a `SubagentStop` payload writes the conclusion as an episode on the **child**; no `agent_id` writes nothing; an over-long message is bounded; a resolved child that is `ended` or from a previous primary behaves as Task 2 decided.
-  - [ ] **AC #1/#2 end-to-end, and this is the test that proves the story works at all:** a subagent with **no captured tool calls** — the Story 5.1 case — produces a conclusion episode, and the Stop nudge then surfaces a suggestion from it. Without the Task 2 ordering this yields nothing, so this test is the guard on § finding #3.
-  - [ ] AC #2: a note-shaped finding produces a **suggestion** and **no `memory_items` row**; the episode half produces exactly one episode. This is the AD-4/FR-19 line and must fail if it moves.
-  - [ ] Task 3's noise bound: a conclusion already surfaced is not re-offered on the next turn.
-  - [ ] AC #3 allow-path: a **parent** call is never denied; a subagent acting on memory from **its own session tree** is never denied.
-  - [ ] AC #3 deny-path: a subagent resolving a note from an earlier session; a subagent writing a `decision` whose subject would supersede one; a subagent calling `cortex_resolve --replacement` with the same effect; a subagent running `cortex delete-memory` through `Bash`.
-  - [ ] AC #3 **fail-open**: a throwing store, an unreadable note, a malformed payload and a missing target each **allow** and emit nothing. Mutation-check this — a fail-closed regression blocks the user's own work and is the worst outcome this story can produce.
-  - [ ] The `Bash` pre-filter does not spawn Node for ordinary commands. Assert on process behaviour, not on reading the script.
-  - [ ] The guard's supersede predicate matches `insertNote`'s: same-kind only, AD-17 veto respected, subject normalised.
-  - [ ] `subagent-stop` returns `''` and never reflex JSON; the hook exits 0 even when the action throws; `stop_hook_active` is honoured.
-  - [ ] Task 5: agreeing ids record agreement; disagreeing ids record a mispairing; an unreadable sidecar records nothing.
-  - [ ] Standard store fixture exactly. Import specifiers end in `.js`. **`npm run lint` does not typecheck `tests/`.**
+- [x] **Task 8 — Tests** (AC: #1, #2, #3, #4)
+  - [x] AD-5: a locked fixture exercising the new kind, in **this** change. The gate reads `seed.items[].kind` in `eval/suites/*.json` — a fixture `topic` alone does not satisfy `checkKindCoverage`. Adding the kind to `eval/kind-coverage.json`'s grandfathered list is explicitly not how to pass; the file says so itself.
+  - [x] AC #1: a `SubagentStop` payload writes the conclusion as an episode on the **child**; no `agent_id` writes nothing; an over-long message is bounded; a resolved child that is `ended` or from a previous primary behaves as Task 2 decided.
+  - [x] **AC #1/#2 end-to-end, and this is the test that proves the story works at all:** a subagent with **no captured tool calls** — the Story 5.1 case — produces a conclusion episode, and the Stop nudge then surfaces a suggestion from it. Without the Task 2 ordering this yields nothing, so this test is the guard on § finding #3.
+  - [x] AC #2: a note-shaped finding produces a **suggestion** and **no `memory_items` row**; the episode half produces exactly one episode. This is the AD-4/FR-19 line and must fail if it moves.
+  - [x] Task 3's noise bound: a conclusion already surfaced is not re-offered on the next turn.
+  - [x] AC #3 allow-path: a **parent** call is never denied; a subagent acting on memory from **its own session tree** is never denied.
+  - [x] AC #3 deny-path: a subagent resolving a note from an earlier session; a subagent writing a `decision` whose subject would supersede one; a subagent calling `cortex_resolve --replacement` with the same effect; a subagent running `cortex delete-memory` through `Bash`.
+  - [x] AC #3 **fail-open**: a throwing store, an unreadable note, a malformed payload and a missing target each **allow** and emit nothing. Mutation-check this — a fail-closed regression blocks the user's own work and is the worst outcome this story can produce.
+  - [x] The `Bash` pre-filter does not spawn Node for ordinary commands. Assert on process behaviour, not on reading the script.
+  - [x] The guard's supersede predicate matches `insertNote`'s: same-kind only, AD-17 veto respected, subject normalised.
+  - [x] `subagent-stop` returns `''` and never reflex JSON; the hook exits 0 even when the action throws; `stop_hook_active` is honoured.
+  - [x] Task 5: agreeing ids record agreement; disagreeing ids record a mispairing; an unreadable sidecar records nothing.
+  - [x] Standard store fixture exactly. Import specifiers end in `.js`. **`npm run lint` does not typecheck `tests/`.**
 
-- [ ] **Task 9 — Documentation** (AC: all)
-  - [ ] `docs/invariants.md`: the episode-versus-suggestion line; the three auto-supersede routes and the exact predicate; ruling (a)'s session-tree definition and *why* the child id cannot be used; ruling (b)'s shell pre-filter; the fail-open rule; the AD-7 companion clause; the sidecar audit's absent-is-not-failed rule; the Stop-nudge recency bound.
-  - [ ] `README.md`: what survives a subagent, and that Cortex refuses a subagent retiring memory from an earlier session.
-  - [ ] `CLAUDE.md`: Current Model, Core Files, tool list if a surface changes.
-  - [ ] `deferred-work.md`: Task 6's and Task 7's decisions, so neither is re-filed a third time.
-  - [ ] `sprint-status.yaml` at each transition.
-  - [ ] **Every written claim must be true of the shipped code.** Cite symbols and files, not line numbers — 5.1's citations were measurably off by one within a day. Note for accuracy: `N-1`, `FR-19` and `AD-9` do **not** appear in `docs/invariants.md` (they live in `epics.md` and the PRD); `AD-4`, `AD-5`, `AD-7`, `AD-12`, `AD-17`, `N-4`, `SM-C3` and `P-5` do.
+- [x] **Task 9 — Documentation** (AC: all)
+  - [x] `docs/invariants.md`: the episode-versus-suggestion line; the three auto-supersede routes and the exact predicate; ruling (a)'s session-tree definition and *why* the child id cannot be used; ruling (b)'s shell pre-filter; the fail-open rule; the AD-7 companion clause; the sidecar audit's absent-is-not-failed rule; the Stop-nudge recency bound.
+  - [x] `README.md`: what survives a subagent, and that Cortex refuses a subagent retiring memory from an earlier session.
+  - [x] `CLAUDE.md`: Current Model, Core Files, tool list if a surface changes.
+  - [x] `deferred-work.md`: Task 6's and Task 7's decisions, so neither is re-filed a third time.
+  - [x] `sprint-status.yaml` at each transition.
+  - [x] **Every written claim must be true of the shipped code.** Cite symbols and files, not line numbers — 5.1's citations were measurably off by one within a day. Note for accuracy: `N-1`, `FR-19` and `AD-9` do **not** appear in `docs/invariants.md` (they live in `epics.md` and the PRD); `AD-4`, `AD-5`, `AD-7`, `AD-12`, `AD-17`, `N-4`, `SM-C3` and `P-5` do.
 
 ## Dev Notes
 
@@ -395,11 +395,93 @@ No new dependency. Conventional Commits, lowercase subject — `feat:`.
 
 ### Agent Model Used
 
+claude-opus-5
+
 ### Debug Log References
+
+- **Mutation campaign: 20 anchors, 20 killed.** EOL-aware after a first pass in which every
+  MULTI-LINE anchor failed to match — the script reported eight `ANCHOR-FAILED` rather than
+  silently skipping them, which is the whole reason that rule exists; single-line anchors matched
+  because they carry no embedded newline. Anchors are now re-line-ended to the file's own
+  convention before matching. Each mutation is proven applied by sha and restored byte-identically
+  (`original -> mutated -> original`, verified). The highest-value anchor the story names — making
+  the guard fail CLOSED — is **M1**, and it is killed.
+- **`sed -i` converted `src/transports/hook-entry.ts` from CRLF to LF** while fixing a field name.
+  Caught by an explicit byte check, not by any test: `core.autocrlf=true` normalises on commit, so
+  the diff and the suite were both clean and nothing would have reported it. Restored, along with
+  the two new source files, so the working tree stays one convention.
+- **Gate 1 sandbox: 16/16**, against the real rendered hook under bash, an isolated `CORTEX_HOME`
+  and a real git project. One check had to be rebuilt mid-run: "an ordinary shell command never
+  spawns Node" was first written as an elapsed-time threshold and measured **485 ms**, which on
+  Windows is indistinguishable between a Node start and bash plus three `jq` spawns — a proxy, and
+  AD-6 forbids one. Replaced with interposition: a second rendering whose Node path is a shim that
+  records the attempt, plus a control proving the shim fires when it should. The marker's presence
+  IS the answer.
+- **Two existing tests were narrowed rather than routed around**, both because this story changes
+  the property they asserted. `tests/substitution.test.ts` required `permissionDecision` to appear
+  nowhere in `hook-entry.ts`; the guard legitimately emits one, and hiding it behind a helper in
+  another file would have kept the scan green while the property it named stopped being true. It
+  now pins the narrower still-true guarantee: no economics surface denies, and in the bridge a
+  decision comes only from `guardMemory`. `tests/capture-hook.test.ts` counted `jq` invocations as
+  a proxy for "no hot-path work"; it now asserts placement (one outside the `case`, the rest inside
+  the guard arm) plus ordering, which is stronger and survives the arm that needs them.
+- **`doctor` reports the two new wirings as `FAIL` until gate 3**, correctly — the entries exist in
+  `REQUIRED_WIRING` and nothing is installed yet. `guard-matcher` is absent from the report for the
+  same reason, which is its conditional-by-design behaviour, not a miss.
 
 ### Completion Notes List
 
+- **Task 3's noise bound was missing from the `tasks 1-3` commit** (`37b4747`) and is built here.
+  The commit registered the new kind and wrote the episode but never bounded the re-nagging, which
+  would have re-offered every conclusion on every later turn for the life of the primary.
+- **Task 4's guard shares `insertNote`'s decision phase rather than mirroring it.**
+  `analyzeNoteWrite` was extracted from `insertNote` and is called by both it and the new
+  `previewNoteWrite`, so same-kind-only, the AD-17 veto and subject normalisation cannot drift —
+  structural, not test-enforced. A test still predicts, performs the write, and compares.
+- **Contest marking is deliberately outside the guard**, recorded in `docs/invariants.md`: it is
+  not a retirement, both sides stay active and visible, and denying it would turn contradiction
+  detection off for subagents entirely.
+- **A circular import was avoided by extracting `tokenizeCommand`** into `src/query/command-tokens.ts`.
+  `doctor` needs the guard's matcher and the guard needs `doctor`'s tokenizer; a second copy of the
+  tokenizer was the alternative, and this repository has already paid for a duplicated primitive
+  (`findDbPath`, four copies, one invisible to text search). `doctor` re-exports it so the barrel
+  and every existing importer are untouched.
+- **Task 6: deleted, not fixed**, after enumerating with `find_referencing_symbols` (barrel only)
+  and `certify_refs` (union 9, `lspOnly: 0`, every text-only hit a doc or its own test). Tombstones
+  in `src/capture/consolidate.ts` and `tests/consolidate.test.ts` record why, including the one
+  thing that survives it: scope-blind auto-supersede is still load-bearing for `cortex_resolve`, and
+  now for a third reason — it is exactly why the memory guard has to exist.
+- **Task 7 was SPLIT, and that is the ruling.** "Stop children polluting the focus line" is a
+  rendering defect on an accessor with a filtered twin already available, and it is fixed here
+  (`getRecentPrimarySessions`). "Surface child activity to a reader" is a feature needing a surface,
+  a budget and a ranking rule, and it stays deferred with an owner. Fixing the first does not
+  foreclose the second — the feature adds a read path rather than changing this one. Both halves are
+  written into `deferred-work.md` so neither returns a third time as "the same accessor".
+- **`SCHEMA_VERSION` is untouched at 6.** No new table and no new column: the conclusion is an
+  episode, the surfaced marker is episode metadata, and the audit uses `meta` counters.
+- **Not done in this story, stated rather than implied:** the three per-dispatch hook spawns are
+  still unbudgeted, and this story adds a fourth wiring on a hot event whose cost was proven to be
+  shell-only but not measured end to end. Gate 3 is where a live number can be taken.
+
 ### File List
+
+| File | Change |
+|---|---|
+| `src/db/store.ts` | `normalizeNoteSubject`, `NoteWritePreview`, `previewNoteWrite`, `analyzeNoteWrite` extracted from `insertNote`, `setEpisodeMetadata`, `getSubagentDispatchByConsumer` |
+| `src/query/memory-guard.ts` | NEW — the `PreToolUse` refusal, its four routes, and the fail-open contract |
+| `src/query/command-tokens.ts` | NEW — the shared shell-ish tokenizer, extracted to break an import cycle |
+| `src/query/subagent-conclusion.ts` | the `surfaced_at` marker helpers and the host sidecar reader |
+| `src/query/doctor.ts` | `guard-memory` wiring, `guard-matcher` row, audit counters in `subagent-sessions`, `tokenizeCommand` re-export |
+| `src/scope/runtime.ts` | `SUBAGENT_AUDITED_COUNT_KEY`, `SUBAGENT_MISPAIRED_COUNT_KEY`, `recordSubagentAudit` |
+| `src/transports/hook-entry.ts` | `guard-memory` action and branch, `guardMemory`, `auditPairing`, the Stop-nudge conclusion bound |
+| `src/transports/cli.ts` | `cortex stats` focus line reads primary sessions only |
+| `src/capture/consolidate.ts`, `src/index.ts` | `promoteSubagentNotes` deleted; tombstone kept |
+| `hooks/claude/cortex-subagent.sh` | the `guard-memory` arm and its two pure-shell gates |
+| `tests/subagent-conclusion.test.ts` | NEW — 49 tests across Tasks 1–5 |
+| `tests/capture-hook.test.ts` | guard-arm shell tests on process behaviour; jq assertion narrowed to placement |
+| `tests/substitution.test.ts` | AD-7 source-negative narrowed to economics surfaces |
+| `tests/doctor.test.ts`, `tests/consolidate.test.ts` | new check id; deleted function's tests removed |
+| `docs/invariants.md`, `README.md`, `CLAUDE.md`, `deferred-work.md` | per Task 9 |
 
 ### Change Log
 

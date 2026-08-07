@@ -272,69 +272,35 @@ export function writeSessionSummary(
 }
 
 /**
- * Promote notes from child sessions into the parent session.
- * - Exact duplicates (same kind + subject + content) are skipped.
- * - Conflicts (same kind + subject, different content, non-null subject) → promote AND mark both as conflict.
- * - Otherwise → promote (insert copy into parent session).
+ * `promoteSubagentNotes` lived here and was DELETED in Story 5.3 (FR-19).
+ *
+ * It copied a child session's notes into the parent, and it MUTATED: on a
+ * same-kind, same-subject collision it re-activated an arbitrary prior parent
+ * note — the first `Array.prototype.find` hit over `getNotesBySession`, which
+ * returns every status, including one superseded long before the child ran.
+ * That was deterministic while only one note per (kind, subject) could be
+ * active; the AD-17 veto ended that guarantee, so a promotion could leave three
+ * active decisions on one subject. `deferred-work.md` carried the defect
+ * through three epics.
+ *
+ * It is gone rather than fixed because AC #2 mandates the opposite shape:
+ * a subagent's findings reach durable memory through the non-mutating
+ * suggestion path, projecting only once the parent accepts them (AD-4, FR-19).
+ * Story 5.3 is the only story that would ever have given this function a
+ * caller, and giving it one would have contradicted the AC it sits next to.
+ * It had zero runtime callers at deletion — `find_referencing_symbols` returned
+ * only the `src/index.ts` barrel, and `certify_refs` added only
+ * `tests/consolidate.test.ts` (`lspOnly: 0`, every text-only hit a doc or that
+ * test), so nothing on the live hook path changes.
+ *
+ * **The one thing to carry forward.** Story 1.1 recorded auto-supersede's
+ * scope-blindness as load-bearing for two things: `cortex_resolve`, and this
+ * function's reliance on `insertNote` superseding the parent note it then
+ * re-activated. Only the second reason dies here. Scope-blind auto-supersede
+ * remains load-bearing, and now for a third reason this story documents: it is
+ * exactly why a subagent's `cortex_note` can retire a decision from another
+ * session at all, which is what the Story 5.3 memory guard exists to refuse.
  */
-export function promoteSubagentNotes(
-  store: CortexStore,
-  parentSessionId: string,
-): void {
-  const children = store.getChildSessions(parentSessionId);
-
-  for (const child of children) {
-    const childNotes = store.getActiveNotes(child.id);
-    // Include superseded notes too — child insertions may have already superseded parent notes
-    const parentNotes = store.getNotesBySession(parentSessionId);
-
-    for (const childNote of childNotes) {
-      // Check for exact duplicate: same kind + subject + content (in any status)
-      const exactDup = parentNotes.find(
-        p =>
-          p.kind === childNote.kind &&
-          p.subject === childNote.subject &&
-          p.content === childNote.content,
-      );
-      if (exactDup) continue;
-
-      // Check for conflict: same kind + subject (non-null), different content
-      const conflictNote =
-        childNote.subject !== null
-          ? parentNotes.find(
-              p =>
-                p.kind === childNote.kind &&
-                p.subject === childNote.subject &&
-                p.content !== childNote.content,
-            )
-          : undefined;
-
-      if (conflictNote) {
-        // Promote the child note — insertNote may auto-supersede the conflicting parent note
-        const promoted = store.insertNote({
-          sessionId: parentSessionId,
-          kind: childNote.kind as InsertNoteOpts['kind'],
-          content: childNote.content,
-          ...(childNote.subject !== null ? { subject: childNote.subject } : {}),
-          ...(childNote.alternatives !== null ? { alternatives: childNote.alternatives } : {}),
-        });
-        // Re-activate the original conflict note if auto-superseded, then mark both as conflict
-        store.updateNoteStatus(conflictNote.id, 'active');
-        store.markConflict(conflictNote.id);
-        store.markConflict(promoted.id);
-      } else {
-        // Normal promotion
-        store.insertNote({
-          sessionId: parentSessionId,
-          kind: childNote.kind as InsertNoteOpts['kind'],
-          content: childNote.content,
-          ...(childNote.subject !== null ? { subject: childNote.subject } : {}),
-          ...(childNote.alternatives !== null ? { alternatives: childNote.alternatives } : {}),
-        });
-      }
-    }
-  }
-}
 
 // ── Level 3: Cross-session merge ─────────────────────────────────────
 

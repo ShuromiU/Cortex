@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { findPosixTool } from './posix-tools.js';
 import { renderHookScript } from '../src/query/install.js';
 import { REQUIRED_WIRING } from '../src/query/doctor.js';
+import { SHELL_MEMORY_COMMANDS } from '../src/query/memory-guard.js';
 
 /**
  * Executes the real PostToolUse hook script. Nothing else can: the script is
@@ -593,6 +594,79 @@ describe.skipIf(!canRun)('cortex-subagent.sh', () => {
     const result = runSubagentHook(payload, 'enabled=true\n', WIRED);
     expect(result.stderr.length).toBeGreaterThan(0);
   });
+
+  // ── guard-memory: N-4 asserted on PROCESS BEHAVIOUR ────────────────
+  //
+  // This arm's matcher includes `Bash`, so it fires on every command the agent
+  // runs, and spawning Node there is the one thing AD-2/N-4 forbids outright.
+  // Reading the script would only prove the lines are in some order; running it
+  // against an unsubstituted `__CORTEX_NODE__` proves Node was never invoked,
+  // because invoking it fails loudly.
+  const GUARD = 'guard-memory';
+
+  it('never reaches Node for an ordinary shell command from a subagent', () => {
+    const result = runSubagentHook(
+      {
+        hook_event_name: 'PreToolUse',
+        agent_id: 'a1b2c3d4e5f60718',
+        tool_name: 'Bash',
+        tool_input: { command: 'npm run build && git status' },
+      },
+      'enabled=true\n',
+      GUARD,
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+  });
+
+  it('never reaches Node for the PARENT, whose tool call carries no agent_id', () => {
+    const result = runSubagentHook(
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'mcp__cortex__cortex_note',
+        tool_input: { kind: 'decision', subject: 'x', content: 'y' },
+      },
+      'enabled=true\n',
+      GUARD,
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+  });
+
+  for (const command of SHELL_MEMORY_COMMANDS) {
+    it(`reaches Node for a subagent running \`cortex ${command}\``, () => {
+      // The other half of the same guarantee: if the text screen were too
+      // narrow the guard would simply never be asked, and every deny-path test
+      // in the TypeScript suite would still pass.
+      const result = runSubagentHook(
+        {
+          hook_event_name: 'PreToolUse',
+          agent_id: 'a1b2c3d4e5f60718',
+          tool_name: 'Bash',
+          tool_input: { command: `cortex ${command} abc123 --yes` },
+        },
+        'enabled=true\n',
+        GUARD,
+      );
+      expect(result.stderr.length).toBeGreaterThan(0);
+    });
+  }
+
+  it('reaches Node for a subagent’s cortex_note without any text screening', () => {
+    const result = runSubagentHook(
+      {
+        hook_event_name: 'PreToolUse',
+        agent_id: 'a1b2c3d4e5f60718',
+        tool_name: 'mcp__cortex__cortex_note',
+        tool_input: { kind: 'decision', subject: 'x', content: 'y' },
+      },
+      'enabled=true\n',
+      GUARD,
+    );
+    expect(result.stderr.length).toBeGreaterThan(0);
+  });
 });
 
 // These read files and assert on their text. They must NOT sit inside
@@ -619,9 +693,30 @@ describe('cortex-subagent.sh — structure', () => {
     for (const line of nodeLines) {
       expect(line.match(/__CORTEX_NODE__/g) ?? [], line).toHaveLength(1);
     }
-    // Exactly one jq — the payload read — and it is outside the case, so it is
-    // paid once however many arms exist.
-    expect(body.match(/\bjq\b/g) ?? []).toHaveLength(1);
+    // Exactly one jq OUTSIDE the case — the payload read — so it is paid once
+    // however many arms exist. Story 5.3's `guard-memory` arm adds more, and
+    // that is the point rather than an exception: its matcher includes `Bash`,
+    // so it fires on every command the agent runs, and the way it honours N-4
+    // is by deciding in SHELL and spawning Node only for the rare call that
+    // survives both gates. So the assertion is placement, not a count — a jq
+    // added anywhere else still fails, and the arm's own jq calls are pinned to
+    // sit before Node in the test below.
+    const caseLine = lines.findIndex(line => /^case\s/.test(line.trim()));
+    expect(caseLine).toBeGreaterThan(-1);
+    const preamble = lines.slice(0, caseLine).join('\n');
+    expect(preamble.match(/\bjq\b/g) ?? []).toHaveLength(1);
+
+    const armOf = (index: number): string | undefined => {
+      for (let cursor = index; cursor >= 0; cursor -= 1) {
+        const opened = /^\s{2}([a-z][a-z-]*|\*)\)\s*$/.exec(lines[cursor]!);
+        if (opened) return opened[1];
+      }
+      return undefined;
+    };
+    lines.forEach((line, index) => {
+      if (index <= caseLine || !/\bjq\b/.test(line)) return;
+      expect(armOf(index), `jq inside the \`${armOf(index)}\` arm`).toBe('guard-memory');
+    });
     // No SQLite, no network, and nothing that blocks waiting on a file.
     for (const banned of ['sqlite', 'curl', 'wget', 'sleep', 'sha256sum']) {
       expect(body, `subagent hook must not use ${banned}`).not.toContain(banned);
@@ -661,6 +756,45 @@ describe('cortex-subagent.sh — structure', () => {
     }
     // And no arm the wiring never reaches, which would be dead shell.
     expect(arms.slice().sort()).toEqual([...wiredActions].sort());
+  });
+
+  it('decides the guard arm in shell before it will spawn Node (N-4)', () => {
+    // The guard's matcher includes `Bash`, so this arm sees every command the
+    // agent runs. Spawning Node there is precisely what AD-2/N-4 forbids, and
+    // the protection is entirely ordering: both cheap exits must come first.
+    // A reordering that moves the Node line above either gate is type-clean,
+    // silent, and would put a process spawn on every shell command.
+    const lines = fs.readFileSync(SUBAGENT_SCRIPT, 'utf8').split(/\r?\n/);
+    const armStart = lines.findIndex(line => /^\s{2}guard-memory\)\s*$/.test(line));
+    expect(armStart).toBeGreaterThan(-1);
+    const armEnd = lines.findIndex(
+      (line, index) => index > armStart && /^\s{4};;\s*$/.test(line),
+    );
+    expect(armEnd).toBeGreaterThan(armStart);
+    const arm = lines.slice(armStart, armEnd);
+
+    const agentGate = arm.findIndex(line => /GUARD_AGENT_ID.*exit 0/.test(line));
+    const bashGate = arm.findIndex(line => /\*\)\s*exit 0\s*;;/.test(line));
+    const nodeLine = arm.findIndex(line => line.includes('__CORTEX_NODE__'));
+    expect(agentGate, 'no agent_id gate in the guard arm').toBeGreaterThan(-1);
+    expect(bashGate, 'no Bash command-text gate in the guard arm').toBeGreaterThan(-1);
+    expect(nodeLine).toBeGreaterThan(agentGate);
+    expect(nodeLine).toBeGreaterThan(bashGate);
+  });
+
+  it('screens the same shell commands the guard module knows about', () => {
+    // The cheap check and the real one are two lists in two languages, and a
+    // route dropped from the shell `case` disables the guard for it while every
+    // TypeScript test still passes — the guard would simply never be asked.
+    const script = fs.readFileSync(SUBAGENT_SCRIPT, 'utf8');
+    const armStart = script.indexOf('guard-memory)');
+    const caseLine = /case "\$GUARD_CMD" in\s*\n\s*([^\n]*)\)/.exec(script.slice(armStart));
+    expect(caseLine, 'no command-text case in the guard arm').not.toBeNull();
+    const screened = caseLine![1]!
+      .split('|')
+      .map(pattern => pattern.replace(/\*/g, '').trim())
+      .filter(pattern => pattern.length > 0);
+    expect(screened.slice().sort()).toEqual([...SHELL_MEMORY_COMMANDS].sort());
   });
 
   it('passes each arm its OWN action token through to Node', () => {

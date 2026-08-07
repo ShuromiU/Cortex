@@ -9,7 +9,7 @@ export { handleReadEvent, handleEditEvent, handleWriteEvent, handleCmdEvent, han
 export { computeFileDigest, createDigestCache, resolveDigestMaxBytes, DEFAULT_DIGEST_MAX_BYTES, type FileDigest, type DigestCache, type DigestDeps } from './capture/digest.js';
 export { writeDigestIndex, collectIndexRecords, renderDigestIndex, formatIndexLine, parseIndexLine, escapeIndexField, unescapeIndexField, deriveDigestIndexPath, digestIndexExists, indexLookupNeedle, DIGEST_INDEX_FILENAME, INDEX_ABSENT, INDEX_TEMP_SUFFIX, type DigestIndexRecord, type IndexWriteDeps } from './capture/digest-index.js';
 export { redactCommand, redactSensitiveText, captureOutputTail, classifyCommand, extractTouchedFiles } from './capture/redact.js';
-export { consolidateLevel1, renderCompressed, getPendingConsolidation, writeSessionSummary, promoteSubagentNotes, mergeProjectState, type CompressedEvent } from './capture/consolidate.js';
+export { consolidateLevel1, renderCompressed, getPendingConsolidation, writeSessionSummary, mergeProjectState, type CompressedEvent } from './capture/consolidate.js';
 export { computeMemoryHotness, deriveMemoryItemState, refreshMemoryHotness, selectWorkingMemoryItems, type ScoredMemoryItem } from './memory/hotness.js';
 export { demoteMemoryState, isSupersededMemoryItem, isSupersededMemoryText, noteTrailerLines } from './memory/items.js';
 export { extractMemoryReferences, type ExtractedMemoryReference, type MemoryReferenceType } from './memory/references.js';

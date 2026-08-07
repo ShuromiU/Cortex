@@ -320,6 +320,36 @@ export const SUBAGENT_AMBIGUOUS_COUNT_KEY = 'subagent_ambiguous_count';
 export const SUBAGENT_BRIEFED_COUNT_KEY = 'subagent_briefed_count';
 
 /**
+ * Pairings this build was ABLE to check against the host's own record
+ * (FR-19, Story 5.3).
+ *
+ * Exists so the mispairing count below can never be read alone. The sidecar is
+ * host-internal, undocumented and reached by a derived path: it can be absent
+ * for reasons that say nothing about Cortex, and an absent audit is not a failed
+ * audit. Reporting `mispaired: 0` without saying how many were checked reads as
+ * "verified correct" when the honest statement is "never verified" — the
+ * silent-coverage lie AD-12 is about, arriving through a counter instead of a
+ * missing hook.
+ */
+export const SUBAGENT_AUDITED_COUNT_KEY = 'subagent_audited_count';
+
+/**
+ * Audited pairings where the sidecar's `toolUseId` did NOT match the capture
+ * Story 5.2 handed that subagent.
+ *
+ * **The one counter in this epic that genuinely should warn, and the reason is
+ * worth stating next to the one that must not.** `SUBAGENT_AMBIGUOUS_COUNT_KEY`
+ * counts refusals — the design working exactly as ruled, where silence is the
+ * correct outcome — so warning on it would be the cries-wolf half of AD-12. A
+ * mispairing is the opposite: it means a subagent was briefed from somebody
+ * else's dispatch and told something untrue about its own task (SM-C3), which is
+ * the worst failure this product can produce, and it is invisible without this
+ * number. Nothing else can see it: the brief was emitted, the counters all
+ * incremented, and every `doctor` row reads green.
+ */
+export const SUBAGENT_MISPAIRED_COUNT_KEY = 'subagent_mispaired_count';
+
+/**
  * Record that a dispatch was captured. Advisory, like
  * {@link recordSubagentStart}: the capture row is the deliverable and a failed
  * counter must never cost it (AD-12).
@@ -360,6 +390,25 @@ export function recordSubagentPairing(store: CortexStore): void {
 export function recordSubagentAmbiguity(store: CortexStore): void {
   try {
     store.incrementMetaCounter(SUBAGENT_AMBIGUOUS_COUNT_KEY);
+  } catch {
+    // Advisory only.
+  }
+}
+
+/**
+ * Record the outcome of one pairing audit (FR-19, Story 5.3).
+ *
+ * Both counters move together, so `mispaired / audited` is always a ratio over
+ * the same population. Call it only when the sidecar was actually read — an
+ * unreadable sidecar records NOTHING, because conflating "could not check" with
+ * "checked and fine" is how a diagnostic starts lying.
+ */
+export function recordSubagentAudit(store: CortexStore, matched: boolean): void {
+  try {
+    store.incrementMetaCounter(SUBAGENT_AUDITED_COUNT_KEY);
+    if (!matched) {
+      store.incrementMetaCounter(SUBAGENT_MISPAIRED_COUNT_KEY);
+    }
   } catch {
     // Advisory only.
   }

@@ -6,6 +6,8 @@ A trust, freshness, and economy layer for coding-agent memory, not a transcript 
 - Cortex is retrieval-first, not transcript-first, and pull-based, not push-based: a tiny validated session brief at startup plus the high-confidence reflex are the memory channels; coercion is reduced to one one-line hint per session.
 - Sessions are branch/worktree-aware. A dispatched subagent gets its own child session **at `SubagentStart`**, before it does anything, so a subagent that only thinks is still attributable; its captured tool activity then files under that same session.
 - A dispatched subagent is **briefed automatically** from its dispatch description (FR-18): the description is captured at `PreToolUse` on the `Agent` tool, paired at `SubagentStart` on `(session_id, prompt_id, agent_type)`, and injected as a ≤150-token `additionalContext` brief billed to the child session. The cap is enforced on this surface rather than inherited — `assembleBudgeted` keeps its first line whatever its size. **More than one candidate means say nothing** (ruling, ShuromiU, 2026-08-07): the story's FIFO premise was measured false, and FIFO's real effect was handing a denied dispatch's context to the next same-type subagent. Silence is the default throughout — no matching memory, no unambiguous pairing, a brief the parent already pasted, or any failure emits nothing. `CORTEX_SUBAGENT_BRIEF=off` disables both the brief and the capture.
+- **What a subagent concluded survives it (FR-19, Story 5.3).** At `SubagentStop` its final answer is written as a `subagent_conclusion` episode on the CHILD, into `episode.summary` — the ordering is a requirement, not a detail: `collectEvidence` reads episode summaries, events and command runs and never `last_assistant_message`, and for a child the other two are near-empty, so a subagent that only thinks produced nothing without it. The episode projects (episodes are captured); anything note-shaped stays a **suggestion** the parent chooses to write (AD-4). Each conclusion is offered ONCE, marked on the episode, because `getSessionTreeIds` is unfiltered and the primary rarely rotates. This hook is the only one in the epic that can block a subagent, so it swallows its own errors and honours `stop_hook_active`. `SubagentStop` also closes Story 5.2's deferred pairing audit against the host's per-agent sidecar — absent is not failed, and the mispairing count is the one counter here that warns.
+- **A subagent may not retire, rewrite or delete memory from an earlier session (FR-19 AC #3).** Enforced at `PreToolUse` on `cortex_note`, `cortex_resolve` and `Bash`, because the MCP server cannot see a caller id and `PreToolUse` can deny. "Its own session" means its own session TREE (ruling (a)) — no note is ever stamped with a subagent's id. The guard runs `insertNote`'s own decision phase via `previewNoteWrite` rather than a copy of it, covers all three auto-supersede routes plus the shell, screens `Bash` in pure shell before Node (N-4), and **fails OPEN everywhere**. The parent is exempt: it is the acceptance path.
 - `memory_items` is the canonical search/retrieval layer.
 - Default state starts with current-session load-bearing notes, then uses the scored working set, within a token budget.
 - Cortex tracks a lightweight current app graph, validates file/path references extracted from memory, and resolves renamed files through a git rename map (`[moved:]`) instead of treating them as missing.
@@ -61,6 +63,9 @@ A trust, freshness, and economy layer for coding-agent memory, not a transcript 
 - `src/query/state.ts` — startup/default working-set rendering (budgeted)
 - `src/query/session-brief.ts` — the SessionStart pull channel (validated ≤150-token brief)
 - `src/query/subagent-brief.ts` — the automatic subagent brief (FR-18): the pairing horizon, the prompt summary kept for AC #3, and the retrieve-then-brief order that keeps `brief()`'s `No context found` off a fresh subagent's context
+- `src/query/subagent-conclusion.ts` — subagent write-back (FR-19): the conclusion's bound and its transcript fallback, the `surfaced_at` marker that stops the Stop nudge re-offering it forever, and the host sidecar reader behind the pairing audit
+- `src/query/memory-guard.ts` — the `PreToolUse` refusal (FR-19 AC #3): the three guarded routes plus the shell, `MEMORY_GUARD_MATCHER`, `SHELL_MEMORY_COMMANDS` (mirrored in the hook script's `case`), and the fail-open contract
+- `src/query/command-tokens.ts` — the one shell-ish tokenizer, shared by `doctor` and the memory guard; `doctor` re-exports it
 - `src/query/stats.ts` — the P&L report behind `cortex stats` (FR-9): session/scope token blocks, floored ratio, retrieval health; read-only by contract
 - `src/query/recall.ts` — `cortex_recall` search (answer-shaped, budgeted); owns `assembleBudgeted` and its two-pass `BudgetedEvidence` contract, shared with `brief`
 - `src/query/brief.ts` — `cortex_brief` topical context
@@ -78,7 +83,7 @@ A trust, freshness, and economy layer for coding-agent memory, not a transcript 
 - `src/transports/cli.ts` — `inject-header`, `route`, `reflect`, `flush-spool`, `gc`, `install` (alias `install-hooks`), `doctor`, `substitution`, evaluation
 - `src/transports/hook-entry.ts` — JSON hook bridge (reflex, one-shot consult hint, `dispatch-pre`, `subagent-start`, `end-of-turn`)
 - `src/transports/mcp.ts` — MCP tools used by Claude (incl. engagement state at `<project>/.cortex.state`)
-- `hooks/claude/cortex-subagent.sh` — the subagent bridge (FR-17 + FR-18), on TWO events: engagement guard, action validation, one Node spawn per arm and one arm per fire. `dispatch-pre` (`PreToolUse` on `Agent`) records the dispatch and prints nothing; `subagent-start` (`SubagentStart`) creates the child session and may emit the brief envelope
+- `hooks/claude/cortex-subagent.sh` — the subagent bridge (FR-17 + FR-18 + FR-19), on FOUR wirings: engagement guard, action validation, one Node spawn per arm and one arm per fire. `dispatch-pre` (`PreToolUse` on `Agent`) records the dispatch and prints nothing; `subagent-start` (`SubagentStart`) creates the child session and may emit the brief envelope; `subagent-stop` (`SubagentStop`) records the conclusion and prints nothing, ever; `guard-memory` (`PreToolUse` on the two memory-writing MCP tools and `Bash`) is the only arm that can deny, and the only one that screens in pure shell first — its matcher includes `Bash`, so it fires on every command
 - `hooks/claude/*.sh` — canonical hook script templates installed by `cortex install-hooks`; each carries a `# cortex-hook-template:` stamp that `doctor` recompares
 - `eval/suites/` + `eval/baselines/` — locked retrieval-quality fixtures and reference results
 - `~/.claude/CLAUDE.md` — global user guidance that must stay aligned with Cortex consult policy for new projects outside this repo
@@ -98,9 +103,12 @@ memory (FR-21/22) and cascade deletion; schema versioning and the newer-store re
 content digests, the flat index and the read ledger (FR-5/FR-6); the session brief and gate
 surfaces (FR-7); verified read substitution and the B-4a budgets; the negative search cache
 (FR-12/FR-13); the command-outcome oracle, its transcript source and its never-executed gate
-(FR-14; FR-15 withdrawn); the token ledger (FR-8/FR-9); and the subagent brief — its dispatch
+(FR-14; FR-15 withdrawn); the token ledger (FR-8/FR-9); the subagent brief — its dispatch
 capture, its `(session_id, prompt_id, agent_type)` pairing key, the FIFO fan-out residual and its
-counter, the two expiry horizons, the 150-token ruling, and the child-session billing (FR-18).
+counter, the two expiry horizons, the 150-token ruling, and the child-session billing (FR-18); and
+subagent write-back — the episode-before-suggestion ordering, the episode/suggestion line, the
+once-only nudge marker, the memory guard's session-TREE rule and its fail-open contract, the
+pairing audit's absent-is-not-failed rule, and the `promoteSubagentNotes` deletion (FR-19).
 Grep it by FR/AD number, symbol name, or file path.
 
 ## When To Use Cortex

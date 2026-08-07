@@ -291,6 +291,12 @@ describe('runDoctor on a healthy installation', () => {
         // every other row read green — the same gap `capture-matcher` closes.
         'dispatch-matcher',
         'engagement',
+        // Story 5.3: the same gap again, with a worse consequence. The memory
+        // guard is the only thing stopping a subagent retiring an earlier
+        // session's memory, and it protects three routes independently — a
+        // matcher covering the two MCP tools but not `Bash` leaves `cortex
+        // delete-memory` open while every other row reads green.
+        'guard-matcher',
         'hook-currency',
         'hook-interpreter',
         'hook-scripts',

@@ -7,7 +7,6 @@ import {
   renderCompressed,
   getPendingConsolidation,
   writeSessionSummary,
-  promoteSubagentNotes,
   mergeProjectState,
 } from '../src/capture/consolidate.js';
 import type { CompressedEvent } from '../src/capture/consolidate.js';
@@ -396,103 +395,14 @@ describe('writeSessionSummary', () => {
   });
 });
 
-// ── Level 2: promoteSubagentNotes ─────────────────────────────────────
-
-describe('promoteSubagentNotes', () => {
-  it('promotes child session notes to parent', () => {
-    const db = createTestDb();
-    const store = new CortexStore(db);
-    const parent = store.createSession();
-    const child = store.createSession({ parentSessionId: parent.id });
-
-    store.insertNote({
-      sessionId: child.id,
-      kind: 'insight',
-      content: 'Found something interesting',
-    });
-
-    promoteSubagentNotes(store, parent.id);
-
-    const parentNotes = store.getActiveNotes(parent.id);
-    expect(parentNotes).toHaveLength(1);
-    expect(parentNotes[0]!.content).toBe('Found something interesting');
-  });
-
-  it('deduplicates identical notes on promotion', () => {
-    const db = createTestDb();
-    const store = new CortexStore(db);
-    const parent = store.createSession();
-    const child = store.createSession({ parentSessionId: parent.id });
-
-    // Same note in both parent and child
-    store.insertNote({
-      sessionId: parent.id,
-      kind: 'insight',
-      content: 'Duplicate insight',
-    });
-    store.insertNote({
-      sessionId: child.id,
-      kind: 'insight',
-      content: 'Duplicate insight',
-    });
-
-    promoteSubagentNotes(store, parent.id);
-
-    const parentNotes = store.getActiveNotes(parent.id);
-    // Should still be only 1, not 2
-    expect(parentNotes).toHaveLength(1);
-  });
-
-  it('flags conflicting notes (same kind+subject, different content)', () => {
-    const db = createTestDb();
-    const store = new CortexStore(db);
-    const parent = store.createSession();
-    const child = store.createSession({ parentSessionId: parent.id });
-
-    store.insertNote({
-      sessionId: parent.id,
-      kind: 'decision',
-      subject: 'auth-strategy',
-      content: 'Use JWT',
-    });
-    store.insertNote({
-      sessionId: child.id,
-      kind: 'decision',
-      subject: 'auth-strategy',
-      content: 'Use sessions instead',
-    });
-
-    promoteSubagentNotes(store, parent.id);
-
-    const parentNotes = store.getActiveNotes(parent.id);
-    // Should have 2 notes (original + promoted)
-    expect(parentNotes).toHaveLength(2);
-
-    // Both should be marked as conflict
-    for (const note of parentNotes) {
-      expect(note.conflict).toBe(true);
-    }
-  });
-
-  it('promotes notes from multiple children', () => {
-    const db = createTestDb();
-    const store = new CortexStore(db);
-    const parent = store.createSession();
-    const child1 = store.createSession({ parentSessionId: parent.id });
-    const child2 = store.createSession({ parentSessionId: parent.id });
-
-    store.insertNote({ sessionId: child1.id, kind: 'insight', content: 'Insight from child 1' });
-    store.insertNote({ sessionId: child2.id, kind: 'insight', content: 'Insight from child 2' });
-
-    promoteSubagentNotes(store, parent.id);
-
-    const parentNotes = store.getActiveNotes(parent.id);
-    expect(parentNotes).toHaveLength(2);
-    const contents = parentNotes.map(n => n.content);
-    expect(contents).toContain('Insight from child 1');
-    expect(contents).toContain('Insight from child 2');
-  });
-});
+// ── Level 2: promoteSubagentNotes — DELETED in Story 5.3 ─────────
+//
+// The function is gone (FR-19, Task 6) and so are its four tests. It copied a
+// child's notes into the parent and re-activated an arbitrary prior on a
+// collision — a MUTATION, where AC #2 requires a subagent's findings to reach
+// durable memory only through the non-mutating suggestion path. The tombstone
+// in src/capture/consolidate.ts carries the full reasoning; this note exists so
+// the gap between the two Level markers does not read as an accidental hole.
 
 // ── Level 3: mergeProjectState ────────────────────────────────────────
 
