@@ -1107,17 +1107,47 @@ So that a 200k-token run leaves more than one paragraph behind.
 >
 > **RULING (ShuromiU, 2026-08-06): enforce it — refuse the operation.** The
 > criterion protects decisions the user authored from being retired by an agent
-> the user dispatched, and that is worth Cortex's first blocking hook. Bound by
-> two conditions that were part of the ruling: the matcher covers **Cortex's own
-> memory-editing MCP tools only**, never anything else; and the check **fails
-> OPEN** — if it cannot establish that the note belongs to another session, the
-> operation proceeds, so a defect here can never wedge the user's work. Note
-> this is a new capability class: AD-7 scopes refunds to `PostToolUse`
-> substitution and explicitly not to `PreToolUse` deny, so that invariant needs
-> a companion clause rather than a contradiction. Rejected: *report but allow*
-> (honest, but leaves an authored decision quietly retirable) and *withdraw the
-> AC* (cheapest, and the option Epic 4 took four times — declined here because
-> this one guards the user's own authored memory).
+> the user dispatched, and that is worth Cortex's first blocking hook. The check
+> **fails OPEN** — if it cannot establish that the target belongs elsewhere, the
+> operation proceeds, so a defect here can never wedge the user's work. Note this
+> is a new capability class: AD-7 scopes refunds to `PostToolUse` substitution and
+> explicitly not to `PreToolUse` deny, so that invariant needs a companion clause
+> rather than a contradiction. Rejected: *report but allow* (honest, but leaves an
+> authored decision quietly retirable) and *withdraw the AC* (cheapest, and the
+> option Epic 4 took four times — declined because this one guards the user's own
+> authored memory).
+>
+> **AMENDED AGAIN 2026-08-06 (two further rulings), because the first amendment
+> assumed two things that measurement refuted.**
+>
+> **(a) "Its own session" means its own SESSION TREE.** No note is ever stamped
+> with a subagent's session id: `cortex_note` and `cortex_resolve` both resolve
+> through `ensureSession(store, cwd)` → `ensureScopedSession(store, cwd)` with no
+> identity, so **every note in every store carries a primary's id** — including
+> notes a subagent writes. Comparing against the child's id would therefore deny
+> every subagent memory operation, including edits to notes that subagent wrote
+> seconds earlier: the fail-closed outcome this AC's own ruling forbids.
+> **RULING (ShuromiU, 2026-08-06):** a subagent may act on memory belonging to
+> **its own session tree** — the conversation it was dispatched from — and is
+> refused on memory from any earlier session. That is buildable today via
+> `getSessionTreeIds` and it protects what accumulates: decisions authored in
+> previous sessions. Stated limit, accepted: a subagent can still overwrite a
+> decision made minutes earlier in the *same* conversation. Rejected: refusing
+> all subagent memory writes (blocks legitimate use and contradicts FR-19's
+> propose-don't-author model), and correcting note attribution first so the rule
+> works exactly (correct, but it changes attribution everywhere, reaches into
+> Epic 0's session machinery, and is its own story).
+>
+> **(b) The command-line route is in scope.** `cortex note-resolve`,
+> `cortex edit-memory` and `cortex delete-memory` reach the same memory through
+> `Bash`, and `delete-memory` is strictly more destructive than the operation
+> this AC names. A guard covering only the MCP tools would report the criterion
+> met while leaving the wider hole open — the exact failure this epic keeps
+> catching. **RULING (ShuromiU, 2026-08-06): close it too**, with a cheap text
+> check in the shell so the expensive path only wakes when a command actually
+> looks like a memory edit, keeping the per-tool-call cost near zero (N-4).
+> Rejected: guarding only the MCP route and documenting the bypass, and
+> withdrawing the AC.
 
 **Given** a new episode kind is introduced by write-back
 **When** the change ships
