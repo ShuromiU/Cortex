@@ -273,6 +273,89 @@ export function recordSubagentStart(store: CortexStore): void {
   }
 }
 
+/**
+ * First time this scope captured a dispatch at `PreToolUse` on the `Agent` tool
+ * (FR-18, Story 5.2). Same write-once discipline as {@link SUBAGENT_START_KEY},
+ * and for the same reason: `doctor` must be able to tell "the capture path has
+ * never run here" from "nothing has been dispatched lately", and a store that
+ * accumulated subagent history BEFORE this feature shipped must not be warned
+ * about on day one. That day-one flap is the failure `command-outcomes` had to
+ * be repaired for and Story 5.1 was built to avoid.
+ */
+export const SUBAGENT_DISPATCH_KEY = 'subagent_dispatch_first_seen';
+
+/** Dispatches captured since {@link SUBAGENT_DISPATCH_KEY} was set. */
+export const SUBAGENT_DISPATCH_COUNT_KEY = 'subagent_dispatch_count';
+
+/**
+ * Captures successfully paired with a `SubagentStart`. Captured-but-never-paired
+ * is the wired-but-dead state that nothing else can see: the dispatch hook fires,
+ * the start hook fires, `doctor` reports both healthy, and no subagent is ever
+ * briefed.
+ */
+export const SUBAGENT_PAIRED_COUNT_KEY = 'subagent_paired_count';
+
+/**
+ * Pairings where more than one capture matched the key, so only dispatch order
+ * separated them — N same-type subagents dispatched in one assistant message.
+ *
+ * REPORTED, never warned on. That fan-out is routine rather than exotic (this
+ * repository's own review workflow dispatches three same-type agents in a single
+ * message), so a warn here would fire on a healthy install every time the
+ * feature did its job — the "cries wolf" half of AD-12, which costs exactly the
+ * attention the other half is meant to buy. What the counter buys is evidence:
+ * if it stays low the FIFO assumption is sound, and if it climbs against the
+ * pairing count the design needs revisiting before it can be trusted.
+ */
+export const SUBAGENT_AMBIGUOUS_COUNT_KEY = 'subagent_ambiguous_count';
+
+/** Pairings that actually emitted a brief. Silence is the default (N-1). */
+export const SUBAGENT_BRIEFED_COUNT_KEY = 'subagent_briefed_count';
+
+/**
+ * Record that a dispatch was captured. Advisory, like
+ * {@link recordSubagentStart}: the capture row is the deliverable and a failed
+ * counter must never cost it (AD-12).
+ */
+export function recordSubagentDispatch(store: CortexStore): void {
+  try {
+    // NOW, never a timestamp taken from a row — same rule as
+    // `recordSubagentStart`, where stamping a resolved child's `started_at`
+    // back-dated the marker and swept the whole pre-feature history into
+    // `doctor`'s window.
+    if (store.getMeta(SUBAGENT_DISPATCH_KEY) === undefined) {
+      store.setMeta(SUBAGENT_DISPATCH_KEY, new Date().toISOString());
+    }
+    store.incrementMetaCounter(SUBAGENT_DISPATCH_COUNT_KEY);
+  } catch {
+    // Advisory only.
+  }
+}
+
+/**
+ * Record the outcome of one pairing attempt that found a capture.
+ *
+ * One call, three counters, so a caller cannot book a brief without booking the
+ * pairing that produced it — the shape that made `doctor` numbers disagree in
+ * Story 5.1.
+ */
+export function recordSubagentPairing(
+  store: CortexStore,
+  outcome: { ambiguous: boolean; briefed: boolean },
+): void {
+  try {
+    store.incrementMetaCounter(SUBAGENT_PAIRED_COUNT_KEY);
+    if (outcome.ambiguous) {
+      store.incrementMetaCounter(SUBAGENT_AMBIGUOUS_COUNT_KEY);
+    }
+    if (outcome.briefed) {
+      store.incrementMetaCounter(SUBAGENT_BRIEFED_COUNT_KEY);
+    }
+  } catch {
+    // Advisory only — the brief has already been produced by this point.
+  }
+}
+
 export function ensureScopedSession(
   store: CortexStore,
   cwd: string,

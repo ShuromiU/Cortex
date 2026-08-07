@@ -5,6 +5,7 @@ A trust, freshness, and economy layer for coding-agent memory, not a transcript 
 ## Current Model
 - Cortex is retrieval-first, not transcript-first, and pull-based, not push-based: a tiny validated session brief at startup plus the high-confidence reflex are the memory channels; coercion is reduced to one one-line hint per session.
 - Sessions are branch/worktree-aware. A dispatched subagent gets its own child session **at `SubagentStart`**, before it does anything, so a subagent that only thinks is still attributable; its captured tool activity then files under that same session.
+- A dispatched subagent is **briefed automatically** from its dispatch description (FR-18): the description is captured at `PreToolUse` on the `Agent` tool, paired at `SubagentStart` on `(session_id, prompt_id, agent_type)`, and injected as a ≤150-token `additionalContext` brief billed to the child session. Silence is the default — no matching memory, no pairing, a brief the parent already pasted, or any failure emits nothing. `CORTEX_SUBAGENT_BRIEF=off` disables it.
 - `memory_items` is the canonical search/retrieval layer.
 - Default state starts with current-session load-bearing notes, then uses the scored working set, within a token budget.
 - Cortex tracks a lightweight current app graph, validates file/path references extracted from memory, and resolves renamed files through a git rename map (`[moved:]`) instead of treating them as missing.
@@ -59,6 +60,7 @@ A trust, freshness, and economy layer for coding-agent memory, not a transcript 
 - `src/query/reflex.ts` — focus-shift memory reflex for hook `additionalContext`
 - `src/query/state.ts` — startup/default working-set rendering (budgeted)
 - `src/query/session-brief.ts` — the SessionStart pull channel (validated ≤150-token brief)
+- `src/query/subagent-brief.ts` — the automatic subagent brief (FR-18): the pairing horizon, the prompt summary kept for AC #3, and the retrieve-then-brief order that keeps `brief()`'s `No context found` off a fresh subagent's context
 - `src/query/stats.ts` — the P&L report behind `cortex stats` (FR-9): session/scope token blocks, floored ratio, retrieval health; read-only by contract
 - `src/query/recall.ts` — `cortex_recall` search (answer-shaped, budgeted); owns `assembleBudgeted` and its two-pass `BudgetedEvidence` contract, shared with `brief`
 - `src/query/brief.ts` — `cortex_brief` topical context
@@ -96,7 +98,9 @@ memory (FR-21/22) and cascade deletion; schema versioning and the newer-store re
 content digests, the flat index and the read ledger (FR-5/FR-6); the session brief and gate
 surfaces (FR-7); verified read substitution and the B-4a budgets; the negative search cache
 (FR-12/FR-13); the command-outcome oracle, its transcript source and its never-executed gate
-(FR-14; FR-15 withdrawn); and the token ledger (FR-8/FR-9).
+(FR-14; FR-15 withdrawn); the token ledger (FR-8/FR-9); and the subagent brief — its dispatch
+capture, its `(session_id, prompt_id, agent_type)` pairing key, the FIFO fan-out residual and its
+counter, the two expiry horizons, the 150-token ruling, and the child-session billing (FR-18).
 Grep it by FR/AD number, symbol name, or file path.
 
 ## When To Use Cortex

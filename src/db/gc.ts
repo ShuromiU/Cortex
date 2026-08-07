@@ -24,6 +24,8 @@ export interface GcOptions {
   offerDays?: number;
   /** Delete negative-search records not re-confirmed within this many days (FR-12/FR-16). */
   negativeDays?: number;
+  /** Delete captured subagent dispatches older than this many days (FR-18). */
+  dispatchDays?: number;
   dryRun?: boolean;
   vacuum?: 'auto' | 'always' | 'never';
   now?: Date;
@@ -45,6 +47,7 @@ export interface GcReport {
   content_digests: GcCategoryReport;
   read_offers: GcCategoryReport;
   negative_results: GcCategoryReport;
+  subagent_dispatches: GcCategoryReport;
   /** The SOURCE table. `command_run_items` above is its projection (Story 4.6). */
   command_runs: GcCategoryReport;
   /** Projection rows whose source row is gone. */
@@ -73,6 +76,15 @@ const DEFAULTS = {
   // search, so an actively-useful record never ages out (FR-16, Story 4.3 —
   // shipped with the table rather than deferred, the 3.1 lesson).
   negativeDays: 30,
+  // Shortest window here, because a dispatch capture is the shortest-lived thing
+  // in the store: it is consumed about 800 ms after it is written, and the
+  // pairing horizon that governs correctness is five MINUTES. Everything past
+  // that is spent staging, kept only long enough that a `doctor` run the next
+  // morning still has rows to describe. This rule ships WITH the table rather
+  // than after it — `content_digests` shipped in Story 3.1 with no GC rule at
+  // all, grew monotonically for the life of a project, and became an action item
+  // a later story had to absorb.
+  dispatchDays: 7,
 } as const;
 
 function envNumber(name: string): number | undefined {
@@ -127,6 +139,9 @@ function resolveGcOptions(options: GcOptions = {}): Required<Omit<GcOptions, 'no
     offerDays: normalizeDays(options.offerDays) ?? envDays('CORTEX_GC_OFFER_DAYS') ?? DEFAULTS.offerDays,
     negativeDays:
       normalizeDays(options.negativeDays) ?? envDays('CORTEX_GC_NEGATIVE_DAYS') ?? DEFAULTS.negativeDays,
+    // `envDays`, never `envNumber`: `Number`, never `parseInt`.
+    dispatchDays:
+      normalizeDays(options.dispatchDays) ?? envDays('CORTEX_GC_DISPATCH_DAYS') ?? DEFAULTS.dispatchDays,
     dryRun: options.dryRun ?? true,
     vacuum: options.vacuum ?? 'auto',
     now: options.now ?? new Date(),
@@ -478,6 +493,37 @@ function pruneReadOffers(
   return { candidates, deleted: result.changes };
 }
 
+/**
+ * Drop captured subagent dispatches past the horizon (FR-18, Story 5.2).
+ *
+ * Consumed and unconsumed alike, keyed on `captured_at`. Both are equally dead
+ * by then: a consumed row has already been briefed from, and an unconsumed one
+ * is days past the five-minute pairing horizon and can never pair again. A
+ * pruned row costs nothing to re-earn — the next dispatch writes a new one.
+ *
+ * This is the GROWTH bound and only that. The CORRECTNESS bound — a capture too
+ * old to be paired — lives in the pairing query, because this runs at most once
+ * per 24 hours and a capture orphaned at 09:00 would otherwise stay eligible to
+ * mis-brief all day.
+ */
+function pruneSubagentDispatches(
+  db: Database.Database,
+  cutoff: string,
+  dryRun: boolean,
+): GcCategoryReport {
+  const countRow = db
+    .prepare('SELECT COUNT(*) as count FROM subagent_dispatches WHERE captured_at < ?')
+    .get(cutoff) as { count: number };
+  const candidates = countRow.count;
+  if (dryRun || candidates === 0) {
+    return { candidates, deleted: 0 };
+  }
+  const result = db
+    .prepare('DELETE FROM subagent_dispatches WHERE captured_at < ?')
+    .run(cutoff);
+  return { candidates, deleted: result.changes };
+}
+
 function freelistRatio(db: Database.Database): number {
   const freelist = db.pragma('freelist_count', { simple: true }) as number;
   const pages = db.pragma('page_count', { simple: true }) as number;
@@ -586,6 +632,12 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
     dryRun,
   );
 
+  const subagentDispatches = pruneSubagentDispatches(
+    db,
+    isoDaysAgo(now, resolved.dispatchDays),
+    dryRun,
+  );
+
   // **The byte ceiling and its eviction were WITHDRAWN by ruling (ShuromiU,
   // 2026-08-06)** after the Story 4.6 review found it broken three independent
   // ways: it deleted by `rowid` on three `WITHOUT ROWID` tables so
@@ -632,6 +684,7 @@ export function runGc(db: Database.Database, options: GcOptions = {}): GcReport 
     content_digests: digests,
     read_offers: readOffers,
     negative_results: negativeResults,
+    subagent_dispatches: subagentDispatches,
     command_runs: commandRunSources,
     orphaned_command_run_items: orphanedCommandRunItems,
     freelist_ratio: Number(ratio.toFixed(4)),

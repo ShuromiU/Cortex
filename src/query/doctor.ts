@@ -5,7 +5,15 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { deriveSpoolPath, SCAN_STATUS_KEY } from '../capture/spool.js';
-import { SUBAGENT_START_COUNT_KEY, SUBAGENT_START_KEY } from '../scope/runtime.js';
+import {
+  SUBAGENT_AMBIGUOUS_COUNT_KEY,
+  SUBAGENT_BRIEFED_COUNT_KEY,
+  SUBAGENT_DISPATCH_COUNT_KEY,
+  SUBAGENT_DISPATCH_KEY,
+  SUBAGENT_PAIRED_COUNT_KEY,
+  SUBAGENT_START_COUNT_KEY,
+  SUBAGENT_START_KEY,
+} from '../scope/runtime.js';
 import { DIGEST_INDEX_FILENAME, parseIndexLine } from '../capture/digest-index.js';
 import {
   SCHEMA_VERSION,
@@ -178,6 +186,25 @@ export const REQUIRED_WIRING: readonly RequiredWiring[] = [
     matcher: 'Edit|Write',
   },
   {
+    // The SECOND entry on `PreToolUse`, and the first time any event carries two
+    // (FR-18, Story 5.2). `reflect-pre` and `reflect-prompt` are two EVENTS
+    // sharing one script and are not a precedent for it. What makes two entries
+    // on one event safe is that `commandSatisfiesWiring` discriminates them by
+    // their action token — which is why `cortex-subagent.sh` must never default
+    // its action, and why `wiringKey` below is what `install` keys on rather
+    // than the event name.
+    //
+    // A separate matcher rather than widening `Edit|Write`: that entry's hook is
+    // the reflex, whose else-branch maps the `Agent` tool to the `agent` reflex
+    // and injects context into the PARENT on every dispatch. Waking that path is
+    // not what this story wants; it wants its own hook on its own tool.
+    event: 'PreToolUse',
+    label: 'PreToolUse (subagent dispatch)',
+    script: 'cortex-subagent.sh',
+    action: 'dispatch-pre',
+    matcher: 'Agent',
+  },
+  {
     event: 'UserPromptSubmit',
     label: 'UserPromptSubmit (consult hint)',
     script: 'cortex-reflect.sh',
@@ -202,6 +229,26 @@ export const REQUIRED_WIRING: readonly RequiredWiring[] = [
     // satisfy this requirement once Story 5.3 lands.
   },
 ];
+
+/**
+ * Identity of one required wiring, event PLUS discriminator.
+ *
+ * Exists because `PreToolUse` now carries two entries. `install` records which
+ * wirings the *other* settings files Claude Code merges already provide, so it
+ * does not append a duplicate that would double every hook invocation — and it
+ * kept that record as a set of EVENT NAMES. With two entries on one event, a
+ * machine where `PreToolUse` was wired anywhere else would have had the second
+ * entry silently skipped, after which `doctor` fails `hook-wiring` and names
+ * `cortex install` as the fix that had just declined to help. That is the
+ * installer/diagnostic disagreement this module exists to prevent.
+ *
+ * The discriminator is the same field `commandSatisfiesWiring` distinguishes on,
+ * so the two cannot drift: whatever tells two wirings apart in a command string
+ * is what tells them apart in this key.
+ */
+export function wiringKey(required: RequiredWiring): string {
+  return `${required.event}::${required.action ?? required.script ?? required.token ?? ''}`;
+}
 
 /** True when a settings command implements the given wiring. */
 export function commandSatisfiesWiring(command: string, required: RequiredWiring): boolean {
@@ -258,6 +305,21 @@ export function readTemplateStamp(scriptText: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * A `meta` counter as a whole, non-negative number.
+ *
+ * `Number`, never `Number.parseInt`. `parseInt` succeeds on a PREFIX, so a
+ * corrupt `'12 fires'` would read as 12 rather than as corruption — the exact
+ * fail-forward this repository has paid for five times, once through SQL's
+ * `CAST`. Anything that is not a finite non-negative number reads as 0, matching
+ * `CortexStore.incrementMetaCounter`'s digit guard, which restarts a corrupt
+ * counter rather than continuing it.
+ */
+function metaCount(db: ReturnType<typeof openDatabaseReadOnly>, key: string): number {
+  const raw = Number(getMetaValue(db, key));
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 0;
 }
 
 /**
@@ -784,6 +846,52 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
     );
   }
 
+  // ── Dispatch matcher (FR-18, Story 5.2) ─────────────────────────────
+  //
+  // `hook-wiring` checks that a satisfying command exists on an event; it never
+  // looks at the matcher. `PostToolUse` needed its own check for that reason and
+  // `PreToolUse (subagent dispatch)` needs one for a sharper version of it: two
+  // required wirings now share `PreToolUse`, and the matcher is the only thing
+  // routing each to its own tool. A dispatch wiring left at `Edit|Write` is
+  // present, current, substituted and completely dead — no dispatch is captured,
+  // no subagent is briefed, and every other row reads green.
+  //
+  // Only added when such a command is configured: with nothing wired there is
+  // nothing to say, and `hook-wiring` already fails on the entry by name.
+  const dispatchMatchers = commands
+    .filter(
+      entry =>
+        entry.event === 'PreToolUse' &&
+        entry.command.includes('cortex-subagent.sh') &&
+        tokenizeCommand(entry.command).includes('dispatch-pre'),
+    )
+    .map(entry => entry.matcher);
+  if (dispatchMatchers.length > 0) {
+    // An empty or absent matcher matches every tool, which is broader than the
+    // canonical wiring and therefore fine.
+    const coversAgent = dispatchMatchers.some(
+      matcher => matcher === null || matcher.trim().length === 0 || matcher.includes('Agent'),
+    );
+    add(
+      coversAgent
+        ? {
+            id: 'dispatch-matcher',
+            label: 'Dispatch matcher',
+            status: 'pass',
+            detail: 'PreToolUse fires the dispatch hook on Agent',
+          }
+        : {
+            // `warn`, not `fail`, matching `capture-matcher`: narrowing a matcher
+            // is a supported choice and a deliberate one must not break CI.
+            id: 'dispatch-matcher',
+            label: 'Dispatch matcher',
+            status: 'warn',
+            detail: `the PreToolUse dispatch hook is wired with matcher \`${dispatchMatchers.filter(m => m !== null).join('`, `') || '(none)'}\`, which never matches Agent — no dispatch is captured, so no subagent is briefed`,
+            fix: 'Set that entry\'s matcher to `Agent`, or run `cortex install`, which writes it.',
+          },
+    );
+  }
+
   // ── Hooks directory: the configured one, not the default ────────────
   const scriptCommands = commands.filter(entry => entry.command.includes('.sh'));
 
@@ -1160,6 +1268,11 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
   let subagentFirstSeen: string | null = null;
   let subagentFires = 0;
   let subagentChildren = 0;
+  let dispatchFirstSeen: string | null = null;
+  let dispatchCaptured = 0;
+  let dispatchPaired = 0;
+  let dispatchBriefed = 0;
+  let dispatchAmbiguous = 0;
   if (storeExists) {
     try {
       const db = openDatabaseReadOnly(identity.dbPath);
@@ -1169,12 +1282,18 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
         migrationFailure = failed.length > 0 ? failed : null;
         const scan = getMetaValue(db, SCAN_STATUS_KEY) ?? '';
         outcomeScan = scan.length > 0 ? scan : null;
+        const firstDispatch = getMetaValue(db, SUBAGENT_DISPATCH_KEY) ?? '';
+        dispatchFirstSeen = firstDispatch.length > 0 ? firstDispatch : null;
+        if (dispatchFirstSeen !== null) {
+          dispatchCaptured = metaCount(db, SUBAGENT_DISPATCH_COUNT_KEY);
+          dispatchPaired = metaCount(db, SUBAGENT_PAIRED_COUNT_KEY);
+          dispatchBriefed = metaCount(db, SUBAGENT_BRIEFED_COUNT_KEY);
+          dispatchAmbiguous = metaCount(db, SUBAGENT_AMBIGUOUS_COUNT_KEY);
+        }
         const firstSeen = getMetaValue(db, SUBAGENT_START_KEY) ?? '';
         subagentFirstSeen = firstSeen.length > 0 ? firstSeen : null;
         if (subagentFirstSeen !== null) {
-          // `Number`, never `parseInt`.
-          const fires = Number(getMetaValue(db, SUBAGENT_START_COUNT_KEY));
-          subagentFires = Number.isFinite(fires) && fires >= 0 ? Math.floor(fires) : 0;
+          subagentFires = metaCount(db, SUBAGENT_START_COUNT_KEY);
           try {
             const row = db
               .prepare(
@@ -1260,24 +1379,70 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
   // wired, apparently fine, and missing dispatches. Every child created after
   // the first fire should have been created BY a fire, so fewer fires than
   // children means subagents ran that this hook never saw.
-  if (storeExists && subagentFirstSeen !== null) {
+  //
+  // Story 5.2 folds the automatic brief into the same row rather than adding
+  // another, because the two are one capability and two rows would report the
+  // same silence twice. The counters it reads answer a question the session
+  // counters cannot: the dispatch capture and the start hook can both be firing,
+  // both look healthy, and no subagent ever be briefed — because nothing pairs.
+  if (storeExists && (subagentFirstSeen !== null || dispatchFirstSeen !== null)) {
     const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
-    if (subagentFires < subagentChildren) {
-      add({
-        id: 'subagent-sessions',
-        label: 'Subagent sessions',
-        status: 'warn',
-        detail: `${plural(subagentChildren, 'subagent session', 'subagent sessions')} since ${subagentFirstSeen}, but SubagentStart fired only ${plural(subagentFires, 'time', 'times')} — some dispatches are not reaching the hook`,
-        fix: 'Re-run `cortex install` so the SubagentStart wiring and script are current, then dispatch a subagent and re-run `cortex doctor`.',
-      });
+    const details: string[] = [];
+    const warnings: string[] = [];
+
+    if (subagentFirstSeen !== null) {
+      details.push(
+        `SubagentStart fired ${plural(subagentFires, 'time', 'times')} since ${subagentFirstSeen}; ${plural(subagentChildren, 'subagent session', 'subagent sessions')} recorded`,
+      );
+      if (subagentFires < subagentChildren) {
+        warnings.push('some dispatches are not reaching the SubagentStart hook');
+      }
     } else {
-      add({
-        id: 'subagent-sessions',
-        label: 'Subagent sessions',
-        status: 'pass',
-        detail: `SubagentStart fired ${plural(subagentFires, 'time', 'times')} since ${subagentFirstSeen}; ${plural(subagentChildren, 'subagent session', 'subagent sessions')} recorded`,
-      });
+      details.push('SubagentStart has not fired here yet');
     }
+
+    if (dispatchFirstSeen !== null) {
+      // Ambiguity is REPORTED, never warned on. N same-type agents dispatched in
+      // one assistant message share the whole pairing key, and that fan-out is
+      // routine — this repository's own review workflow does exactly it — so a
+      // warn would fire on a healthy install every time the feature did its job.
+      // That is the "cries wolf" half of AD-12, and it costs precisely the
+      // attention the other half is meant to buy.
+      const ambiguity =
+        dispatchAmbiguous > 0
+          ? ` (${plural(dispatchAmbiguous, 'ambiguous pairing', 'ambiguous pairings')} resolved in dispatch order)`
+          : '';
+      details.push(
+        `${plural(dispatchCaptured, 'dispatch', 'dispatches')} captured since ${dispatchFirstSeen}, ${dispatchPaired} paired, ${dispatchBriefed} briefed${ambiguity}`,
+      );
+      // Threshold rather than `> 0`, and stated rather than tuned: a single
+      // unpaired capture is a legitimate transient — an `Agent` call the user
+      // denied fires `PreToolUse` and never starts, and `doctor` can also run in
+      // the ~800 ms between a capture and its start. Three captures with no
+      // pairing EVER is not a transient; it is a broken pairing, and at this
+      // repository's measured rate (56 dispatches in four days) it is reached
+      // within hours of the fault.
+      if (dispatchCaptured >= 3 && dispatchPaired === 0) {
+        warnings.push('no dispatch has ever paired with a subagent, so nothing is being briefed');
+      }
+    }
+
+    add(
+      warnings.length === 0
+        ? {
+            id: 'subagent-sessions',
+            label: 'Subagent sessions',
+            status: 'pass',
+            detail: details.join('; '),
+          }
+        : {
+            id: 'subagent-sessions',
+            label: 'Subagent sessions',
+            status: 'warn',
+            detail: `${details.join('; ')} — ${warnings.join('; ')}`,
+            fix: 'Re-run `cortex install` so the SubagentStart and PreToolUse(Agent) wirings and scripts are current, then dispatch a subagent and re-run `cortex doctor`.',
+          },
+    );
   }
 
   const candidates = findAdoptionCandidates(identity);

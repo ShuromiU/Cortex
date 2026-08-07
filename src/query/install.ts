@@ -12,6 +12,7 @@ import {
   commandSatisfiesWiring,
   hookTemplateDigest,
   readTemplateStamp,
+  wiringKey,
 } from './doctor.js';
 
 /**
@@ -240,12 +241,20 @@ export function mergeHookWiring(
   hooksDir: string,
   paths: BakedPaths,
   /**
-   * Wirings already present in the *other* settings files Claude Code merges.
+   * Wirings already present in the *other* settings files Claude Code merges,
+   * keyed by {@link wiringKey}.
+   *
    * Claude Code reads the union of `<project>/.claude/settings.json`,
    * `settings.local.json` and `~/.claude/settings.json`, so an entry written
    * here while an equivalent one lives in another file does not replace it —
    * both fire. That doubled every spool line, every reflex and every flush,
    * and neither `install` nor `doctor` could see it.
+   *
+   * Keyed by event PLUS discriminator, not by event name. Story 5.2 put a second
+   * required wiring on `PreToolUse`, and an event-keyed set would have skipped
+   * it on any machine where `PreToolUse` was wired in another merged file —
+   * after which `doctor` fails `hook-wiring` and names `cortex install` as the
+   * fix that had just declined to help.
    */
   wiredElsewhere: ReadonlySet<string> = new Set(),
 ): MergeResult {
@@ -290,7 +299,11 @@ export function mergeHookWiring(
         hook['command'] = command;
         entryChanged = true;
       }
-      if (required.matcher !== undefined && record['matcher'] !== required.matcher) {
+      if (
+        required.matcher !== undefined &&
+        record['matcher'] !== required.matcher &&
+        !matcherIsContested(inner, required)
+      ) {
         record['matcher'] = required.matcher;
         entryChanged = true;
       }
@@ -314,7 +327,7 @@ export function mergeHookWiring(
 
     // Nothing in this file wires it. If another settings file already does,
     // adding one here would double the invocation rather than fix anything.
-    if (wiredElsewhere.has(required.event)) continue;
+    if (wiredElsewhere.has(wiringKey(required))) continue;
 
     entries.push({
       ...(required.matcher === undefined ? {} : { matcher: required.matcher }),
@@ -325,6 +338,34 @@ export function mergeHookWiring(
   }
 
   return changed ? { value: { ...settings, hooks }, changed } : { value: settings, changed: false };
+}
+
+/**
+ * True when one settings record holds commands for two wirings on the same
+ * event that want DIFFERENT matchers.
+ *
+ * Story 5.2 put a second required wiring on `PreToolUse`, and the repair pass
+ * runs once per required wiring over the same event array. A hand-written record
+ * packing both commands under one matcher would therefore be repaired twice,
+ * each pass overwriting the other's matcher — leaving one of the two hooks
+ * firing on the wrong tool, silently, because `hook-wiring` never inspects a
+ * matcher. `install` never writes that shape, but it must not make an existing
+ * one worse. Leaving the matcher alone keeps whatever the user chose, and
+ * `capture-matcher` / `dispatch-matcher` report the consequence by name.
+ */
+function matcherIsContested(inner: readonly unknown[], required: RequiredWiring): boolean {
+  const matchers = new Set<string | undefined>();
+  for (const hook of inner) {
+    if (hook === null || typeof hook !== 'object') continue;
+    const value = (hook as Json)['command'];
+    if (typeof value !== 'string') continue;
+    for (const other of REQUIRED_WIRING) {
+      if (other.event === required.event && commandSatisfiesWiring(value, other)) {
+        matchers.add(other.matcher);
+      }
+    }
+  }
+  return matchers.size > 1;
 }
 
 /**
@@ -640,7 +681,10 @@ export function runInstall(options: InstallOptions): InstallResult {
     for (const entry of collectHookCommands(file.value)) {
       for (const required of REQUIRED_WIRING) {
         if (entry.event === required.event && commandSatisfiesWiring(entry.command, required)) {
-          wiredElsewhere.add(required.event);
+          // The WIRING, not the event. Two required wirings share `PreToolUse`
+          // since Story 5.2, so recording the event name would let one of them
+          // suppress the other — see `mergeHookWiring`'s parameter docs.
+          wiredElsewhere.add(wiringKey(required));
         }
       }
     }

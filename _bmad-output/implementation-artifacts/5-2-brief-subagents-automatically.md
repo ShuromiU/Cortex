@@ -4,7 +4,7 @@ baseline_commit: 453e7f243297bce5b142f38d860ba86787e793b1
 
 # Story 5.2: Brief subagents automatically
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -118,75 +118,75 @@ residual Task 2's counter exists to expose.
 
 ## Tasks / Subtasks
 
-- [ ] **Task 1 — Capture the dispatch at `PreToolUse` on the `Agent` tool** (AC: #1, #3)
-  - [ ] New `dispatch-pre` member on `HookAction`, a branch in `handleHookPayload`, and a new arm in `hooks/claude/cortex-subagent.sh`'s `case`. Story 5.1 shaped that `case` for appending and left **no default action** so a wiring `doctor` refuses cannot silently work — preserve both.
-  - [ ] **The `handleHookPayload` branch must be added, and a test must prove it.** That function is a chain of `if`s ending in `return reflectFromPayload(...)`, and `main()` casts `process.argv[2] as HookAction` unchecked — there is no exhaustive switch and no `never` guard. So adding `'dispatch-pre'` to the union while forgetting the branch **compiles cleanly** and routes every dispatch into the reflex path, whose else-branch maps `toolName === 'Agent'` to the `agent` reflex and injects `additionalContext` into the **parent**. Assert `dispatch-pre` returns `''`, not reflex JSON.
-  - [ ] **Do NOT widen the existing `Edit|Write` matcher to include `Agent`.** Same dormant path, reached the other way. (Precision, because the earlier draft of this story overstated it: that path is dormant for **two** independent reasons — the matcher excludes `Agent`, *and* `'reflect-agent'` is a live `HookAction` member no shipped script ever passes. Neither is a reason to wake it.)
-  - [ ] New `REQUIRED_WIRING` entry: `{ event: 'PreToolUse', label: 'PreToolUse (subagent dispatch)', script: 'cortex-subagent.sh', action: 'dispatch-pre', matcher: 'Agent' }`.
-  - [ ] **This is the first time two `REQUIRED_WIRING` entries share one event, and the installer cannot currently handle it.** `reflect-pre` and `reflect-prompt` are two *events* sharing one script — not a precedent for this. `runInstall` builds `wiredElsewhere` as a `Set<string>` of **event names** (`wiredElsewhere.add(required.event)`, `src/query/install.ts`) and `mergeHookWiring` skips on `wiredElsewhere.has(required.event)`. So on any machine where `PreToolUse` is already wired in another settings file — user vs project scope, or `settings.local.json`, all three of which Claude Code merges — `install` **silently skips** the new entry and `doctor` then fails `hook-wiring` naming `cortex install` as the fix that just declined to help. That is the installer/diagnostic disagreement `docs/invariants.md` explicitly forbids. **Key `wiredElsewhere` by event *plus* the entry's discriminator (`action ?? script ?? token`), and cover it with a two-settings-file test.**
-  - [ ] Record: `session_id`, `prompt_id`, `tool_use_id`, `agent_type` (from `tool_input.subagent_type`), the `description`, and enough of the `prompt` to answer AC #3 — a **digest plus a bounded prefix**, never verbatim. A dispatch prompt can be tens of kilobytes; this table is not a transcript.
-  - [ ] Persist in a new table appended to `V5_TABLES` (`src/db/schema.ts`). **Do not touch `SCHEMA_VERSION`** — it is **6**, the R1 increment is spent, and appending is the established pattern (`content_digests` in 3.1; 4.3 and 4.4's tables). `applySchema` runs the DDL unconditionally with `CREATE TABLE IF NOT EXISTS`.
-  - [ ] **No inline `--` comments inside the `CREATE TABLE`** — SQLite re-parses stored DDL during `ALTER TABLE … DROP COLUMN` and comments inside the parens make the table permanently un-alterable. Backticks there are separately fatal (the DDL is a template literal). Column documentation goes in the TypeScript docstring, which is how every existing table in that constant is written.
-  - [ ] Per AD-4 this is a **lookup/staging structure that does not project into `memory_items`** — no retrieval kind, and therefore **no AD-5 fixture obligation**. The `content_digests` precedent, stated in `docs/invariants.md`.
+- [x] **Task 1 — Capture the dispatch at `PreToolUse` on the `Agent` tool** (AC: #1, #3)
+  - [x] New `dispatch-pre` member on `HookAction`, a branch in `handleHookPayload`, and a new arm in `hooks/claude/cortex-subagent.sh`'s `case`. Story 5.1 shaped that `case` for appending and left **no default action** so a wiring `doctor` refuses cannot silently work — preserve both.
+  - [x] **The `handleHookPayload` branch must be added, and a test must prove it.** That function is a chain of `if`s ending in `return reflectFromPayload(...)`, and `main()` casts `process.argv[2] as HookAction` unchecked — there is no exhaustive switch and no `never` guard. So adding `'dispatch-pre'` to the union while forgetting the branch **compiles cleanly** and routes every dispatch into the reflex path, whose else-branch maps `toolName === 'Agent'` to the `agent` reflex and injects `additionalContext` into the **parent**. Assert `dispatch-pre` returns `''`, not reflex JSON.
+  - [x] **Do NOT widen the existing `Edit|Write` matcher to include `Agent`.** Same dormant path, reached the other way. (Precision, because the earlier draft of this story overstated it: that path is dormant for **two** independent reasons — the matcher excludes `Agent`, *and* `'reflect-agent'` is a live `HookAction` member no shipped script ever passes. Neither is a reason to wake it.)
+  - [x] New `REQUIRED_WIRING` entry: `{ event: 'PreToolUse', label: 'PreToolUse (subagent dispatch)', script: 'cortex-subagent.sh', action: 'dispatch-pre', matcher: 'Agent' }`.
+  - [x] **This is the first time two `REQUIRED_WIRING` entries share one event, and the installer cannot currently handle it.** `reflect-pre` and `reflect-prompt` are two *events* sharing one script — not a precedent for this. `runInstall` builds `wiredElsewhere` as a `Set<string>` of **event names** (`wiredElsewhere.add(required.event)`, `src/query/install.ts`) and `mergeHookWiring` skips on `wiredElsewhere.has(required.event)`. So on any machine where `PreToolUse` is already wired in another settings file — user vs project scope, or `settings.local.json`, all three of which Claude Code merges — `install` **silently skips** the new entry and `doctor` then fails `hook-wiring` naming `cortex install` as the fix that just declined to help. That is the installer/diagnostic disagreement `docs/invariants.md` explicitly forbids. **Key `wiredElsewhere` by event *plus* the entry's discriminator (`action ?? script ?? token`), and cover it with a two-settings-file test.**
+  - [x] Record: `session_id`, `prompt_id`, `tool_use_id`, `agent_type` (from `tool_input.subagent_type`), the `description`, and enough of the `prompt` to answer AC #3 — a **digest plus a bounded prefix**, never verbatim. A dispatch prompt can be tens of kilobytes; this table is not a transcript.
+  - [x] Persist in a new table appended to `V5_TABLES` (`src/db/schema.ts`). **Do not touch `SCHEMA_VERSION`** — it is **6**, the R1 increment is spent, and appending is the established pattern (`content_digests` in 3.1; 4.3 and 4.4's tables). `applySchema` runs the DDL unconditionally with `CREATE TABLE IF NOT EXISTS`.
+  - [x] **No inline `--` comments inside the `CREATE TABLE`** — SQLite re-parses stored DDL during `ALTER TABLE … DROP COLUMN` and comments inside the parens make the table permanently un-alterable. Backticks there are separately fatal (the DDL is a template literal). Column documentation goes in the TypeScript docstring, which is how every existing table in that constant is written.
+  - [x] Per AD-4 this is a **lookup/staging structure that does not project into `memory_items`** — no retrieval kind, and therefore **no AD-5 fixture obligation**. The `content_digests` precedent, stated in `docs/invariants.md`.
 
-- [ ] **Task 2 — Pair on the strong key, and make the residual visible** (AC: #1)
-  - [ ] Pair on **`(session_id, prompt_id, agent_type)`**, oldest unconsumed first. Both ids are present in both payloads (§ Host contract) and cost nothing to store. This is the correction the re-base pass should have made and did not: the key sets were transcribed and then not mined.
-  - [ ] What each part buys, so nobody "simplifies" it away: `session_id` eliminates two windows on one project colliding — they share a `scope_key`, so scope alone does not separate them. `prompt_id` eliminates a stale capture from an earlier turn pairing with a later subagent, which is the mispairing that would hand a subagent genuinely unrelated context. `agent_type` separates concurrent dispatches of different types.
-  - [ ] **The residual is one case: N same-type subagents dispatched in a single assistant message.** They share all three key parts, so only ordering separates them. Take the oldest unconsumed capture (FIFO), justified by the measured strict interleaving — and note this is common in practice, not exotic: this repository's own review workflow dispatches three same-type agents in one message. **Refusing to brief on ambiguity would silence exactly the fan-out case, which is where briefing is worth most**, so FIFO is the deliberate choice over silence.
-  - [ ] **Count the ambiguous case and surface it.** When more than one capture matches the key, record it. That counter is the whole evidence base for whether FIFO is holding: if it stays near zero the assumption is sound, and if it climbs the design needs revisiting before it can be trusted. AD-12 — a design whose safety rests on an assumption must report how often the assumption is tested.
-  - [ ] **Reject stale captures in the pairing query itself**, with a horizon in seconds-to-minutes: `… WHERE consumed_at IS NULL AND captured_at > :cutoff`. This is correctness, not housekeeping, and it must not be confused with Task 7's growth bound — that runs at most once per 24 hours, so a capture orphaned at 09:00 would otherwise stay eligible to mis-brief all day. Two horizons, two mechanisms.
-  - [ ] Consumption must be a single conditional `UPDATE … WHERE consumed_at IS NULL` acted on by row count — never read-then-write. Story 5.1's review reproduced two writers losing an increment through exactly that shape, and `busy_timeout` does not prevent it. Reuse `CortexStore.incrementMetaCounter`'s single-statement discipline, including its `GLOB` digit guard, for any counter.
-  - [ ] Extend Story 5.1's `Subagent sessions` `doctor` row rather than re-inventing its rules: conditional, silent until the path has fired, `warn` never `fail`, and it must not flap on a healthy install.
+- [x] **Task 2 — Pair on the strong key, and make the residual visible** (AC: #1)
+  - [x] Pair on **`(session_id, prompt_id, agent_type)`**, oldest unconsumed first. Both ids are present in both payloads (§ Host contract) and cost nothing to store. This is the correction the re-base pass should have made and did not: the key sets were transcribed and then not mined.
+  - [x] What each part buys, so nobody "simplifies" it away: `session_id` eliminates two windows on one project colliding — they share a `scope_key`, so scope alone does not separate them. `prompt_id` eliminates a stale capture from an earlier turn pairing with a later subagent, which is the mispairing that would hand a subagent genuinely unrelated context. `agent_type` separates concurrent dispatches of different types.
+  - [x] **The residual is one case: N same-type subagents dispatched in a single assistant message.** They share all three key parts, so only ordering separates them. Take the oldest unconsumed capture (FIFO), justified by the measured strict interleaving — and note this is common in practice, not exotic: this repository's own review workflow dispatches three same-type agents in one message. **Refusing to brief on ambiguity would silence exactly the fan-out case, which is where briefing is worth most**, so FIFO is the deliberate choice over silence.
+  - [x] **Count the ambiguous case and surface it.** When more than one capture matches the key, record it. That counter is the whole evidence base for whether FIFO is holding: if it stays near zero the assumption is sound, and if it climbs the design needs revisiting before it can be trusted. AD-12 — a design whose safety rests on an assumption must report how often the assumption is tested.
+  - [x] **Reject stale captures in the pairing query itself**, with a horizon in seconds-to-minutes: `… WHERE consumed_at IS NULL AND captured_at > :cutoff`. This is correctness, not housekeeping, and it must not be confused with Task 7's growth bound — that runs at most once per 24 hours, so a capture orphaned at 09:00 would otherwise stay eligible to mis-brief all day. Two horizons, two mechanisms.
+  - [x] Consumption must be a single conditional `UPDATE … WHERE consumed_at IS NULL` acted on by row count — never read-then-write. Story 5.1's review reproduced two writers losing an increment through exactly that shape, and `busy_timeout` does not prevent it. Reuse `CortexStore.incrementMetaCounter`'s single-statement discipline, including its `GLOB` digit guard, for any counter.
+  - [x] Extend Story 5.1's `Subagent sessions` `doctor` row rather than re-inventing its rules: conditional, silent until the path has fired, `warn` never `fail`, and it must not flap on a healthy install.
 
-- [ ] **Task 3 — Build the brief, and know *before* generating it that there is nothing to say** (AC: #1, #2)
-  - [ ] `brief(store, topic, forAgent?, options?)` (`src/query/brief.ts`) is the generator; `forAgent` already exists and produces a `Briefing for <name>:` header that `agent_type` fills.
-  - [ ] **The emptiness check must run BEFORE `brief()` is called, not on its output.** With no results `brief()` returns `No context found for "<topic>"` — two lines when `forAgent` is set — *and* calls `logRetrieval`, so "call it and discard when empty" still writes a retrieval-log row on every no-match dispatch. Call `retrieveMemory` first and invoke `brief()` only on a non-empty result. **Do not modify `brief()` itself** — its only callers are the `cortex_brief` MCP tool and the `src/index.ts` barrel (`find_referencing_symbols`), and changing its contract would move a shipped surface for no reason.
-  - [ ] Detect emptiness **structurally**, from the retrieval result count — never by matching the rendered `No context found` text. `docs/invariants.md` records the measured lesson that honouring a rendered display string as data is how three of six shipped markers came to be fiction.
-  - [ ] Budget is **150** (`DEFAULT_SESSION_BRIEF_BUDGET`, `src/query/session-brief.ts`), not `DEFAULT_BRIEF_BUDGET`'s 450. Ruling, ShuromiU, 2026-08-06.
-  - [ ] The topic is the dispatch **description**, not the prompt — the description is the human-written summary of the job; the prompt is the whole instruction and would swamp retrieval.
-  - [ ] **Decide and state whether an auto-brief should reinforce memory.** `logRetrieval` calls `store.touchMemoryItems(...)` on a non-empty result, which moves hotness and therefore ranking on **every** future retrieval surface. So briefing on every dispatch would silently promote whatever memory matches dispatch descriptions. This is a retrieval-*quality* decision, not a reporting one — make it explicitly, and note that `logRetrieval` attributes to `retrieval.context.preferredScope?.session.id`, a different resolution path from the one Task 6 fixes.
+- [x] **Task 3 — Build the brief, and know *before* generating it that there is nothing to say** (AC: #1, #2)
+  - [x] `brief(store, topic, forAgent?, options?)` (`src/query/brief.ts`) is the generator; `forAgent` already exists and produces a `Briefing for <name>:` header that `agent_type` fills.
+  - [x] **The emptiness check must run BEFORE `brief()` is called, not on its output.** With no results `brief()` returns `No context found for "<topic>"` — two lines when `forAgent` is set — *and* calls `logRetrieval`, so "call it and discard when empty" still writes a retrieval-log row on every no-match dispatch. Call `retrieveMemory` first and invoke `brief()` only on a non-empty result. **Do not modify `brief()` itself** — its only callers are the `cortex_brief` MCP tool and the `src/index.ts` barrel (`find_referencing_symbols`), and changing its contract would move a shipped surface for no reason.
+  - [x] Detect emptiness **structurally**, from the retrieval result count — never by matching the rendered `No context found` text. `docs/invariants.md` records the measured lesson that honouring a rendered display string as data is how three of six shipped markers came to be fiction.
+  - [x] Budget is **150** (`DEFAULT_SESSION_BRIEF_BUDGET`, `src/query/session-brief.ts`), not `DEFAULT_BRIEF_BUDGET`'s 450. Ruling, ShuromiU, 2026-08-06.
+  - [x] The topic is the dispatch **description**, not the prompt — the description is the human-written summary of the job; the prompt is the whole instruction and would swamp retrieval.
+  - [x] **Decide and state whether an auto-brief should reinforce memory.** `logRetrieval` calls `store.touchMemoryItems(...)` on a non-empty result, which moves hotness and therefore ranking on **every** future retrieval surface. So briefing on every dispatch would silently promote whatever memory matches dispatch descriptions. This is a retrieval-*quality* decision, not a reporting one — make it explicitly, and note that `logRetrieval` attributes to `retrieval.context.preferredScope?.session.id`, a different resolution path from the one Task 6 fixes.
 
-- [ ] **Task 4 — Emit through the envelope** (AC: #1)
-  - [ ] Widen `toHookJson` in `src/transports/hook-entry.ts` from `'UserPromptSubmit' | 'PreToolUse'` to include `'SubagentStart'`.
-  - [ ] **Do not touch the second `toHookJson` in `src/query/reflex.ts`.** It takes a `ReflexEvent`, and no reflex event can ever be a `SubagentStart`, so the two are *correctly* divergent. Widening both would wire a path that cannot exist.
-  - [ ] **No script change is needed for the output to reach the host.** The existing `subagent-start` arm is a bare pipe, so Node's stdout is already the hook's stdout, and `main()` guards with `if (output)` so an empty return prints nothing at all — not a blank line. Confirm rather than build.
-  - [ ] `SubagentStart` **cannot block a subagent** (documented; exit 2 renders a notice and it proceeds). The failure mode of this whole story is noise, never breakage — which is exactly why AC #4's silence obligation is the one that must hold.
+- [x] **Task 4 — Emit through the envelope** (AC: #1)
+  - [x] Widen `toHookJson` in `src/transports/hook-entry.ts` from `'UserPromptSubmit' | 'PreToolUse'` to include `'SubagentStart'`.
+  - [x] **Do not touch the second `toHookJson` in `src/query/reflex.ts`.** It takes a `ReflexEvent`, and no reflex event can ever be a `SubagentStart`, so the two are *correctly* divergent. Widening both would wire a path that cannot exist.
+  - [x] **No script change is needed for the output to reach the host.** The existing `subagent-start` arm is a bare pipe, so Node's stdout is already the hook's stdout, and `main()` guards with `if (output)` so an empty return prints nothing at all — not a blank line. Confirm rather than build.
+  - [x] `SubagentStart` **cannot block a subagent** (documented; exit 2 renders a notice and it proceeds). The failure mode of this whole story is noise, never breakage — which is exactly why AC #4's silence obligation is the one that must hold.
 
-- [ ] **Task 5 — Do not say what the parent already said** (AC: #3)
-  - [ ] Suppress the auto-brief when its content is already present in the captured dispatch prompt. That is the only way the two paths collide; they otherwise land in different contexts.
-  - [ ] Compare on **normalised content**, not raw equality — whitespace and line endings differ between what `cortex_brief` returned and what the parent pasted. Do not key on the `Briefing for …:` header alone: `cortex_brief` emits it only when `for` is passed, and a parent may strip it.
-  - [ ] State the residual: a parent that paraphrases rather than pastes is not detected. Under-suppressing costs tokens; over-suppressing costs the whole feature.
+- [x] **Task 5 — Do not say what the parent already said** (AC: #3)
+  - [x] Suppress the auto-brief when its content is already present in the captured dispatch prompt. That is the only way the two paths collide; they otherwise land in different contexts.
+  - [x] Compare on **normalised content**, not raw equality — whitespace and line endings differ between what `cortex_brief` returned and what the parent pasted. Do not key on the `Briefing for …:` header alone: `cortex_brief` emits it only when `for` is passed, and a parent may strip it.
+  - [x] State the residual: a parent that paraphrases rather than pastes is not detected. Under-suppressing costs tokens; over-suppressing costs the whole feature.
 
-- [ ] **Task 6 — Fix the billing, and the sibling defect re-filed onto this story** (AC: #4)
-  - [ ] `bookHookInjection` books to `store.getCurrentSession()` — primary-only by SQL. Tokens injected into a subagent must book to the **child** session Story 5.1 creates, or this story's own cost lands on the parent and the P&L that judges it is wrong. Its two callers are `renderConsultGate` and `endOfTurn` (`find_referencing_symbols`; `certify_refs` confirms no further code sites) and **both must keep booking to the primary** — they are parent-facing surfaces.
-  - [ ] **`deferred-work.md` re-filed TWO coupled items onto this story, saying "both are the same question and should be answered once."** The second is absent from the earlier draft and is required here: **`reflect-pre` bills a subagent's edits to the primary, and because the reflex dedupe state file is keyed by session id, a subagent consumes the parent's once-per-anchor marker — so the parent then edits the same file and gets no reflex at all.** Confirmed in code: `reflectFromPayload` resolves via `resolveSessionId(store, cwd, options)` with no identity, and `statePath()` (`src/query/reflex.ts`) keys on `options.sessionId`. Either fix it here or record an explicit deferral **with an owner** — silently dropping re-filed scope is how it returns as an epic action item, which is the failure Task 7 cites `content_digests` for.
-  - [ ] Note the cost of fixing it: re-routing `reflect-*` changes a rendered surface on every `Edit` and `Write`, so it needs the eval gate run and a considered decision, not a reflex.
-  - [ ] `cortex stats` renders session and scope blocks including `(incl. subagents)`; confirm corrected attribution *renders* sensibly rather than merely being stored correctly.
+- [x] **Task 6 — Fix the billing, and the sibling defect re-filed onto this story** (AC: #4)
+  - [x] `bookHookInjection` books to `store.getCurrentSession()` — primary-only by SQL. Tokens injected into a subagent must book to the **child** session Story 5.1 creates, or this story's own cost lands on the parent and the P&L that judges it is wrong. Its two callers are `renderConsultGate` and `endOfTurn` (`find_referencing_symbols`; `certify_refs` confirms no further code sites) and **both must keep booking to the primary** — they are parent-facing surfaces.
+  - [x] **`deferred-work.md` re-filed TWO coupled items onto this story, saying "both are the same question and should be answered once."** The second is absent from the earlier draft and is required here: **`reflect-pre` bills a subagent's edits to the primary, and because the reflex dedupe state file is keyed by session id, a subagent consumes the parent's once-per-anchor marker — so the parent then edits the same file and gets no reflex at all.** Confirmed in code: `reflectFromPayload` resolves via `resolveSessionId(store, cwd, options)` with no identity, and `statePath()` (`src/query/reflex.ts`) keys on `options.sessionId`. Either fix it here or record an explicit deferral **with an owner** — silently dropping re-filed scope is how it returns as an epic action item, which is the failure Task 7 cites `content_digests` for.
+  - [x] Note the cost of fixing it: re-routing `reflect-*` changes a rendered surface on every `Edit` and `Write`, so it needs the eval gate run and a considered decision, not a reflex.
+  - [x] `cortex stats` renders session and scope blocks including `(incl. subagents)`; confirm corrected attribution *renders* sensibly rather than merely being stored correctly.
 
-- [ ] **Task 7 — Bound the new table's growth at its source** (AC: #1)
-  - [ ] Add a GC rule in `src/db/gc.ts` for consumed and long-expired captures. Not optional: `pruneContentDigests`' own docstring records that `content_digests` *"shipped in Story 3.1 with **no** GC rule at all… it grew monotonically for the life of a project"* and became an action item a later story had to absorb.
-  - [ ] This is the **growth** bound only. The **correctness** bound — a capture too old to be paired — belongs in the pairing query (Task 2), because GC runs at most once per 24 hours.
-  - [ ] Any `CORTEX_*` option parses with **`Number`, never `parseInt`** — five incidents, the most recent being Story 5.1's SQL `CAST` reproducing the same prefix-parsing trap through a different door. Guard the digits explicitly.
+- [x] **Task 7 — Bound the new table's growth at its source** (AC: #1)
+  - [x] Add a GC rule in `src/db/gc.ts` for consumed and long-expired captures. Not optional: `pruneContentDigests`' own docstring records that `content_digests` *"shipped in Story 3.1 with **no** GC rule at all… it grew monotonically for the life of a project"* and became an action item a later story had to absorb.
+  - [x] This is the **growth** bound only. The **correctness** bound — a capture too old to be paired — belongs in the pairing query (Task 2), because GC runs at most once per 24 hours.
+  - [x] Any `CORTEX_*` option parses with **`Number`, never `parseInt`** — five incidents, the most recent being Story 5.1's SQL `CAST` reproducing the same prefix-parsing trap through a different door. Guard the digits explicitly.
 
-- [ ] **Task 8 — Tests** (AC: #1, #2, #3, #4)
-  - [ ] **Fixture repair, which this story does need.** Adding a seventh `REQUIRED_WIRING` entry breaks both "complete, passing installation" fixtures: `tests/doctor.test.ts`'s `buildFixture` and `tests/cli.test.ts`'s `seedSandboxHome` each **hand-write** their `PreToolUse` block, so `missingWiring` goes non-empty, `hook-wiring` fails and `report.ok` is false across many unrelated tests. Story 5.1's guard covers a new *script* (it throws when `HOOK_SCRIPTS` gains an entry without a `TEMPLATE_BODIES` stand-in) and does nothing for a new *wiring entry*. Add the `PreToolUse (Agent)` entry to both fixtures — and consider deriving them from `REQUIRED_WIRING` so the eighth entry is not a third repair.
-  - [ ] Pairing: one capture + one matching start → briefed and consumed. Same `agent_type` but a **different `session_id`** → not consumed (the two-windows case). Same type, **different `prompt_id`** → not consumed (the stale-capture case). Two captures matching the full key → oldest consumed, ambiguity counted. Zero captures → nothing emitted. A capture older than the pairing horizon → not consumed.
-  - [ ] Concurrency: two `SubagentStart` calls against one capture yield exactly one consumption — assert on the conditional-update row count, not a read-then-write sequence.
-  - [ ] AC #2: a topic with no matching memory emits **nothing**, and the test must fail if the implementation emits `No context found` — that is the trap. Also assert **no retrieval-log row** is written on that path, which is what forces the check ahead of `brief()`.
-  - [ ] AC #1 budget: the emitted brief is within 150 estimated tokens **at a binding size** — seed enough memory that the budget genuinely trims. `docs/invariants.md` records that a cap above the seeded content can never fire and is decoration.
-  - [ ] AC #3: a prompt containing the brief suppresses it; a prompt without it does not; a whitespace-and-newline-differing paste still suppresses.
-  - [ ] AC #4: a throwing store, a throwing brief generator and an unreadable capture each produce silence and exit 0 — not a stack trace, not a blank line.
-  - [ ] `dispatch-pre` returns `''` and does **not** produce reflex JSON (the fallthrough guard from Task 1).
-  - [ ] Billing: the injection books to the **child**; the consult gate still books to the primary. Mutation-check both.
-  - [ ] Installer: with `PreToolUse` wired in a second settings file, the new entry is **still written** (the `wiredElsewhere` fix).
-  - [ ] Standard store fixture exactly (`:memory:` → `pragma('foreign_keys = ON')` → `applySchema` → `initializeMeta` → `new CortexStore(db)`). Import specifiers end in `.js`. **`npm run lint` does not typecheck `tests/`.**
+- [x] **Task 8 — Tests** (AC: #1, #2, #3, #4)
+  - [x] **Fixture repair, which this story does need.** Adding a seventh `REQUIRED_WIRING` entry breaks both "complete, passing installation" fixtures: `tests/doctor.test.ts`'s `buildFixture` and `tests/cli.test.ts`'s `seedSandboxHome` each **hand-write** their `PreToolUse` block, so `missingWiring` goes non-empty, `hook-wiring` fails and `report.ok` is false across many unrelated tests. Story 5.1's guard covers a new *script* (it throws when `HOOK_SCRIPTS` gains an entry without a `TEMPLATE_BODIES` stand-in) and does nothing for a new *wiring entry*. Add the `PreToolUse (Agent)` entry to both fixtures — and consider deriving them from `REQUIRED_WIRING` so the eighth entry is not a third repair.
+  - [x] Pairing: one capture + one matching start → briefed and consumed. Same `agent_type` but a **different `session_id`** → not consumed (the two-windows case). Same type, **different `prompt_id`** → not consumed (the stale-capture case). Two captures matching the full key → oldest consumed, ambiguity counted. Zero captures → nothing emitted. A capture older than the pairing horizon → not consumed.
+  - [x] Concurrency: two `SubagentStart` calls against one capture yield exactly one consumption — assert on the conditional-update row count, not a read-then-write sequence.
+  - [x] AC #2: a topic with no matching memory emits **nothing**, and the test must fail if the implementation emits `No context found` — that is the trap. Also assert **no retrieval-log row** is written on that path, which is what forces the check ahead of `brief()`.
+  - [x] AC #1 budget: the emitted brief is within 150 estimated tokens **at a binding size** — seed enough memory that the budget genuinely trims. `docs/invariants.md` records that a cap above the seeded content can never fire and is decoration.
+  - [x] AC #3: a prompt containing the brief suppresses it; a prompt without it does not; a whitespace-and-newline-differing paste still suppresses.
+  - [x] AC #4: a throwing store, a throwing brief generator and an unreadable capture each produce silence and exit 0 — not a stack trace, not a blank line.
+  - [x] `dispatch-pre` returns `''` and does **not** produce reflex JSON (the fallthrough guard from Task 1).
+  - [x] Billing: the injection books to the **child**; the consult gate still books to the primary. Mutation-check both.
+  - [x] Installer: with `PreToolUse` wired in a second settings file, the new entry is **still written** (the `wiredElsewhere` fix).
+  - [x] Standard store fixture exactly (`:memory:` → `pragma('foreign_keys = ON')` → `applySchema` → `initializeMeta` → `new CortexStore(db)`). Import specifiers end in `.js`. **`npm run lint` does not typecheck `tests/`.**
 
-- [ ] **Task 9 — Documentation is part of the change** (AC: all)
-  - [ ] `docs/invariants.md`: the `(session_id, prompt_id, agent_type)` pairing key and what each part buys; FIFO-over-silence for same-turn fan-out, with its counter; the `brief()`-never-returns-empty trap and why the check precedes the call; the 150 ruling; the billing fix; the `wiredElsewhere` per-event defect; the two-horizon expiry rule.
-  - [ ] `README.md`: the hook wiring table gains a `PreToolUse (Agent)` row; Subagent attribution gains what a subagent is now *told*, and that silence is the default.
-  - [ ] `CLAUDE.md`: Current Model and Core Files.
-  - [ ] `sprint-status.yaml` at each transition.
-  - [ ] **Every written claim must be true of the shipped code.** The earlier draft of *this story* shipped three false claims that validation caught — a precedent that did not exist, a fixture claim that was inverted, and an eval-gate expectation contradicted by `find_referencing_symbols`. All three were plausible statements about shared code written without asking the symbol tools. Cite symbols and files, not line numbers.
+- [x] **Task 9 — Documentation is part of the change** (AC: all)
+  - [x] `docs/invariants.md`: the `(session_id, prompt_id, agent_type)` pairing key and what each part buys; FIFO-over-silence for same-turn fan-out, with its counter; the `brief()`-never-returns-empty trap and why the check precedes the call; the 150 ruling; the billing fix; the `wiredElsewhere` per-event defect; the two-horizon expiry rule.
+  - [x] `README.md`: the hook wiring table gains a `PreToolUse (Agent)` row; Subagent attribution gains what a subagent is now *told*, and that silence is the default.
+  - [x] `CLAUDE.md`: Current Model and Core Files.
+  - [x] `sprint-status.yaml` at each transition.
+  - [x] **Every written claim must be true of the shipped code.** The earlier draft of *this story* shipped three false claims that validation caught — a precedent that did not exist, a fixture claim that was inverted, and an eval-gate expectation contradicted by `find_referencing_symbols`. All three were plausible statements about shared code written without asking the symbol tools. Cite symbols and files, not line numbers.
 
 ## Dev Notes
 
@@ -301,14 +301,139 @@ No new dependency. Conventional Commits, lowercase subject — `feat:`.
 
 ### Agent Model Used
 
+claude-opus-5 (Claude Code)
+
 ### Debug Log References
+
+- Gate 1 sandbox proof: `…/scratchpad/sandbox-proof.mjs` — real rendered hook, sandboxed `CORTEX_HOME` + temp git project, 15/15 checks.
+- Mutation campaign: `…/scratchpad/mutate-52.mjs` — 27 anchors, EOL-aware, sha-proven applied and restored byte-identically.
 
 ### Completion Notes List
 
+**What shipped.** `PreToolUse` on the `Agent` tool captures the dispatch; `SubagentStart`
+pairs with it on `(session_id, prompt_id, agent_type)` and injects a ≤150-token brief through
+`hookSpecificOutput.additionalContext`, billed to the child session. Silence is the default and
+is the common case. One new table appended to `V5_TABLES`, `SCHEMA_VERSION` unchanged at 6.
+
+**Per-AC outcome.**
+
+| AC | Outcome |
+|---|---|
+| **#1** | **MET** as amended. Description captured at `PreToolUse(Agent)`, consumed at `SubagentStart`, envelope not stdout, budget 150. The pairing is unambiguous-or-counted; exact verification against the sidecar's `toolUseId` stays deferred to 5.3, as the story stated up front. |
+| **#2** | **MET.** The emptiness check runs before `brief()`, decided structurally from the retrieval result count. A no-match dispatch emits nothing and writes **no** retrieval-log row — both asserted. |
+| **#3** | **MET, with its residuals stated.** Suppression compares `renderMemoryLine(item, 2)` for every matched item against a normalized 8,192-character prompt prefix. A paraphrase is not detected; neither is a brief pasted past the bound. `prompt_chars` records the full length so the bound is observable rather than implied (AD-6). |
+| **#4** | **MET, both halves.** Two independently guarded halves at `SubagentStart` (the session survives a throwing brief), a guarded `dispatch-pre`, and the billing defect fixed — the brief books to the child, the two parent-facing callers still book to the primary, and both directions are mutation-checked. |
+
+**Three decisions worth naming.**
+
+1. **An automatic brief REINFORCES the memory it delivered.** `brief()` calls `logRetrieval`
+   → `touchMemoryItems`, which moves hotness and therefore ranking on every future retrieval
+   surface — so this is a retrieval-quality decision, not a reporting one. Kept, because the
+   emptiness pre-check means `brief()` is reached only when memory actually matched *and* was
+   delivered into an agent's context, which is the event hotness exists to record; suppressing it
+   would make a real usage channel invisible to decay. Residual stated in `docs/invariants.md`.
+2. **A dispatch with no explicit `subagent_type` is not captured, rather than defaulted.** The
+   host's default agent name is a host detail — this machine's own agent list names its catch-all
+   `claude`, not `general-purpose` — and a wrong guess does not merely fail to pair: it puts a
+   foreign row into the queue for a type that IS dispatched, where FIFO hands it to a legitimate
+   subagent. SM-C3 bought for a convenience. Refusing costs one brief.
+3. **The re-filed `reflect-pre` defect was FIXED here, not deferred again.** `deferred-work.md`
+   said both halves were the same question and should be answered once. The cost the note feared
+   did not materialise: `reflectMemory` uses the session id only for the dedupe state-file path and
+   the ledger row, so nothing rendered depends on it — gate 9/9 at zero delta.
+
+**Two defects found and fixed that the story did not predict.**
+
+- **The `wiredElsewhere` fix needed a companion.** `install`'s matcher repair runs once per
+  required wiring over the same event array, so a hand-written record packing BOTH `PreToolUse`
+  commands under one matcher would be repaired twice, each pass overwriting the other's matcher and
+  leaving one hook firing on the wrong tool — silently, because `hook-wiring` never inspects a
+  matcher. Guarded by `matcherIsContested`, and `doctor` gained a `Dispatch matcher` row for the
+  same reason `capture-matcher` exists.
+- **The first-fire marker was stamped one millisecond AFTER the child it describes**, so `doctor`'s
+  `started_at >= marker` window excluded the very first child of every store and the row printed a
+  count one too low, permanently. Found by the **sandbox proof**, not by any unit test — "4 fired,
+  3 recorded" against four real children. A Story 5.1 defect surfaced by extending its row; fixed
+  by recording the fire before creating the session, which also fails in the safe direction. The
+  first test written for it **survived** the mutation campaign (in memory both land in the same
+  millisecond); it now asserts the order of operations instead.
+
+**Observability, and what it deliberately does not warn about.** `doctor`'s `Subagent sessions`
+row gained `captured / paired / briefed`, plus the ambiguity count. Ambiguity is **reported, never
+warned on**: N same-type agents in one message is routine — this repository's own review workflow
+does exactly that — so a warn would fire on a healthy install every time the feature worked, which
+is the cries-wolf half of AD-12. The one new warn is captures accumulating with **zero** pairings
+ever, thresholded at three rather than one so a denied `Agent` call or a `doctor` run racing a live
+dispatch cannot trip it.
+
+**Verification, in the ruled order.**
+
+- Gate 1 — **sandbox**: `cortex install` into a sandboxed HOME, then the **real rendered
+  `cortex-subagent.sh`** run under bash against a real store in a temp git project. 15/15: both
+  `PreToolUse` entries written with their own matchers, `dispatch-pre` silent, `SubagentStart`
+  emitting the envelope, a no-memory dispatch emitting **nothing**, a two-agent same-message fan-out
+  briefing both, disengagement silencing everything, every brief billed to a child, and `doctor`
+  18/18 with the new rows rendering.
+- `npm run build`, `npm run lint`, `npx vitest run` → **1703 passed, 1 skipped** (47 files),
+  `npm run gate` → **9/9 at zero delta**, exactly as the story predicted (`brief()` has no
+  eval-harness caller).
+- `node dist/transports/cli.js doctor` on the live install: two failures, both expected before
+  gate 3 and both naming `cortex install` — `PreToolUse (subagent dispatch)` unwired and
+  `cortex-subagent.sh` stale against the new template. Loud with a named fix, never silent.
+- Byte scan: 111 files across `src/`, `hooks/`, `tests/`, `docs/`, `README.md`, `CLAUDE.md` —
+  **0 control-byte offenders**. One was introduced and caught by the suite's own guard: `wiringKey`
+  was first written with a raw NUL separator, the exact hazard Story 4.5 removed.
+- Mutation campaign: **27/27 KILLED**, every mutation sha-proven applied and restored
+  byte-identically, EOL-aware. One survivor on the first run (M18, above) closed by strengthening
+  its test rather than by accepting the gap.
+- Gate 3 (`cortex install` machine-wide) is **not yet run** — it comes after the three-layer review,
+  per the 2026-08-06 ruling.
+
+**Stated limits carried forward.**
+
+- The sandbox is not the host: `agent_type` at `SubagentStart` is assumed equal to
+  `tool_input.subagent_type` at `PreToolUse`. That equality is the pairing's third key part and is
+  the one thing gate 3's live proof must confirm; if the host disagrees, the failure mode is a miss
+  (no brief), never a wrong brief.
+- The probe behind the FIFO residual did not record whether the dispatches were
+  `run_in_background`. A host that queues backgrounded dispatches could land two captures before
+  either start — which is what the ambiguity counter exists to expose.
+
 ### File List
+
+**Source**
+
+- `src/db/schema.ts` — `subagent_dispatches` appended to `V5_TABLES`; two indexes added to `INDEXES`
+- `src/db/store.ts` — dispatch row/parsed types, `insertSubagentDispatch`, `getSubagentDispatch`, `countPendingSubagentDispatches`, `consumeSubagentDispatch`
+- `src/db/gc.ts` — `dispatchDays` option, `pruneSubagentDispatches`, `subagent_dispatches` in `GcReport`
+- `src/scope/runtime.ts` — dispatch marker/counter keys, `recordSubagentDispatch`, `recordSubagentPairing`
+- `src/query/subagent-brief.ts` — **new**: horizon, prompt summary, suppression, retrieve-then-brief
+- `src/query/doctor.ts` — `PreToolUse (subagent dispatch)` wiring, `wiringKey`, `metaCount`, dispatch counters in `Subagent sessions`, new `Dispatch matcher` row
+- `src/query/install.ts` — `wiredElsewhere` keyed by `wiringKey`, `matcherIsContested`
+- `src/transports/hook-entry.ts` — `dispatch-pre` action/branch/handler, `subagentStart` emits, `renderSubagentBrief`, `toHookJson` widened, `bookHookInjection` session argument, `reflectFromPayload` identity, marker ordering
+- `src/index.ts` — new exports
+- `hooks/claude/cortex-subagent.sh` — `dispatch-pre` arm
+
+**Tests**
+
+- `tests/subagent-brief.test.ts` — **new** (31)
+- `tests/hook-entry.test.ts` — dispatch-pre, the brief, billing, reflex attribution, marker ordering
+- `tests/doctor.test.ts` — fixture derived from `REQUIRED_WIRING`; dispatch counters; dispatch matcher
+- `tests/install.test.ts` — per-wiring de-duplication, the two-settings-file case, two wirings on one event
+- `tests/cli.test.ts` — `seedSandboxHome` derived from `REQUIRED_WIRING`
+- `tests/capture-hook.test.ts` — one Node invocation per arm; arms matched against `REQUIRED_WIRING`
+
+**Documentation**
+
+- `docs/invariants.md` — 20 FR-18 bullets
+- `README.md` — hook table row; "What a subagent is told"
+- `CLAUDE.md` — Current Model, Core Files, invariants coverage
+- `_bmad-output/implementation-artifacts/deferred-work.md` — the re-filed `reflect-pre` item closed
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
 
 ### Change Log
 
 | Date | Change |
 | --- | --- |
 | 2026-08-06 | Story created against `453e7f2`, on ACs re-based against measurement beforehand rather than discovered during implementation. Independent validation then found seven issues in the first draft, all folded in: the pairing key was rebuilt on `(session_id, prompt_id, agent_type)` — both ids were in the measured payloads, transcribed into the story, and not mined — which converts most of the refuse-to-guess machinery into a narrow, counted residual; the installer cannot currently write a second `REQUIRED_WIRING` entry on one event (`wiredElsewhere` is keyed by event name), and the "reflect-pre / reflect-prompt precedent" cited for it does not exist; both test fixtures DO need repair, the opposite of what the draft claimed; a missing `handleHookPayload` branch is type-clean and would inject reflex context into the parent; the eval-gate expectation was inverted and pre-authorised a moved gate; `logRetrieval` reinforces memory, making an auto-brief a ranking decision rather than a reporting one; and a second re-filed defect had been dropped. One AC clause (exact pairing verification via the sidecar's `toolUseId`) is now explicitly deferred to Story 5.3 rather than quietly narrowed. Status → ready-for-dev. |
+| 2026-08-07 | Dev complete. All four ACs met as amended. Two unpredicted defects found and fixed: `install`'s matcher repair would overwrite itself across two wirings on one event, and Story 5.1's first-fire marker was stamped one millisecond after the child it describes so `doctor` under-counted by one, permanently — found by the sandbox proof, not by any test. The re-filed `reflect-pre` defect was fixed rather than deferred again, and the cost the note feared did not materialise (nothing rendered depends on the session id; gate unmoved). Reinforcement, the strict `subagent_type`, and the report-don't-warn treatment of pairing ambiguity are stated decisions with their residuals recorded. 1703 tests / 1 skipped, gate 9/9 zero delta, mutation campaign 27/27 killed after strengthening one test that survived, byte scan clean across 111 files, sandbox proof 15/15 against the real rendered hook. Gate 3 (`cortex install` machine-wide) deliberately not run — it follows the three-layer review. Status → review. |

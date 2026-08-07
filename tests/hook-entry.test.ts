@@ -8,9 +8,17 @@ import { CortexStore } from '../src/db/store.js';
 import { handleHookPayload } from '../src/transports/hook-entry.js';
 import {
   resolveAgentSessionId,
+  SUBAGENT_AMBIGUOUS_COUNT_KEY,
+  SUBAGENT_BRIEFED_COUNT_KEY,
+  SUBAGENT_PAIRED_COUNT_KEY,
   SUBAGENT_START_COUNT_KEY,
   SUBAGENT_START_KEY,
 } from '../src/scope/runtime.js';
+import {
+  buildSubagentBrief,
+  PROMPT_PREFIX_MAX_CHARS,
+  SUBAGENT_BRIEF_ENV,
+} from '../src/query/subagent-brief.js';
 import { configureEngagementPath, handleToolCall, writeEngagement } from '../src/transports/mcp.js';
 
 function createTestStore(): { store: CortexStore; sessionId: string } {
@@ -433,7 +441,9 @@ describe('handleHookPayload subagent-start', () => {
       { requireEngagement: false },
     );
 
-    // N-1: this channel says nothing. Story 5.2 owns the brief.
+    // Silence, because nothing was captured for this start to pair with. Story
+    // 5.2 made this channel conditional rather than mute: with no dispatch row
+    // there is nothing to brief from, and N-1 makes that emit nothing at all.
     expect(output).toBe('');
 
     const child = store.getSessionByAgentId(parent.scope_key!, 'agent-alpha');
@@ -830,5 +840,602 @@ describe('handleHookPayload subagent-start', () => {
 
     expect(resolved).toBe(created.id);
     expect(store.getChildSessions(parent.id)).toHaveLength(1);
+  });
+});
+
+// ── dispatch-pre and the automatic brief (FR-18, Story 5.2) ──────────
+//
+// `PreToolUse` on the `Agent` tool is the ONLY event carrying the dispatch
+// description: `SubagentStart`'s seven fields do not include it, its sidecar is
+// written strictly after every start hook returns, and the parent transcript is
+// racy at that instant. So the description is captured one event early and
+// consumed when the subagent starts.
+function dispatchPrePayload(
+  description: string,
+  agentType = 'Explore',
+  extra: Record<string, unknown> = {},
+  input: Record<string, unknown> = {},
+): string {
+  return JSON.stringify({
+    session_id: 'host-session-id',
+    transcript_path: '/transcripts/host-session-id.jsonl',
+    cwd: '/repo',
+    prompt_id: 'prompt-1',
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Agent',
+    tool_use_id: 'toolu_dispatch_1',
+    tool_input: {
+      description,
+      prompt: 'Go and do the thing.',
+      subagent_type: agentType,
+      ...input,
+    },
+    ...extra,
+  });
+}
+
+function ledgerRows(store: CortexStore): Array<{ session_id: string; type: string; tokens: number }> {
+  return store.db
+    .prepare('SELECT session_id, type, tokens FROM token_ledger ORDER BY rowid')
+    .all() as Array<{ session_id: string; type: string; tokens: number }>;
+}
+
+function seedBriefableMemory(store: CortexStore, sessionId: string): void {
+  store.insertNote({
+    sessionId,
+    kind: 'decision',
+    subject: 'read ledger',
+    content: 'The read ledger answers unchanged-since by re-hashing, never by mtime.',
+  });
+}
+
+function dispatchCount(store: CortexStore): number {
+  return (store.db.prepare('SELECT COUNT(*) AS n FROM subagent_dispatches').get() as { n: number }).n;
+}
+
+describe('handleHookPayload dispatch-pre', () => {
+  it('records the dispatch and emits nothing', () => {
+    const { store } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+
+    const output = handleHookPayload(
+      store,
+      'dispatch-pre',
+      dispatchPrePayload('trace the read ledger'),
+      cwd,
+      { requireEngagement: false },
+    );
+
+    expect(output).toBe('');
+    expect(
+      store.countPendingSubagentDispatches(
+        { hostSessionId: 'host-session-id', promptId: 'prompt-1', agentType: 'Explore' },
+        '1970-01-01T00:00:00.000Z',
+      ),
+    ).toBe(1);
+  });
+
+  // The fallthrough guard. `handleHookPayload` is a chain of `if`s ending in
+  // `return reflectFromPayload(...)` and `main()` casts argv[2] unchecked, so
+  // adding a `HookAction` member and forgetting its branch COMPILES — and every
+  // dispatch would then inject reflex `additionalContext` into the PARENT.
+  it('never produces reflex output, even with memory that matches the dispatch', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-state-'));
+    seedBriefableMemory(store, sessionId);
+
+    const output = handleHookPayload(
+      store,
+      'dispatch-pre',
+      dispatchPrePayload('read ledger freshness'),
+      cwd,
+      { sessionId, stateDir, requireEngagement: false },
+    );
+
+    expect(output).toBe('');
+    expect(output).not.toContain('hookSpecificOutput');
+    expect(ledgerRows(store)).toHaveLength(0);
+  });
+
+  it('refuses a dispatch with no explicit subagent_type rather than guessing one', () => {
+    // A guessed default does not merely fail to pair: it puts a foreign row into
+    // the queue for a type that IS dispatched, where FIFO hands it to a
+    // legitimate subagent. Refusing costs one brief and can never mislead.
+    const { store } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+
+    // Asserted on the CALL, not only on the row count. A NOT NULL column plus
+    // AD-12's swallow would hide a removed guard behind an identical empty
+    // table — the guard has to be shown never to reach the write.
+    let attempted = 0;
+    const watched = Object.create(store) as typeof store;
+    watched.insertSubagentDispatch = opts => {
+      attempted += 1;
+      return store.insertSubagentDispatch(opts);
+    };
+
+    handleHookPayload(
+      watched,
+      'dispatch-pre',
+      JSON.stringify({
+        session_id: 'host-session-id',
+        prompt_id: 'prompt-1',
+        cwd: '/repo',
+        tool_name: 'Agent',
+        tool_input: { description: 'no type given', prompt: 'go' },
+      }),
+      cwd,
+      { requireEngagement: false },
+    );
+
+    expect(attempted, 'the capture was attempted without an agent type').toBe(0);
+    expect(dispatchCount(store)).toBe(0);
+  });
+
+  it('ignores a tool that is not Agent, however broad the matcher becomes', () => {
+    const { store } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+
+    handleHookPayload(
+      store,
+      'dispatch-pre',
+      JSON.stringify({
+        session_id: 'host-session-id',
+        prompt_id: 'prompt-1',
+        cwd: '/repo',
+        tool_name: 'Edit',
+        tool_input: { description: 'not a dispatch', subagent_type: 'Explore' },
+      }),
+      cwd,
+      { requireEngagement: false },
+    );
+
+    expect(dispatchCount(store)).toBe(0);
+  });
+
+  it('stores a bounded prompt summary rather than the prompt itself', () => {
+    const { store } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    const long = 'y'.repeat(PROMPT_PREFIX_MAX_CHARS * 2);
+
+    handleHookPayload(
+      store,
+      'dispatch-pre',
+      dispatchPrePayload('bounded prompt', 'Explore', {}, { prompt: long }),
+      cwd,
+      { requireEngagement: false },
+    );
+
+    const row = store.db
+      .prepare('SELECT prompt_prefix, prompt_chars, prompt_digest FROM subagent_dispatches')
+      .get() as { prompt_prefix: string; prompt_chars: number; prompt_digest: string };
+    expect(row.prompt_prefix).toHaveLength(PROMPT_PREFIX_MAX_CHARS);
+    expect(row.prompt_chars).toBe(long.length);
+    expect(row.prompt_digest).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it('creates no session and rotates nothing: a dispatch is not a session boundary', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    const before = store.getSessionCount();
+
+    handleHookPayload(store, 'dispatch-pre', dispatchPrePayload('anything'), cwd, {
+      requireEngagement: false,
+    });
+
+    expect(store.getSessionCount()).toBe(before);
+    expect(store.getCurrentSession()?.id).toBe(sessionId);
+  });
+
+  it('swallows a store failure instead of letting it reach the turn (AD-12)', () => {
+    const { store } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+
+    const broken = Object.create(store) as typeof store;
+    broken.insertSubagentDispatch = () => {
+      throw new Error('SQLITE_BUSY: database is locked');
+    };
+
+    let output = 'unset';
+    expect(() => {
+      output = handleHookPayload(broken, 'dispatch-pre', dispatchPrePayload('boom'), cwd, {
+        requireEngagement: false,
+      });
+    }).not.toThrow();
+    expect(output).toBe('');
+  });
+});
+
+describe('handleHookPayload subagent-start brief', () => {
+  const dispatch = (store: CortexStore, cwd: string, description: string, agentType = 'Explore') =>
+    handleHookPayload(store, 'dispatch-pre', dispatchPrePayload(description, agentType), cwd, {
+      requireEngagement: false,
+    });
+
+  const start = (store: CortexStore, cwd: string, agentId: string, agentType = 'Explore') =>
+    handleHookPayload(store, 'subagent-start', subagentStartPayload(agentId, agentType), cwd, {
+      requireEngagement: false,
+    });
+
+  it('injects the brief through the additionalContext envelope', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    seedBriefableMemory(store, sessionId);
+
+    dispatch(store, cwd, 'read ledger freshness');
+    const output = start(store, cwd, 'agent-alpha');
+
+    const parsed = JSON.parse(output) as {
+      hookSpecificOutput: { hookEventName: string; additionalContext: string };
+    };
+    expect(parsed.hookSpecificOutput.hookEventName).toBe('SubagentStart');
+    expect(parsed.hookSpecificOutput.additionalContext).toContain('Briefing for Explore:');
+    expect(parsed.hookSpecificOutput.additionalContext).toContain('re-hashing');
+  });
+
+  it('emits nothing when the dispatch topic matches no memory (AC #2)', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    seedBriefableMemory(store, sessionId);
+
+    dispatch(store, cwd, 'zzqqxx nothing here matches that phrase');
+    const output = start(store, cwd, 'agent-alpha');
+
+    expect(output).toBe('');
+    expect(output).not.toContain('No context found');
+  });
+
+  it('emits nothing when no dispatch was captured for this start', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    seedBriefableMemory(store, sessionId);
+
+    expect(start(store, cwd, 'agent-alpha')).toBe('');
+  });
+
+  it('does not pair across host windows or turns', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    seedBriefableMemory(store, sessionId);
+
+    handleHookPayload(
+      store,
+      'dispatch-pre',
+      dispatchPrePayload('read ledger freshness', 'Explore', {
+        session_id: 'a-different-window',
+      }),
+      cwd,
+      { requireEngagement: false },
+    );
+
+    expect(start(store, cwd, 'agent-alpha')).toBe('');
+  });
+
+  it('consumes each capture once, so a re-fired start says nothing twice (N-7)', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    seedBriefableMemory(store, sessionId);
+
+    dispatch(store, cwd, 'read ledger freshness');
+    expect(start(store, cwd, 'agent-alpha')).not.toBe('');
+    expect(start(store, cwd, 'agent-alpha')).toBe('');
+  });
+
+  it('gives two same-type siblings their own dispatches, in order', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'alpha subject',
+      content: 'Alpha subject decision: the alpha path uses re-hashing throughout.',
+    });
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'bravo subject',
+      content: 'Bravo subject decision: the bravo path uses mtime and must not.',
+    });
+
+    dispatch(store, cwd, 'alpha subject');
+    dispatch(store, cwd, 'bravo subject');
+
+    const first = start(store, cwd, 'agent-alpha');
+    const second = start(store, cwd, 'agent-bravo');
+
+    expect(first).toContain('alpha subject');
+    expect(second).toContain('bravo subject');
+    // Ambiguity is COUNTED, not refused: the first start saw two candidates.
+    expect(store.getMeta(SUBAGENT_AMBIGUOUS_COUNT_KEY)).toBe('1');
+    expect(store.getMeta(SUBAGENT_PAIRED_COUNT_KEY)).toBe('2');
+    expect(store.getMeta(SUBAGENT_BRIEFED_COUNT_KEY)).toBe('2');
+  });
+
+  it('suppresses a brief the parent already pasted into the dispatch prompt (AC #3)', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    seedBriefableMemory(store, sessionId);
+
+    // What an explicit `cortex_brief` would have handed the parent.
+    const pasted = buildSubagentBrief(store, {
+      description: 'read ledger freshness',
+      agentType: 'Explore',
+    }).text;
+    expect(pasted).not.toBe('');
+
+    handleHookPayload(
+      store,
+      'dispatch-pre',
+      dispatchPrePayload('read ledger freshness', 'Explore', {}, {
+        prompt: `Context:\n${pasted}\n\nNow audit it.`,
+      }),
+      cwd,
+      { requireEngagement: false },
+    );
+
+    expect(start(store, cwd, 'agent-alpha')).toBe('');
+    // Paired and counted, but deliberately not briefed.
+    expect(store.getMeta(SUBAGENT_PAIRED_COUNT_KEY)).toBe('1');
+    expect(store.getMeta(SUBAGENT_BRIEFED_COUNT_KEY)).toBeUndefined();
+  });
+
+  it('books the injection to the CHILD session, never the parent', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    const parent = store.getSession(sessionId)!;
+    seedBriefableMemory(store, sessionId);
+
+    dispatch(store, cwd, 'read ledger freshness');
+    const output = start(store, cwd, 'agent-alpha');
+    expect(output).not.toBe('');
+
+    const child = store.getSessionByAgentId(parent.scope_key!, 'agent-alpha')!;
+    const booked = ledgerRows(store).filter(row => row.type === 'subagent_brief');
+    expect(booked).toHaveLength(1);
+    // MUTATION ANCHOR: dropping the `child.id` argument from
+    // `bookHookInjection` in `renderSubagentBrief` must turn this red —
+    // `getCurrentSession()` is primary-only by SQL, so it would silently bill
+    // every dispatch to the parent.
+    expect(booked[0]!.session_id).toBe(child.id);
+    expect(booked[0]!.session_id).not.toBe(parent.id);
+    expect(booked[0]!.tokens).toBeGreaterThan(0);
+  });
+
+  it('leaves the parent-facing consult gate booked to the primary', () => {
+    // The other half of the same fix: `bookHookInjection`'s new argument must
+    // not have moved a surface that legitimately belongs to the parent.
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-consult-'));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-consult-state-'));
+
+    const output = handleHookPayload(
+      store,
+      'reflect-prompt',
+      JSON.stringify({ prompt: 'Resume the previous debugging work' }),
+      cwd,
+      { sessionId, stateDir, requireEngagement: false },
+    );
+    expect(output).not.toBe('');
+
+    const booked = ledgerRows(store).filter(row => row.type === 'consult_gate');
+    expect(booked).toHaveLength(1);
+    expect(booked[0]!.session_id).toBe(sessionId);
+  });
+
+  it('still creates the session when the brief half throws (AD-12)', () => {
+    // Two independently guarded halves: the session is the deliverable every
+    // later story depends on, the brief is an optimisation on top of it.
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    const parent = store.getSession(sessionId)!;
+    seedBriefableMemory(store, sessionId);
+    dispatch(store, cwd, 'read ledger freshness');
+
+    const broken = Object.create(store) as typeof store;
+    broken.consumeSubagentDispatch = () => {
+      throw new Error('SQLITE_BUSY: database is locked');
+    };
+
+    let output = 'unset';
+    expect(() => {
+      output = handleHookPayload(
+        broken,
+        'subagent-start',
+        subagentStartPayload('agent-alpha', 'Explore'),
+        cwd,
+        { requireEngagement: false },
+      );
+    }).not.toThrow();
+
+    expect(output).toBe('');
+    expect(store.getSessionByAgentId(parent.scope_key!, 'agent-alpha')).toBeDefined();
+    expect(store.getMeta(SUBAGENT_START_KEY)).toBeDefined();
+  });
+
+  it('is silent when the brief is switched off', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-dispatch-'));
+    seedBriefableMemory(store, sessionId);
+    dispatch(store, cwd, 'read ledger freshness');
+
+    const previous = process.env[SUBAGENT_BRIEF_ENV];
+    process.env[SUBAGENT_BRIEF_ENV] = 'off';
+    try {
+      expect(start(store, cwd, 'agent-alpha')).toBe('');
+    } finally {
+      if (previous === undefined) delete process.env[SUBAGENT_BRIEF_ENV];
+      else process.env[SUBAGENT_BRIEF_ENV] = previous;
+    }
+  });
+});
+
+// ── The reflex defect re-filed onto this story ───────────────────────
+//
+// `reflect-pre` fires on every Edit and Write INCLUDING a subagent's, and a
+// subagent's `PreToolUse` carries `agent_id`. Two defects rode together, and
+// `deferred-work.md` re-filed them as ONE question: the reflex was billed to the
+// primary, and — because the dedupe state file is keyed by session id — a
+// subagent consumed the PARENT's once-per-anchor marker, so the parent then
+// edited the same file and got no reflex at all.
+describe('reflex attribution for a subagent (Story 5.2, Task 6)', () => {
+  const REFLEX_NOTE =
+    'Never hand-edit src/db/store.ts call sites; use find_referencing_symbols first, always.';
+
+  const editPayload = (file: string, agentId?: string): string =>
+    JSON.stringify({
+      cwd: '/repo',
+      tool_name: 'Edit',
+      tool_input: { file_path: file },
+      ...(agentId === undefined ? {} : { agent_id: agentId, agent_type: 'Explore' }),
+    });
+
+  it('does not let a subagent consume the parent once-per-anchor marker', () => {
+    // The dedupe marker lives in a file named after the session id
+    // (`statePath` in `src/query/reflex.ts`), so "who owns the marker" IS "which
+    // session id resolved". Asserted on the file rather than on the parent's
+    // subsequent output, because a temp `cwd` resolves to a different git scope
+    // than the seeded session and would rotate the primary — a fixture artifact
+    // that would have made this pass for the wrong reason.
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-attr-'));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-attr-state-'));
+    const parent = store.getSession(sessionId)!;
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'src/db/store.ts',
+      content: REFLEX_NOTE,
+    });
+
+    const subagentOutput = handleHookPayload(
+      store,
+      'reflect-pre',
+      editPayload('src/db/store.ts', 'agent-alpha'),
+      cwd,
+      { stateDir, requireEngagement: false },
+    );
+    expect(subagentOutput).not.toBe('');
+
+    const child = store.getSessionByAgentId(parent.scope_key!, 'agent-alpha');
+    expect(child, 'the subagent identity was not resolved at all').toBeDefined();
+
+    const markerKey = (id: string): string =>
+      `cortex-reflex-${id.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')}.json`;
+    const written = fs.readdirSync(stateDir);
+
+    // MUTATION ANCHOR: removing `agentIdentity(payload)` from
+    // `reflectFromPayload`'s `resolveSessionId` call must turn this red — the
+    // subagent then writes the marker under a PRIMARY's id, which is exactly how
+    // it consumed the parent's once-per-anchor marker and silenced it.
+    expect(written).toContain(markerKey(child!.id));
+    expect(written, 'the subagent wrote the parent marker').not.toContain(
+      markerKey(parent.id),
+    );
+  });
+
+  it('bills a subagent reflex to the subagent', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-attr-'));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-attr-state-'));
+    const parent = store.getSession(sessionId)!;
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'src/db/store.ts',
+      content: REFLEX_NOTE,
+    });
+
+    handleHookPayload(store, 'reflect-pre', editPayload('src/db/store.ts', 'agent-alpha'), cwd, {
+      stateDir,
+      requireEngagement: false,
+    });
+
+    const child = store.getSessionByAgentId(parent.scope_key!, 'agent-alpha');
+    expect(child, 'the subagent identity was not resolved at all').toBeDefined();
+    const booked = ledgerRows(store).filter(row => row.type === 'reflex');
+    expect(booked).toHaveLength(1);
+    expect(booked[0]!.session_id).toBe(child!.id);
+  });
+
+  it('leaves a primary own reflex on the primary', () => {
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-attr-'));
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-reflex-attr-state-'));
+    store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'src/db/store.ts',
+      content: REFLEX_NOTE,
+    });
+
+    handleHookPayload(store, 'reflect-pre', editPayload('src/db/store.ts'), cwd, {
+      sessionId,
+      stateDir,
+      requireEngagement: false,
+    });
+
+    const booked = ledgerRows(store).filter(row => row.type === 'reflex');
+    expect(booked).toHaveLength(1);
+    expect(booked[0]!.session_id).toBe(sessionId);
+  });
+});
+
+// ── The first child must fall inside its own window ──────────────────
+
+describe('the subagent first-fire marker (Story 5.2 correction)', () => {
+  it('precedes the child it created, so doctor counts it', () => {
+    // `doctor` counts children with `started_at >= <marker>`. Stamping the
+    // marker AFTER the create put it one millisecond past the child it had just
+    // made, so the very first child of every store fell outside its own window
+    // and the row printed a count one too low, permanently. Found by Story 5.2's
+    // sandbox proof against the real rendered hook: child ...33.211Z, marker
+    // ...33.212Z, "4 fired, 3 recorded" against four real children.
+    const { store, sessionId } = createTestStore();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-subagent-'));
+    const parent = store.getSession(sessionId)!;
+
+    // Asserted as an ORDER OF OPERATIONS, not as a timestamp comparison. In
+    // memory the marker write and the session insert land in the same
+    // millisecond, so `child.started_at >= marker` holds either way — the
+    // mutation campaign caught that version surviving, which is the
+    // "asserts less than it claims" shape. The gap is real (1 ms, measured
+    // against the rendered hook) and the ordering is what produces it.
+    const order: string[] = [];
+    const watched = Object.create(store) as typeof store;
+    watched.setMeta = (key, value) => {
+      if (key === SUBAGENT_START_KEY) order.push('marker');
+      store.setMeta(key, value);
+    };
+    watched.createSession = opts => {
+      order.push('session');
+      return store.createSession(opts);
+    };
+
+    handleHookPayload(
+      watched,
+      'subagent-start',
+      subagentStartPayload('agent-first', 'Explore'),
+      cwd,
+      { requireEngagement: false },
+    );
+
+    // MUTATION ANCHOR: moving `recordSubagentStart` back below
+    // `ensureScopedSession` must turn this red.
+    expect(order, 'the marker was stamped after the child it describes').toEqual([
+      'marker',
+      'session',
+    ]);
+
+    // And the comparison `doctor` actually makes, on the real rows.
+    const marker = store.getMeta(SUBAGENT_START_KEY)!;
+    const child = store.getSessionByAgentId(parent.scope_key!, 'agent-first')!;
+    expect(child.started_at >= marker).toBe(true);
+    const counted = store.db
+      .prepare(
+        'SELECT COUNT(*) AS n FROM sessions WHERE parent_session_id IS NOT NULL AND started_at >= ?',
+      )
+      .get(marker) as { n: number };
+    expect(counted.n).toBe(1);
   });
 });

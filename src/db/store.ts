@@ -285,6 +285,80 @@ export interface UpsertNegativeResultOpts {
   recordedAt?: string;
 }
 
+export interface SubagentDispatchRow {
+  id: string;
+  scope_key: string;
+  host_session_id: string;
+  prompt_id: string;
+  agent_type: string;
+  tool_use_id: string | null;
+  description: string;
+  prompt_digest: string | null;
+  prompt_prefix: string | null;
+  prompt_chars: number;
+  captured_at: string;
+  consumed_at: string | null;
+}
+
+/**
+ * A subagent dispatch seen at `PreToolUse` on the `Agent` tool (FR-18, Story
+ * 5.2), waiting to be consumed by the matching `SubagentStart`.
+ *
+ * `hostSessionId` and `promptId` are the HOST's identifiers, not Cortex session
+ * ids — see the table's own docstring in `schema.ts` for why the names differ.
+ */
+export interface ParsedSubagentDispatch {
+  id: string;
+  scopeKey: string;
+  hostSessionId: string;
+  promptId: string;
+  agentType: string;
+  toolUseId: string | null;
+  description: string;
+  promptDigest: string | null;
+  promptPrefix: string | null;
+  promptChars: number;
+  capturedAt: string;
+  consumedAt: string | null;
+}
+
+export interface InsertSubagentDispatchOpts {
+  scopeKey: string;
+  hostSessionId: string;
+  promptId: string;
+  agentType: string;
+  toolUseId?: string | null;
+  description: string;
+  promptDigest?: string | null;
+  promptPrefix?: string | null;
+  promptChars?: number;
+  capturedAt?: string;
+}
+
+/** The pairing key (Story 5.2). Every part earns its place — see `schema.ts`. */
+export interface SubagentDispatchKey {
+  hostSessionId: string;
+  promptId: string;
+  agentType: string;
+}
+
+function parseSubagentDispatchRow(row: SubagentDispatchRow): ParsedSubagentDispatch {
+  return {
+    id: row.id,
+    scopeKey: row.scope_key,
+    hostSessionId: row.host_session_id,
+    promptId: row.prompt_id,
+    agentType: row.agent_type,
+    toolUseId: row.tool_use_id,
+    description: row.description,
+    promptDigest: row.prompt_digest,
+    promptPrefix: row.prompt_prefix,
+    promptChars: row.prompt_chars,
+    capturedAt: row.captured_at,
+    consumedAt: row.consumed_at,
+  };
+}
+
 function parseNegativeResultRow(row: NegativeResultRow): ParsedNegativeResult {
   return {
     scopeKey: row.scope_key,
@@ -3994,5 +4068,103 @@ export class CortexStore {
       .prepare('SELECT * FROM negative_results WHERE scope_key = ? AND query_key = ?')
       .get(scopeKey, queryKey) as NegativeResultRow | undefined;
     return row ? parseNegativeResultRow(row) : undefined;
+  }
+
+  // ── Subagent dispatches (FR-18, Story 5.2) ────────────────────────
+
+  /** Record a dispatch seen at `PreToolUse` on the `Agent` tool. */
+  insertSubagentDispatch(opts: InsertSubagentDispatchOpts): ParsedSubagentDispatch {
+    const id = crypto.randomUUID();
+    const capturedAt = opts.capturedAt ?? new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO subagent_dispatches (
+           id, scope_key, host_session_id, prompt_id, agent_type, tool_use_id,
+           description, prompt_digest, prompt_prefix, prompt_chars, captured_at, consumed_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      )
+      .run(
+        id,
+        opts.scopeKey,
+        opts.hostSessionId,
+        opts.promptId,
+        opts.agentType,
+        opts.toolUseId ?? null,
+        opts.description,
+        opts.promptDigest ?? null,
+        opts.promptPrefix ?? null,
+        opts.promptChars ?? 0,
+        capturedAt,
+      );
+    return this.getSubagentDispatch(id)!;
+  }
+
+  getSubagentDispatch(id: string): ParsedSubagentDispatch | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM subagent_dispatches WHERE id = ?')
+      .get(id) as SubagentDispatchRow | undefined;
+    return row ? parseSubagentDispatchRow(row) : undefined;
+  }
+
+  /**
+   * How many unconsumed captures match the pairing key inside the horizon.
+   *
+   * Read separately from the consume so the ambiguous case can be COUNTED. More
+   * than one match means only dispatch order separates the candidates — N
+   * same-type subagents dispatched in one assistant message — and a design whose
+   * safety rests on that ordering has to report how often the assumption is
+   * being tested (AD-12).
+   */
+  countPendingSubagentDispatches(key: SubagentDispatchKey, notOlderThan: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM subagent_dispatches
+         WHERE host_session_id = ? AND prompt_id = ? AND agent_type = ?
+           AND consumed_at IS NULL AND captured_at > ?`,
+      )
+      .get(key.hostSessionId, key.promptId, key.agentType, notOlderThan) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Claim the oldest unconsumed capture matching the key, in ONE statement.
+   *
+   * A conditional `UPDATE ... RETURNING` rather than select-then-update:
+   * `SubagentStart` hooks are independent OS processes, and `busy_timeout`
+   * serialises writes without making read-then-write atomic — Story 5.1's review
+   * reproduced two hook processes losing an increment through exactly that
+   * shape. Here the same race would hand ONE capture to TWO subagents, so the
+   * claim has to happen inside the database. A returned row is the row count:
+   * exactly one caller sees it.
+   *
+   * `captured_at > notOlderThan` is CORRECTNESS, not housekeeping, and must not
+   * be confused with the GC rule that also prunes this table. GC runs at most
+   * once per 24 hours, so a capture orphaned at 09:00 — a dispatch the user
+   * denied, or one the host never started — would otherwise stay eligible to
+   * mis-brief a later same-type subagent all day.
+   */
+  consumeSubagentDispatch(
+    key: SubagentDispatchKey,
+    notOlderThan: string,
+    consumedAt: string = new Date().toISOString(),
+  ): ParsedSubagentDispatch | undefined {
+    const row = this.db
+      .prepare(
+        `UPDATE subagent_dispatches SET consumed_at = ?
+         WHERE id = (
+           SELECT id FROM subagent_dispatches
+           WHERE host_session_id = ? AND prompt_id = ? AND agent_type = ?
+             AND consumed_at IS NULL AND captured_at > ?
+           ORDER BY captured_at ASC, rowid ASC
+           LIMIT 1
+         )
+           AND consumed_at IS NULL
+         RETURNING *`,
+      )
+      .get(consumedAt, key.hostSessionId, key.promptId, key.agentType, notOlderThan) as
+      | SubagentDispatchRow
+      | undefined;
+    return row ? parseSubagentDispatchRow(row) : undefined;
   }
 }

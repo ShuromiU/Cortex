@@ -8,6 +8,7 @@ import {
   REQUIRED_WIRING,
   commandSatisfiesWiring,
   tokenizeCommand,
+  wiringKey,
 } from '../src/query/doctor.js';
 const CAPTURE_MATCHER = REQUIRED_WIRING.find(w => w.event === 'PostToolUse')!.matcher!;
 
@@ -275,10 +276,23 @@ describe('running again on an unmodified installation (AC #2)', () => {
 
     const settings = JSON.parse(
       fs.readFileSync(path.join(fixture.homeDir, '.claude', 'settings.json'), 'utf8'),
-    ) as { hooks: Record<string, unknown[]> };
+    ) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
 
+    // Counted per WIRING, not per event. `PreToolUse` legitimately carries two
+    // entries since Story 5.2, so an event-length assertion would either fail on
+    // a correct installation or — if relaxed to `>= 1` — stop detecting the
+    // duplication it exists to catch.
     for (const required of REQUIRED_WIRING) {
-      expect(settings.hooks[required.event], `${required.event} duplicated`).toHaveLength(1);
+      const satisfying = (settings.hooks[required.event] ?? []).flatMap(entry =>
+        entry.hooks.filter(hook => commandSatisfiesWiring(hook.command, required)),
+      );
+      expect(satisfying, `${wiringKey(required)} duplicated`).toHaveLength(1);
+    }
+
+    // And no stray entries beyond the ones REQUIRED_WIRING asks for.
+    for (const [event, entries] of Object.entries(settings.hooks)) {
+      const expected = REQUIRED_WIRING.filter(required => required.event === event).length;
+      expect(entries, `${event} has an unexpected number of entries`).toHaveLength(expected);
     }
   });
 
@@ -833,10 +847,15 @@ describe('settings files Claude Code merges', () => {
   // Driven by REQUIRED_WIRING rather than pinned to `Stop`, so a newly added
   // event cannot silently escape the de-duplication that protects it. Without
   // this, `SubagentStart` had no coverage here at all.
-  it.each(REQUIRED_WIRING.map(w => w.event))(
+  //
+  // Keyed by `wiringKey`, not by event: mapping to event names produced two
+  // identical `PreToolUse` cases once Story 5.2 landed, and `find(w => w.event
+  // === event)` then returned the reflex entry for both — so the dispatch entry
+  // had no coverage here either, in exactly the shape this loop exists to
+  // prevent.
+  it.each(REQUIRED_WIRING.map(required => [wiringKey(required), required] as const))(
     'does not duplicate %s when another settings file already wires it',
-    event => {
-      const required = REQUIRED_WIRING.find(w => w.event === event)!;
+    (_key, required) => {
       const fixture = buildFixture();
       const posixHooks = fixture.hooksDir.split(path.sep).join('/');
       const command =
@@ -846,15 +865,41 @@ describe('settings files Claude Code merges', () => {
 
       writeFile(
         path.join(fixture.projectDir, '.claude', 'settings.local.json'),
-        JSON.stringify({ hooks: { [event]: [{ hooks: [{ type: 'command', command }] }] } }),
+        JSON.stringify({
+          hooks: { [required.event]: [{ hooks: [{ type: 'command', command }] }] },
+        }),
       );
 
       install(fixture);
 
       const userSettings = JSON.parse(
         fs.readFileSync(path.join(fixture.homeDir, '.claude', 'settings.json'), 'utf8'),
-      ) as { hooks: Record<string, unknown[] | undefined> };
-      expect(userSettings.hooks[event]).toBeUndefined();
+      ) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> | undefined };
+      const written = userSettings.hooks?.[required.event] ?? [];
+
+      // This wiring is not re-written here — it would double every invocation.
+      expect(
+        written.flatMap(entry =>
+          entry.hooks.filter(hook => commandSatisfiesWiring(hook.command, required)),
+        ),
+        `${wiringKey(required)} was written twice`,
+      ).toHaveLength(0);
+
+      // But the OTHER wirings on the same event still are. Before the
+      // `wiredElsewhere` fix this set was keyed by event name, so a machine with
+      // ANY `PreToolUse` wiring in a merged settings file had the second entry
+      // silently skipped — after which `doctor` failed `hook-wiring` and named
+      // `cortex install` as the fix that had just declined to help.
+      for (const sibling of REQUIRED_WIRING) {
+        if (sibling.event !== required.event) continue;
+        if (wiringKey(sibling) === wiringKey(required)) continue;
+        expect(
+          written.flatMap(entry =>
+            entry.hooks.filter(hook => commandSatisfiesWiring(hook.command, sibling)),
+          ),
+          `${wiringKey(sibling)} was skipped because a sibling on ${required.event} was wired elsewhere`,
+        ).toHaveLength(1);
+      }
     },
   );
 });
@@ -1106,5 +1151,87 @@ describe('a build shipping no templates', () => {
       expect(fs.existsSync(path.join(fixture.hooksDir, script))).toBe(false);
     }
     expect(result.refusals).toBe(HOOK_SCRIPTS.length);
+  });
+});
+
+// ── Two required wirings on one event (Story 5.2) ────────────────────
+
+describe('PreToolUse carries two wirings', () => {
+  it('writes both, each with its own matcher', () => {
+    const fixture = buildFixture();
+    install(fixture);
+
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(fixture.homeDir, '.claude', 'settings.json'), 'utf8'),
+    ) as { hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>> };
+
+    const preToolUse = REQUIRED_WIRING.filter(required => required.event === 'PreToolUse');
+    expect(preToolUse.length).toBeGreaterThan(1);
+    for (const required of preToolUse) {
+      const entry = settings.hooks['PreToolUse']!.find(candidate =>
+        candidate.hooks.some(hook => commandSatisfiesWiring(hook.command, required)),
+      );
+      expect(entry, `${wiringKey(required)} was not written`).toBeDefined();
+      expect(entry!.matcher, `${wiringKey(required)} lost its matcher`).toBe(required.matcher);
+    }
+  });
+
+  it('tells the two apart by their action token, so neither satisfies the other', () => {
+    // This is what makes two entries on one event safe, and why
+    // `cortex-subagent.sh` must never default its action.
+    const dispatch = REQUIRED_WIRING.find(w => w.action === 'dispatch-pre')!;
+    const reflex = REQUIRED_WIRING.find(w => w.action === 'reflect-pre')!;
+    const subagentStart = REQUIRED_WIRING.find(w => w.action === 'subagent-start')!;
+
+    expect(commandSatisfiesWiring('bash "/h/cortex-subagent.sh" dispatch-pre', dispatch)).toBe(true);
+    expect(commandSatisfiesWiring('bash "/h/cortex-subagent.sh" dispatch-pre', reflex)).toBe(false);
+    expect(
+      commandSatisfiesWiring('bash "/h/cortex-subagent.sh" dispatch-pre', subagentStart),
+    ).toBe(false);
+    expect(commandSatisfiesWiring('bash "/h/cortex-subagent.sh" subagent-start', dispatch)).toBe(
+      false,
+    );
+    // An arg-less wiring satisfies NEITHER, which is what stops the script from
+    // being allowed to default its action.
+    expect(commandSatisfiesWiring('bash "/h/cortex-subagent.sh"', dispatch)).toBe(false);
+    expect(commandSatisfiesWiring('bash "/h/cortex-subagent.sh"', subagentStart)).toBe(false);
+  });
+
+  it('gives every wiring a distinct key', () => {
+    const keys = REQUIRED_WIRING.map(wiringKey);
+    expect(new Set(keys).size, `wiringKey collision: ${keys.join(', ')}`).toBe(keys.length);
+  });
+
+  it('leaves the matcher alone when one record packs both PreToolUse commands', () => {
+    // `install` never writes that shape; a hand-edited settings file can. The
+    // repair pass runs once per required wiring over the same event array, so
+    // without a guard each pass would overwrite the other's matcher and leave
+    // one of the two hooks firing on the wrong tool — silently, because
+    // `hook-wiring` never inspects a matcher.
+    const fixture = buildFixture();
+    const posixHooks = fixture.hooksDir.split(path.sep).join('/');
+    writeFile(
+      path.join(fixture.homeDir, '.claude', 'settings.json'),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Edit|Write|Agent',
+              hooks: [
+                { type: 'command', command: `bash "${posixHooks}/cortex-reflect.sh" reflect-pre` },
+                { type: 'command', command: `bash "${posixHooks}/cortex-subagent.sh" dispatch-pre` },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+
+    install(fixture);
+
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(fixture.homeDir, '.claude', 'settings.json'), 'utf8'),
+    ) as { hooks: Record<string, Array<{ matcher?: string }>> };
+    expect(settings.hooks['PreToolUse']![0]!.matcher).toBe('Edit|Write|Agent');
   });
 });

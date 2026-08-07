@@ -481,6 +481,55 @@ CREATE TABLE IF NOT EXISTS negative_results (
   recorded_at   TEXT NOT NULL,
   PRIMARY KEY (scope_key, query_key)
 ) WITHOUT ROWID;
+
+-- FR-18's dispatch capture (Story 5.2). A LOOKUP/STAGING structure, not
+-- knowledge: per AD-4 it does NOT project into memory_items -- no backfill, no
+-- retrieval kind, and therefore no AD-5 fixture obligation. Same standing as
+-- content_digests and negative_results above.
+--
+-- WHY IT EXISTS AT ALL. SubagentStart carries exactly seven fields and none of
+-- them is the dispatch description (measured 2026-08-06): the per-agent sidecar
+-- that holds it is written strictly AFTER every SubagentStart hook returns, and
+-- the parent transcript is racy at that instant. PreToolUse on the Agent tool
+-- is the only event that carries the description, so it is captured one event
+-- earlier and consumed when the subagent actually starts.
+--
+-- host_session_id and prompt_id are the HOST's identifiers, NOT Cortex session
+-- ids. Named apart from session_id deliberately: every other table here means a
+-- sessions.id by that name, and an FK-shaped name for a foreign concept is how
+-- a later reader writes a join that silently returns nothing.
+--
+-- Together with agent_type they are the pairing key, and each part earns its
+-- place: host_session_id separates two host windows open on one branch (they
+-- share a scope_key, so scope alone does not divide them); prompt_id separates a
+-- stale capture from an earlier turn, which is the mispairing that would hand a
+-- subagent context from genuinely unrelated work; agent_type separates
+-- concurrent dispatches of different types.
+--
+-- prompt_prefix is a NORMALIZED, bounded prefix used only to answer AC #3 -- did
+-- the parent already paste this into the dispatch prompt -- and prompt_chars is
+-- the full normalized length, so the suppression decision can state how much of
+-- the prompt it actually saw rather than implying it saw all of it (AD-6). The
+-- prompt is never stored verbatim: a dispatch prompt runs to tens of kilobytes
+-- and this table is not a transcript.
+--
+-- A ROWID table, deliberately, where the neighbouring lookup tables are WITHOUT
+-- ROWID: FIFO pairing needs a stable tiebreak between two captures recorded in
+-- the same millisecond, and rowid is the only monotonic thing available.
+CREATE TABLE IF NOT EXISTS subagent_dispatches (
+  id              TEXT PRIMARY KEY,
+  scope_key       TEXT NOT NULL,
+  host_session_id TEXT NOT NULL,
+  prompt_id       TEXT NOT NULL,
+  agent_type      TEXT NOT NULL,
+  tool_use_id     TEXT,
+  description     TEXT NOT NULL,
+  prompt_digest   TEXT,
+  prompt_prefix   TEXT,
+  prompt_chars    INTEGER NOT NULL DEFAULT 0,
+  captured_at     TEXT NOT NULL,
+  consumed_at     TEXT
+);
 `;
 
 const V2_FTS = `
@@ -542,6 +591,15 @@ CREATE INDEX IF NOT EXISTS idx_memory_references_item ON memory_references(memor
 CREATE INDEX IF NOT EXISTS idx_memory_references_status ON memory_references(status);
 CREATE INDEX IF NOT EXISTS idx_retrieval_log_session ON retrieval_log(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_memory_corrections_item ON memory_corrections(memory_item_id, created_at);
+-- The pairing lookup (Story 5.2), column order matching the WHERE clause in
+-- consumeSubagentDispatch. captured_at last so the same index also serves the
+-- FIFO ordering. No backticks anywhere in this constant: it is a template
+-- literal, so one ends the string and the file stops parsing.
+CREATE INDEX IF NOT EXISTS idx_subagent_dispatches_pairing
+  ON subagent_dispatches(host_session_id, prompt_id, agent_type, consumed_at, captured_at);
+-- GC's horizon scan, which is keyed on age alone.
+CREATE INDEX IF NOT EXISTS idx_subagent_dispatches_captured
+  ON subagent_dispatches(captured_at);
 `;
 
 interface MetaRow {

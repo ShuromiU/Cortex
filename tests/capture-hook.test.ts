@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { findPosixTool } from './posix-tools.js';
 import { renderHookScript } from '../src/query/install.js';
+import { REQUIRED_WIRING } from '../src/query/doctor.js';
 
 /**
  * Executes the real PostToolUse hook script. Nothing else can: the script is
@@ -605,8 +606,21 @@ describe('cortex-subagent.sh — structure', () => {
     const lines = script.split(/\r?\n/).filter(line => !line.trim().startsWith('#'));
     const body = lines.join('\n');
 
-    // Exactly one Node invocation, and exactly one jq — the payload read.
-    expect(body.match(/__CORTEX_NODE__/g) ?? []).toHaveLength(1);
+    // ONE Node invocation per FIRE, which is the invariant — not one per file.
+    // Story 5.2 added a second arm (`dispatch-pre` on PreToolUse), and a `case`
+    // executes exactly one arm, so the count that matters is per arm. Asserted
+    // as "every Node line sits inside its own case arm, and there are exactly as
+    // many as there are arms": a second invocation smuggled into ONE arm still
+    // fails, which is the regression this guards.
+    const armLines = lines.filter(line => /^\s{2}[a-z-]+\)\s*$/.test(line));
+    const nodeLines = lines.filter(line => line.includes('__CORTEX_NODE__'));
+    expect(armLines.length).toBeGreaterThan(0);
+    expect(nodeLines).toHaveLength(armLines.length);
+    for (const line of nodeLines) {
+      expect(line.match(/__CORTEX_NODE__/g) ?? [], line).toHaveLength(1);
+    }
+    // Exactly one jq — the payload read — and it is outside the case, so it is
+    // paid once however many arms exist.
     expect(body.match(/\bjq\b/g) ?? []).toHaveLength(1);
     // No SQLite, no network, and nothing that blocks waiting on a file.
     for (const banned of ['sqlite', 'curl', 'wget', 'sleep', 'sha256sum']) {
@@ -618,6 +632,35 @@ describe('cortex-subagent.sh — structure', () => {
     const nodeLine = lines.findIndex(line => line.includes('__CORTEX_NODE__'));
     expect(guardLine).toBeGreaterThan(-1);
     expect(nodeLine).toBeGreaterThan(guardLine);
+  });
+
+  it('has exactly one arm for each action REQUIRED_WIRING points at it', () => {
+    // `install` and `doctor` share `REQUIRED_WIRING`, and the script is the
+    // third party to that agreement: a wiring naming an action the script has
+    // no arm for installs cleanly, passes every `doctor` check, and does
+    // nothing — the arm falls through to `exit 0`, which is the correct
+    // response to an UNKNOWN action and the silent-death response to a wired
+    // one. Story 5.2 added a second arm and this is what keeps the third one
+    // honest.
+    const script = fs.readFileSync(SUBAGENT_SCRIPT, 'utf8');
+    const arms = script
+      .split(/\r?\n/)
+      .map(line => /^\s{2}([a-z][a-z-]*)\)\s*$/.exec(line)?.[1])
+      .filter((arm): arm is string => arm !== undefined);
+
+    const wiredActions = REQUIRED_WIRING.filter(
+      required => required.script === 'cortex-subagent.sh',
+    ).map(required => required.action);
+
+    expect(wiredActions.length).toBeGreaterThan(0);
+    for (const action of wiredActions) {
+      expect(action, 'a cortex-subagent.sh wiring with no action token').toBeDefined();
+      expect(arms, `cortex-subagent.sh has no arm for the wired action ${action}`).toContain(
+        action,
+      );
+    }
+    // And no arm the wiring never reaches, which would be dead shell.
+    expect(arms.slice().sort()).toEqual([...wiredActions].sort());
   });
 
   // The property that matters is the INSTALLED script's line endings, not the

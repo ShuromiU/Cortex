@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { CortexStore } from '../db/store.js';
+import { CortexStore, type SessionRow } from '../db/store.js';
 import {
   handleAgentEvent,
   handleCmdEvent,
@@ -21,9 +21,18 @@ import { flushSpool } from '../capture/spool.js';
 import { writeDigestIndex } from '../capture/digest-index.js';
 import {
   ensureScopedSession,
+  recordSubagentDispatch,
+  recordSubagentPairing,
   recordSubagentStart,
   type ScopeSessionOptions,
 } from '../scope/runtime.js';
+import {
+  buildSubagentBrief,
+  dispatchCutoff,
+  dispatchHorizonSeconds,
+  subagentBriefEnabled,
+  summarizeDispatchPrompt,
+} from '../query/subagent-brief.js';
 import { configureEngagementPath, readEngagement, writeEngagement } from './mcp.js';
 
 const CORTEX_CONSULTED_KEY = 'cortex_consulted';
@@ -36,7 +45,24 @@ const MEMORY_RELEVANT_PROMPT_PATTERN =
   /\b(resume|resumed|resuming|continue|continuing|again|earlier|previous|prior|follow[- ]?up|pick up|fix|debug|bug|error|failure|failing|broken|regression|implement|plan|multi[- ]?step|decision|remember|memory|refactor)\b/i;
 const STOP_NUDGE_CONFIDENCE_THRESHOLD = 0.6;
 
-function toHookJson(hookEventName: 'UserPromptSubmit' | 'PreToolUse', additionalContext: string): string {
+/**
+ * The context-injection envelope.
+ *
+ * Widened to `SubagentStart` for Story 5.2, on a MEASURED result rather than on
+ * the documentation: a `SubagentStart` hook emitting this shape reaches the
+ * dispatched subagent, which quoted the marker back verbatim and reported it
+ * arrived before it did any work. Story 4.5's standing rule is that this
+ * mechanism is probed, never inferred — a wrong-shaped payload costs nothing,
+ * throws nothing, exits 0, and is indistinguishable from a miss.
+ *
+ * The near-identical `toHookJson` in `query/reflex.ts` is deliberately NOT
+ * widened: it takes a `ReflexEvent`, and no reflex event can ever be a
+ * `SubagentStart`, so the two are correctly divergent.
+ */
+function toHookJson(
+  hookEventName: 'UserPromptSubmit' | 'PreToolUse' | 'SubagentStart',
+  additionalContext: string,
+): string {
   return JSON.stringify({
     hookSpecificOutput: {
       hookEventName,
@@ -52,6 +78,7 @@ export type HookAction =
   | 'reflect-edit'
   | 'reflect-cmd'
   | 'reflect-agent'
+  | 'dispatch-pre'
   | 'subagent-start'
   | 'end-of-turn';
 
@@ -164,18 +191,31 @@ function incrementConsultGateCount(engagement: Record<string, string>): void {
  * must never turn an injection into a broken hook. A missing session simply
  * books nothing — there is no session to attribute it to, and inventing one
  * from a hook path is worse than an unbooked row.
+ *
+ * `sessionId` exists because `getCurrentSession()` is PRIMARY-ONLY by SQL, and
+ * text injected into a SUBAGENT's context is not the parent's cost. Without it
+ * Story 5.2's brief would bill every dispatch to the parent, and the P&L that
+ * judges whether the feature is worth its tokens would be wrong about which
+ * session paid. The two pre-existing callers — `renderConsultGate` and
+ * `endOfTurn` — pass nothing and keep booking to the primary, deliberately:
+ * both are parent-facing surfaces.
  */
-function bookHookInjection(store: CortexStore, type: string, text: string): void {
+function bookHookInjection(
+  store: CortexStore,
+  type: string,
+  text: string,
+  sessionId?: string,
+): void {
   if (text.length === 0) {
     return;
   }
   try {
-    const session = store.getCurrentSession();
-    if (!session) {
+    const target = sessionId ?? store.getCurrentSession()?.id;
+    if (!target) {
       return;
     }
     store.insertLedgerEntry({
-      sessionId: session.id,
+      sessionId: target,
       type,
       direction: 'injected',
       tokens: estimateTokens(text),
@@ -363,24 +403,104 @@ function postToolUse(
 }
 
 /**
- * `SubagentStart` (FR-17): give a dispatched subagent its own session before it
- * does anything, so a subagent that only thinks is still attributable and a
- * later brief has somewhere to bill itself.
+ * `PreToolUse` on the `Agent` tool (FR-18, Story 5.2): record the dispatch, so
+ * that `SubagentStart` — which carries no description — has one to brief from.
  *
- * Emits nothing (N-1). Story 5.2 owns the brief; this is the channel it needs.
+ * Emits nothing, ever. This runs on the PARENT's `PreToolUse`, where a returned
+ * envelope would inject context into the parent rather than the subagent — and
+ * where the deny mechanism that event uniquely offers would gate the user's own
+ * dispatch. AD-7 forbids that mechanism for economics, and a source-negative
+ * test in `tests/substitution.test.ts` keeps its spelling out of this file
+ * entirely, so a later change cannot reach for it unnoticed.
+ */
+function dispatchPre(
+  store: CortexStore,
+  payload: Record<string, unknown>,
+): void {
+  try {
+    captureDispatch(store, payload);
+  } catch {
+    // AD-12 / N-3: same contract as `subagentStart` below. A dispatch that goes
+    // unrecorded costs one brief; a dispatch that prints a stack trace costs the
+    // user's turn.
+  }
+}
+
+function captureDispatch(store: CortexStore, payload: Record<string, unknown>): void {
+  // The matcher is the host's job, but a hand-edited or broadened matcher would
+  // otherwise file every Edit and Bash into the dispatch table.
+  if (toolName(payload) !== 'Agent') {
+    return;
+  }
+
+  const input = toolInput(payload);
+  const hostSessionId = firstString(payload['session_id'], payload['sessionId']);
+  const promptId = firstString(payload['prompt_id'], payload['promptId']);
+  const description = firstString(input['description'], input['desc']);
+  // STRICT, with no default. `subagent_type` is optional on the `Agent` tool, so
+  // it is tempting to substitute the host's documented default — but the default
+  // agent's reported name is a host detail (this machine's own agent list names
+  // its catch-all `claude`, not `general-purpose`), and a wrong guess does not
+  // merely fail to pair: it puts a foreign row into the queue for a type that
+  // IS dispatched, where FIFO would hand it to a legitimate subagent. That is
+  // SM-C3 — telling an agent something untrue — bought for a convenience.
+  // Refusing to capture costs one brief and can never mislead anyone.
+  const agentType = firstString(input['subagent_type'], input['subagentType']);
+  if (!hostSessionId || !promptId || !agentType || !description) {
+    return;
+  }
+
+  // Read, never resolve. `ensureScopedSession` here would rotate the parent's
+  // live session mid-turn whenever this cwd resolved to a different scope, and
+  // a dispatch is not a session boundary. With no active primary there is
+  // nothing to scope the capture to and nothing to brief from later.
+  const primary = store.getCurrentSession();
+  if (!primary?.scope_key) {
+    return;
+  }
+
+  const prompt = summarizeDispatchPrompt(firstString(input['prompt']));
+  store.insertSubagentDispatch({
+    scopeKey: primary.scope_key,
+    hostSessionId,
+    promptId,
+    agentType,
+    // Not read by this story. Recorded because Story 5.3 wires `SubagentStop`,
+    // where the per-agent sidecar's `toolUseId` is finally readable and the
+    // pairing this story performs becomes auditable rather than merely
+    // unambiguous.
+    toolUseId: firstString(payload['tool_use_id'], payload['toolUseId']) ?? null,
+    description,
+    promptDigest: prompt.digest,
+    promptPrefix: prompt.prefix,
+    promptChars: prompt.chars,
+  });
+  recordSubagentDispatch(store);
+}
+
+/**
+ * `SubagentStart` (FR-17/FR-18): give a dispatched subagent its own session
+ * before it does anything, then brief it from the dispatch this hook can now
+ * pair with.
  *
  * The measured payload is seven fields — `agent_id`, `agent_type`, `cwd`,
  * `hook_event_name`, `prompt_id`, `session_id`, `transcript_path` — and carries
  * neither the dispatch description nor `tool_input`, whatever the hook docs list
  * as conditionally present. Nothing here may depend on more than that.
+ *
+ * Two independently guarded halves, deliberately. The session is the deliverable
+ * Story 5.1 shipped and every later story depends on; the brief is an
+ * optimisation on top of it. A brief that throws must not cost the attribution,
+ * and a session that throws must not be retried by the brief path.
  */
 function subagentStart(
   store: CortexStore,
   payload: Record<string, unknown>,
   cwd: string,
-): void {
+): string {
+  let child: SessionRow | undefined;
   try {
-    createSubagentSession(store, payload, cwd);
+    child = createSubagentSession(store, payload, cwd);
   } catch {
     // AD-12 / N-3, and the wrapper script's promise that it prints nothing and
     // exits 0. `main()` guards only `openCortexDb` and rethrows everything
@@ -390,6 +510,21 @@ function subagentStart(
     // store whose unique index degraded to non-unique — and SQLITE_BUSY from a
     // second hook lands in the same place. A subagent losing its session is a
     // miss; a subagent's dispatch printing a stack trace is a broken turn.
+    return '';
+  }
+
+  if (!child) {
+    return '';
+  }
+
+  try {
+    return renderSubagentBrief(store, payload, child);
+  } catch {
+    // Same contract. Retrieval, rendering and the ledger write all sit under
+    // here, and `SubagentStart` cannot block a subagent — the host renders a
+    // non-zero exit as a notice and proceeds — so the only harm this half can do
+    // is noise. Silence is the correct failure.
+    return '';
   }
 }
 
@@ -397,7 +532,7 @@ function createSubagentSession(
   store: CortexStore,
   payload: Record<string, unknown>,
   cwd: string,
-): void {
+): SessionRow | undefined {
   const identity = agentIdentity(payload);
   if (!identity.agentId) {
     // Host drift, or an event for something that is not a subagent. Doing
@@ -405,7 +540,7 @@ function createSubagentSession(
     // resolves — and creates — a PRIMARY session, so the obvious fallback would
     // manufacture a primary as a side effect of a subagent event, and rotate the
     // real one whenever this `cwd` resolved to a different scope.
-    return;
+    return undefined;
   }
 
   // AC #1 says the child records "the parent's scope_key", so a parent has to
@@ -418,19 +553,111 @@ function createSubagentSession(
   // here is nil and the cost of being permissive is a wrong parent.
   const primary = store.getCurrentSession();
   if (!primary?.scope_key) {
-    return;
+    return undefined;
   }
+
+  // AD-12: a wired-but-dead path must not look like an idle one. `doctor` reads
+  // these to tell "never fired" from "nothing dispatched lately", and to catch
+  // the case in between — subagents running that this hook never saw.
+  //
+  // BEFORE the session, not after. `doctor` counts children with
+  // `started_at >= <marker>`, and stamping the marker after the create put it
+  // ONE MILLISECOND past the child it had just made — so the very first child of
+  // every store fell outside its own window and the row printed a count one too
+  // low, permanently. Measured in Story 5.2's sandbox proof: child at
+  // ...33.211Z, marker at ...33.212Z, "4 fired, 3 recorded" against four real
+  // children. Moving it here also fails in the safe direction: a fire counted
+  // whose `ensureScopedSession` then throws leaves fires > children, which is
+  // the quiet side of the comparison.
+  recordSubagentStart(store);
 
   // `ensureScopedSession` adopts that primary rather than resolving one from
   // the subagent's cwd, so it cannot end or rotate the parent (AD-9); it
   // find-or-creates by (scope_key, agent_id) behind a partial unique index; and
   // it inherits the parent's scope fields.
-  ensureScopedSession(store, cwd, identity);
+  return ensureScopedSession(store, cwd, identity);
+}
 
-  // AD-12: a wired-but-dead path must not look like an idle one. `doctor` reads
-  // these to tell "never fired" from "nothing dispatched lately", and to catch
-  // the case in between — subagents running that this hook never saw.
-  recordSubagentStart(store);
+/**
+ * Pair this start with the dispatch that produced it, and brief from it.
+ *
+ * **The pairing key is `(session_id, prompt_id, agent_type)`**, all three of
+ * which appear in BOTH measured payloads, and each part earns its place:
+ * `session_id` separates two host windows open on one branch (they share a
+ * `scope_key`, so scope alone does not divide them); `prompt_id` separates a
+ * stale capture from an earlier turn, which is the mispairing that would hand a
+ * subagent context from genuinely unrelated work; `agent_type` separates
+ * concurrent dispatches of different types.
+ *
+ * `scope_key` is stored on the capture but deliberately NOT part of the key:
+ * `session_id` is already one host window on one project, and adding scope could
+ * only turn a correct pairing into a miss if the primary rotated between the
+ * dispatch and the start — about 800 ms apart, measured.
+ *
+ * **The residual is exactly one case: N same-type subagents dispatched in a
+ * single assistant message.** They share all three parts, so only order
+ * separates them, and FIFO resolves it on the measured strict interleaving
+ * (`PreToolUse(alpha) → SubagentStart(alpha) → PreToolUse(bravo) →
+ * SubagentStart(bravo)`). FIFO over silence is deliberate: refusing to brief on
+ * ambiguity would silence exactly the fan-out case, which is common here — this
+ * repository's own review workflow dispatches three same-type agents in one
+ * message — and is where briefing is worth most. Those siblings' contexts are
+ * genuinely related, so the cost of getting the order wrong is bounded. The rate
+ * is counted so the assumption is not merely asserted.
+ */
+function renderSubagentBrief(
+  store: CortexStore,
+  payload: Record<string, unknown>,
+  child: SessionRow,
+): string {
+  if (!subagentBriefEnabled()) {
+    return '';
+  }
+
+  const hostSessionId = firstString(payload['session_id'], payload['sessionId']);
+  const promptId = firstString(payload['prompt_id'], payload['promptId']);
+  const agentType = firstString(payload['agent_type'], payload['agentType']);
+  if (!hostSessionId || !promptId || !agentType) {
+    return '';
+  }
+
+  const key = { hostSessionId, promptId, agentType };
+  const cutoff = dispatchCutoff(new Date(), dispatchHorizonSeconds());
+
+  // Counted before the claim, because after it the evidence is gone.
+  const pending = store.countPendingSubagentDispatches(key, cutoff);
+  if (pending === 0) {
+    return '';
+  }
+
+  // One conditional statement, never read-then-write: two `SubagentStart` hooks
+  // are independent processes and `busy_timeout` does not make read-then-write
+  // atomic, so the naive shape would hand ONE capture to TWO subagents.
+  const dispatch = store.consumeSubagentDispatch(key, cutoff);
+  if (!dispatch) {
+    return '';
+  }
+
+  const result = buildSubagentBrief(store, {
+    description: dispatch.description,
+    agentType,
+    promptPrefix: dispatch.promptPrefix,
+  });
+
+  recordSubagentPairing(store, {
+    ambiguous: pending > 1,
+    briefed: result.text.length > 0,
+  });
+
+  if (result.text.length === 0) {
+    return '';
+  }
+
+  // The CHILD, not the primary. This text lands in the subagent's context and is
+  // the subagent's cost; billing it to the parent would make the P&L wrong about
+  // the one thing this story is measured on.
+  bookHookInjection(store, 'subagent_brief', result.text, child.id);
+  return toHookJson('SubagentStart', result.text);
 }
 
 function truncateSuggestion(text: string, maxChars = 140): string {
@@ -547,7 +774,16 @@ function reflectFromPayload(
   cwd: string,
   options: HookRuntimeOptions,
 ): string {
-  const sessionId = resolveSessionId(store, cwd, options);
+  // Identity, not bare resolution. `reflect-pre` fires on every Edit and Write
+  // INCLUDING a subagent's, and a subagent's `PreToolUse` carries `agent_id`
+  // (measured). Without it two defects rode together, both re-filed onto this
+  // story as one question: the reflex was billed to the primary, and — because
+  // `statePath()` keys the dedupe file on the session id — a subagent consumed
+  // the PARENT's once-per-anchor marker, so the parent then edited the same file
+  // and got no reflex at all. Nothing rendered depends on the session id
+  // (`reflectMemory` uses it only for that state file and the ledger row), so
+  // this corrects attribution without moving a single character of output.
+  const sessionId = resolveSessionId(store, cwd, options, agentIdentity(payload));
   const input = toolInput(payload);
   let event: ReflexEvent | undefined;
   let prompt: string | undefined;
@@ -617,9 +853,20 @@ export function handleHookPayload(
     return '';
   }
 
-  if (action === 'subagent-start') {
-    subagentStart(store, payload, cwd);
+  // BOTH branches are load-bearing, and a missing one is TYPE-CLEAN. This
+  // function is a chain of `if`s ending in `return reflectFromPayload(...)`,
+  // `main()` casts `process.argv[2] as HookAction` unchecked, and there is no
+  // exhaustive switch and no `never` guard — so adding a member to `HookAction`
+  // and forgetting its branch compiles, and every dispatch then falls into the
+  // reflex path, whose else-branch maps `toolName === 'Agent'` to the `agent`
+  // reflex and injects `additionalContext` into the PARENT.
+  if (action === 'dispatch-pre') {
+    dispatchPre(store, payload);
     return '';
+  }
+
+  if (action === 'subagent-start') {
+    return subagentStart(store, payload, cwd);
   }
 
   if (action === 'end-of-turn') {

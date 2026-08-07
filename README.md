@@ -138,6 +138,7 @@ Use `cortex inject-header` without `--quiet` only when you explicitly want to pr
 |---|---|---|---|
 | `PostToolUse` | `Read\|Edit\|Write\|Bash\|Agent` | `cortex-capture.sh` | spool append only — no Node spawn |
 | `PreToolUse` | `Edit\|Write` | `cortex-reflect.sh reflect-pre` | Node only when engaged |
+| `PreToolUse` | `Agent` | `cortex-subagent.sh dispatch-pre` | one Node spawn per subagent dispatch — never per tool call |
 | `UserPromptSubmit` | | `cortex-reflect.sh reflect-prompt` | Node only when engaged |
 | `SubagentStart` | | `cortex-subagent.sh subagent-start` | one Node spawn per subagent dispatch — never per tool call |
 | `Stop` | | `cortex-end-of-turn.sh` | one Node spawn per turn: spool flush + conditional nudge |
@@ -150,7 +151,17 @@ A session is identified by `(scope_key, agent_id)`. **The subagent gets its sess
 
 From there, each spool line carries the `agent_id` and `agent_type` the host reported, so the flush files a subagent's reads, edits and commands under that same child session — recording `parent_session_id` and inheriting the parent's scope — instead of merging them into the parent's timeline. Both writers find-or-create the same row, so they converge on one session per agent. A line without an `agent_id`, including every line written by a hook installed before this existed, resolves to the primary session. A subagent's tool call never rotates or ends the session that dispatched it, and ending a session ends its children so they stay reachable by consolidation and GC.
 
-The `SubagentStart` path creates nothing when the payload carries no `agent_id`, and nothing when there is no active primary to parent to — silence in both cases, because the alternative is manufacturing a primary session as a side effect of a subagent event. It emits nothing into the subagent's context; that channel exists but is not used yet. `cortex doctor` reports a **Subagent sessions** row once the path has fired at least once, and warns if subagent sessions appear that the hook never saw.
+The `SubagentStart` path creates nothing when the payload carries no `agent_id`, and nothing when there is no active primary to parent to — silence in both cases, because the alternative is manufacturing a primary session as a side effect of a subagent event. `cortex doctor` reports a **Subagent sessions** row once the path has fired at least once, and warns if subagent sessions appear that the hook never saw.
+
+### What a subagent is told
+
+A dispatched subagent starts with none of the memory its parent has, and pasting it in by hand is work nobody does. So Cortex briefs it: the dispatch description is recorded when the `Agent` tool is called, and the matching subagent receives a short brief — at most 150 tokens, the same cap as the session brief — injected into its context before it starts.
+
+**Silence is the default, and it is the common case.** No matching memory, nothing. A dispatch the hook cannot match to a subagent, nothing. Any failure at all, nothing. Turn the whole thing off with `CORTEX_SUBAGENT_BRIEF=off`; `cortex_disengage` turns it off along with everything else.
+
+Two details worth knowing. The description has to be captured a moment *earlier* than the subagent starts, because the event that starts a subagent does not carry it — so the wiring above has a second `PreToolUse` entry, on the `Agent` tool. And if the parent already pasted the same context into the dispatch prompt, the brief is suppressed rather than sent twice; a parent who *paraphrases* rather than pastes is not detected, which costs tokens rather than correctness.
+
+When several subagents of the same type are dispatched in one message they are matched in dispatch order, which is the one place this can be wrong — their contexts are related, so the cost is bounded, and `cortex doctor` counts how often it happens so the assumption is checkable rather than merely asserted. The same row reports how many dispatches were captured, paired and briefed, and warns if captures accumulate with nothing ever pairing.
 
 Two limits worth knowing. **Session trees are one level deep:** a subagent that itself dispatches a subagent has the top-level session recorded as its parent, not its dispatcher, because "the current session" is primary-only by definition. And **the parent is whichever primary is active in the store**, which is shared by every worktree of a repository — so with two engaged windows on two worktrees, a dispatch in one can be filed under the other's session. Both are recorded in `_bmad-output/implementation-artifacts/deferred-work.md`.
 

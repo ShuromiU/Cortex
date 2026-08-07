@@ -9,7 +9,15 @@ import { resolveStoreIdentity } from '../src/scope/identity.js';
 import type { GitCommandRunner } from '../src/scope/git.js';
 import { deriveEngagementPath } from '../src/transports/mcp.js';
 import { SCAN_STATUS_KEY } from '../src/capture/spool.js';
-import { SUBAGENT_START_COUNT_KEY, SUBAGENT_START_KEY } from '../src/scope/runtime.js';
+import {
+  SUBAGENT_AMBIGUOUS_COUNT_KEY,
+  SUBAGENT_BRIEFED_COUNT_KEY,
+  SUBAGENT_DISPATCH_COUNT_KEY,
+  SUBAGENT_DISPATCH_KEY,
+  SUBAGENT_PAIRED_COUNT_KEY,
+  SUBAGENT_START_COUNT_KEY,
+  SUBAGENT_START_KEY,
+} from '../src/scope/runtime.js';
 import {
   HOOK_SCRIPTS,
   REQUIRED_WIRING,
@@ -103,6 +111,35 @@ function writeFile(target: string, content: string): void {
   fs.writeFileSync(target, content);
 }
 
+/**
+ * The hooks block of a healthy installation, DERIVED from `REQUIRED_WIRING`.
+ *
+ * Hand-written before Story 5.2, which broke it: a seventh entry appeared and
+ * every fixture-built report went `hook-wiring: fail`, `ok: false`, taking a
+ * dozen unrelated tests with it. Story 5.1's `TEMPLATE_BODIES` guard covers a
+ * new SCRIPT and says nothing about a new WIRING. Deriving it means the eighth
+ * entry is not a third repair.
+ *
+ * The `~` form is kept deliberately: it is the shape the live machine actually
+ * carries, and `expandHookPath` resolving it is part of what these tests cover.
+ */
+function healthyWiring(nodePath: string, cliPath: string): Record<string, unknown[]> {
+  const hooks: Record<string, unknown[]> = {};
+  for (const required of REQUIRED_WIRING) {
+    const command =
+      required.script === undefined
+        ? `"${nodePath}" "${cliPath}" inject-header --quiet`
+        : `bash ~/.claude/hooks/${required.script}${required.action === undefined ? '' : ` ${required.action}`}`;
+    const entries = hooks[required.event] ?? [];
+    entries.push({
+      ...(required.matcher === undefined ? {} : { matcher: required.matcher }),
+      hooks: [{ type: 'command', command }],
+    });
+    hooks[required.event] = entries;
+  }
+  return hooks;
+}
+
 function buildFixture(): Fixture {
   const projectDir = path.join(root, 'project');
   const homeDir = path.join(root, 'home');
@@ -137,20 +174,7 @@ function buildFixture(): Fixture {
     path.join(homeDir, '.claude', 'settings.json'),
     JSON.stringify({
       mcpServers: { cortex: { command: 'cortex', args: ['serve'] } },
-      hooks: {
-        SessionStart: [{ hooks: [{ type: 'command', command: `"${nodePath}" "${cliPath}" inject-header --quiet` }] }],
-        PostToolUse: [
-          { matcher: CAPTURE_MATCHER, hooks: [{ type: 'command', command: `bash ~/.claude/hooks/cortex-capture.sh` }] },
-        ],
-        PreToolUse: [
-          { matcher: 'Edit|Write', hooks: [{ type: 'command', command: `bash ~/.claude/hooks/cortex-reflect.sh reflect-pre` }] },
-        ],
-        UserPromptSubmit: [{ hooks: [{ type: 'command', command: `bash ~/.claude/hooks/cortex-reflect.sh reflect-prompt` }] }],
-        Stop: [{ hooks: [{ type: 'command', command: `bash ~/.claude/hooks/cortex-end-of-turn.sh` }] }],
-        SubagentStart: [
-          { hooks: [{ type: 'command', command: `bash ~/.claude/hooks/cortex-subagent.sh subagent-start` }] },
-        ],
-      },
+      hooks: healthyWiring(nodePath, cliPath),
     }),
   );
 
@@ -260,6 +284,12 @@ describe('runDoctor on a healthy installation', () => {
         // a prune outrunning the rebuild). Reporting-only — it never rebuilds,
         // because a diagnostic must not repair what it observes.
         'digest-index',
+        // Story 5.2: `PreToolUse` now carries two required wirings, and the
+        // matcher is the only thing routing each to its own tool. `hook-wiring`
+        // never inspects a matcher, so a dispatch hook left at `Edit|Write`
+        // would be present, current, substituted and completely dead while
+        // every other row read green — the same gap `capture-matcher` closes.
+        'dispatch-matcher',
         'engagement',
         'hook-currency',
         'hook-interpreter',
@@ -746,7 +776,14 @@ describe('subagent sessions (FR-17)', () => {
     seedChildSessions(fixture, '2026-08-06T11:00:00Z', 5);
     const report = doctor(fixture);
     expect(statusOf(report, 'subagent-sessions')).toBe('warn');
-    expect(detailOf(report, 'subagent-sessions')).toContain('fired only 1');
+    // The numbers and the reason, not the sentence they sit in. Story 5.2 folded
+    // the dispatch counters into this row and reworded the detail; pinning the
+    // phrasing made an unrelated wording change look like a broken diagnostic.
+    expect(detailOf(report, 'subagent-sessions')).toContain('fired 1 time');
+    expect(detailOf(report, 'subagent-sessions')).toContain('5 subagent sessions');
+    expect(detailOf(report, 'subagent-sessions')).toContain(
+      'not reaching the SubagentStart hook',
+    );
     expect(report.checks.find(check => check.id === 'subagent-sessions')?.fix).toContain(
       'cortex install',
     );
@@ -773,7 +810,7 @@ describe('subagent sessions (FR-17)', () => {
     seedChildSessions(fixture, '2026-08-06T11:00:00Z', 2);
     const report = doctor(fixture);
     expect(statusOf(report, 'subagent-sessions')).toBe('warn');
-    expect(detailOf(report, 'subagent-sessions')).toContain('fired only 0');
+    expect(detailOf(report, 'subagent-sessions')).toContain('fired 0 times');
   });
 });
 
@@ -1575,5 +1612,174 @@ describe('hooks directory resolution', () => {
     const report = doctor(fixture, { hooksDir: '~/.claude/hooks' });
     expect(report.hooks_dir).toBe(path.normalize(path.join(fixture.homeDir, '.claude', 'hooks')));
     expect(statusOf(report, 'hook-scripts')).toBe('pass');
+  });
+});
+
+// ── The automatic brief's own observability (FR-18, Story 5.2) ───────
+//
+// Folded into the `subagent-sessions` row rather than given one of its own,
+// because the two are one capability. What these counters catch is a state the
+// session counters cannot see: the dispatch hook fires, the start hook fires,
+// every other row reads green, and no subagent is ever briefed — because
+// nothing pairs.
+describe('subagent dispatch counters (FR-18)', () => {
+  const seedDispatchMeta = (
+    fixture: Fixture,
+    values: Record<string, string>,
+  ): void => {
+    const db = new Database(fixture.dbPath);
+    const set = db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)');
+    for (const [key, value] of Object.entries(values)) set.run(key, value);
+    db.close();
+  };
+
+  it('stays silent on a store where no dispatch has ever been captured', () => {
+    // Same day-one rule the session marker follows: a store that accumulated
+    // subagent history before this shipped must not be warned about.
+    const report = doctor(buildFixture());
+    expect(report.checks.find(check => check.id === 'subagent-sessions')).toBeUndefined();
+  });
+
+  it('reports captured, paired and briefed once the capture path has run', () => {
+    const fixture = buildFixture();
+    seedDispatchMeta(fixture, {
+      [SUBAGENT_DISPATCH_KEY]: '2026-08-06T10:00:00Z',
+      [SUBAGENT_DISPATCH_COUNT_KEY]: '9',
+      [SUBAGENT_PAIRED_COUNT_KEY]: '8',
+      [SUBAGENT_BRIEFED_COUNT_KEY]: '5',
+    });
+
+    const report = doctor(fixture);
+    expect(statusOf(report, 'subagent-sessions')).toBe('pass');
+    const detail = detailOf(report, 'subagent-sessions');
+    expect(detail).toContain('SubagentStart has not fired here yet');
+    expect(detail).toContain('9 dispatches captured');
+    expect(detail).toContain('8 paired');
+    expect(detail).toContain('5 briefed');
+  });
+
+  it('reports ambiguity without warning about it', () => {
+    // N same-type agents in one assistant message share the whole pairing key,
+    // and that fan-out is routine — this repository's own review workflow does
+    // exactly it. A warn here would fire on a healthy install every time the
+    // feature did its job, which is the "cries wolf" half of AD-12.
+    const fixture = buildFixture();
+    seedDispatchMeta(fixture, {
+      [SUBAGENT_DISPATCH_KEY]: '2026-08-06T10:00:00Z',
+      [SUBAGENT_DISPATCH_COUNT_KEY]: '30',
+      [SUBAGENT_PAIRED_COUNT_KEY]: '30',
+      [SUBAGENT_BRIEFED_COUNT_KEY]: '12',
+      [SUBAGENT_AMBIGUOUS_COUNT_KEY]: '18',
+    });
+
+    const report = doctor(fixture);
+    expect(statusOf(report, 'subagent-sessions')).toBe('pass');
+    expect(detailOf(report, 'subagent-sessions')).toContain('18 ambiguous pairings');
+    expect(report.ok).toBe(true);
+  });
+
+  it('warns once captures have accumulated and NOTHING has ever paired', () => {
+    const fixture = buildFixture();
+    seedDispatchMeta(fixture, {
+      [SUBAGENT_DISPATCH_KEY]: '2026-08-06T10:00:00Z',
+      [SUBAGENT_DISPATCH_COUNT_KEY]: '7',
+      [SUBAGENT_PAIRED_COUNT_KEY]: '0',
+    });
+
+    const report = doctor(fixture);
+    expect(statusOf(report, 'subagent-sessions')).toBe('warn');
+    expect(detailOf(report, 'subagent-sessions')).toContain('no dispatch has ever paired');
+    expect(report.checks.find(check => check.id === 'subagent-sessions')?.fix).toContain(
+      'cortex install',
+    );
+    // A missed brief is not a broken installation.
+    expect(report.ok).toBe(true);
+  });
+
+  it('does not warn on the first unpaired captures, which are ordinary', () => {
+    // An `Agent` call the user denied fires `PreToolUse` and never starts, and
+    // `doctor` can run in the ~800 ms between a capture and its start. A `> 0`
+    // threshold would warn on both.
+    const fixture = buildFixture();
+    seedDispatchMeta(fixture, {
+      [SUBAGENT_DISPATCH_KEY]: '2026-08-06T10:00:00Z',
+      [SUBAGENT_DISPATCH_COUNT_KEY]: '2',
+      [SUBAGENT_PAIRED_COUNT_KEY]: '0',
+    });
+
+    expect(statusOf(doctor(fixture), 'subagent-sessions')).toBe('pass');
+  });
+
+  it('reads a corrupt dispatch counter as zero rather than throwing', () => {
+    const fixture = buildFixture();
+    seedDispatchMeta(fixture, {
+      [SUBAGENT_DISPATCH_KEY]: '2026-08-06T10:00:00Z',
+      [SUBAGENT_DISPATCH_COUNT_KEY]: '12 dispatches',
+      [SUBAGENT_PAIRED_COUNT_KEY]: 'lots',
+    });
+
+    // `Number`, never `parseInt`: a prefix parse would read 12 and then warn on
+    // `12 captured, 0 paired`, inventing a fault out of corruption.
+    const report = doctor(fixture);
+    expect(statusOf(report, 'subagent-sessions')).toBe('pass');
+    expect(detailOf(report, 'subagent-sessions')).toContain('0 dispatches captured');
+  });
+});
+
+// ── The dispatch matcher (FR-18, Story 5.2) ──────────────────────────
+
+describe('dispatch matcher', () => {
+  const rewireDispatch = (fixture: Fixture, matcher: string | undefined): void => {
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as {
+      hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
+    };
+    for (const entry of settings.hooks['PreToolUse'] ?? []) {
+      if (!entry.hooks.some(hook => hook.command.includes('dispatch-pre'))) continue;
+      if (matcher === undefined) delete entry.matcher;
+      else entry.matcher = matcher;
+    }
+    fs.writeFileSync(settingsPath, JSON.stringify(settings));
+  };
+
+  it('passes on the canonical wiring', () => {
+    expect(statusOf(doctor(buildFixture()), 'dispatch-matcher')).toBe('pass');
+  });
+
+  it('passes on an absent matcher, which is broader than the canonical one', () => {
+    const fixture = buildFixture();
+    rewireDispatch(fixture, undefined);
+    expect(statusOf(doctor(fixture), 'dispatch-matcher')).toBe('pass');
+  });
+
+  it('warns when the matcher can never fire on Agent, and names what that costs', () => {
+    // Present, current, substituted and completely dead. `hook-wiring` never
+    // inspects a matcher, so without this row every other check reads green.
+    const fixture = buildFixture();
+    rewireDispatch(fixture, 'Edit|Write');
+    const report = doctor(fixture);
+
+    expect(statusOf(report, 'dispatch-matcher')).toBe('warn');
+    expect(detailOf(report, 'dispatch-matcher')).toContain('no subagent is briefed');
+    // `warn`, not `fail`: narrowing a matcher is a supported choice.
+    expect(report.ok).toBe(true);
+  });
+
+  it('says nothing when no dispatch hook is wired at all', () => {
+    // `hook-wiring` already fails on the entry by name; a second row would only
+    // repeat it.
+    const fixture = buildFixture();
+    const settingsPath = path.join(fixture.homeDir, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    };
+    settings.hooks['PreToolUse'] = (settings.hooks['PreToolUse'] ?? []).filter(
+      entry => !entry.hooks.some(hook => hook.command.includes('dispatch-pre')),
+    );
+    fs.writeFileSync(settingsPath, JSON.stringify(settings));
+
+    const report = doctor(fixture);
+    expect(report.checks.find(check => check.id === 'dispatch-matcher')).toBeUndefined();
+    expect(statusOf(report, 'hook-wiring')).toBe('fail');
   });
 });

@@ -5,7 +5,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { Command } from 'commander';
 import { createProgram, formatBytes, onlyUnusedProject, renderDoctorReport, renderInstallResult } from '../src/transports/cli.js';
 import type { DoctorCheck, DoctorReport } from '../src/query/doctor.js';
-import { HOOK_SCRIPTS, tokenizeCommand } from '../src/query/doctor.js';
+import { HOOK_SCRIPTS, REQUIRED_WIRING, tokenizeCommand } from '../src/query/doctor.js';
 import type { InstallAction, InstallResult } from '../src/query/install.js';
 import { deriveEngagementPath } from '../src/transports/mcp.js';
 import { openDatabase, ensureCortexSchema } from '../src/db/schema.js';
@@ -1817,40 +1817,39 @@ function seedFakeBinDir(): string {
   return binDir;
 }
 
+/**
+ * A complete, passing installation, DERIVED from `REQUIRED_WIRING`.
+ *
+ * Hand-written until Story 5.2, which added a seventh entry and turned every
+ * report built from this fixture red. Deriving it means the eighth entry needs
+ * no third repair — this and `doctor.test.ts`'s `healthyWiring` were the two
+ * places that had to be edited by hand.
+ *
+ * The matcher is deliberately omitted: an absent matcher matches every tool,
+ * which is broader than the canonical wiring and passes the matcher checks, so
+ * this fixture stays about wiring and script currency rather than routing.
+ */
 function seedSandboxHome(hooksDir: string): string {
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-home-'));
   const posixHooks = hooksDir.replace(/\\/g, '/');
   fs.mkdirSync(path.join(homeDir, '.claude'), { recursive: true });
+
+  const hooks: Record<string, unknown[]> = {};
+  for (const required of REQUIRED_WIRING) {
+    const command =
+      required.script === undefined
+        ? 'cortex inject-header --quiet'
+        : `bash "${posixHooks}/${required.script}"${required.action === undefined ? '' : ` ${required.action}`}`;
+    const entries = hooks[required.event] ?? [];
+    entries.push({ hooks: [{ type: 'command', command }] });
+    hooks[required.event] = entries;
+  }
+
   fs.writeFileSync(
     path.join(homeDir, '.claude', 'settings.json'),
     JSON.stringify({
       mcpServers: { cortex: { command: 'cortex', args: ['serve'] } },
-      hooks: {
-        SessionStart: [{ hooks: [{ type: 'command', command: 'cortex inject-header --quiet' }] }],
-        PostToolUse: [
-          { hooks: [{ type: 'command', command: `bash "${posixHooks}/cortex-capture.sh"` }] },
-        ],
-        PreToolUse: [
-          { hooks: [{ type: 'command', command: `bash "${posixHooks}/cortex-reflect.sh" reflect-pre` }] },
-        ],
-        UserPromptSubmit: [
-          {
-            hooks: [
-              { type: 'command', command: `bash "${posixHooks}/cortex-reflect.sh" reflect-prompt` },
-            ],
-          },
-        ],
-        Stop: [
-          { hooks: [{ type: 'command', command: `bash "${posixHooks}/cortex-end-of-turn.sh"` }] },
-        ],
-        SubagentStart: [
-          {
-            hooks: [
-              { type: 'command', command: `bash "${posixHooks}/cortex-subagent.sh" subagent-start` },
-            ],
-          },
-        ],
-      },
+      hooks,
     }),
   );
   return homeDir;
