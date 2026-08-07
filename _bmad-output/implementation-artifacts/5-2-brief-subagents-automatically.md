@@ -4,7 +4,7 @@ baseline_commit: 453e7f243297bce5b142f38d860ba86787e793b1
 
 # Story 5.2: Brief subagents automatically
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -577,6 +577,49 @@ better-sqlite3 12.8.0 and is atomic. `SCHEMA_VERSION` stays 6; AD-1, N-4 and
   `cortex install`.
 - Gate 3 (`cortex install` machine-wide) still **not run**.
 
+
+### Gate 3 — installed machine-wide (2026-08-07)
+
+`cortex install` after a dry run that predicted exactly two changes and made
+exactly those: `cortex-subagent.sh` refreshed (previous copy kept as `.bak`) and
+ONE wiring added. `~/.claude/settings.json` diffed before and after — 12 hook
+entries to 13, the added one being
+`PreToolUse | Agent | bash ".../cortex-subagent.sh" dispatch-pre`, nothing
+removed, and every non-hook section byte-identical. `doctor` here: **20/20**
+(one pre-existing legacy-store warning).
+
+**Live proof on the real installation, both halves, dispatched in one message
+with two DIFFERENT agent types so their queues could not interfere:**
+
+- A subagent dispatched as `story 5.2 subagent auto-brief decisions` quoted its
+  brief back verbatim and placed it *before* the task message — including the
+  budget trailer `…4 more trimmed`, so the cap is visibly binding on the real
+  path. Booked 99 tokens to the CHILD session.
+- A subagent dispatched as `zorblax quintaped nebulon frobnicator` reported
+  **NO** Cortex text in its context at all. That is the half that regresses
+  invisibly, and it is the one now proven live.
+
+Store after: 2 captured, 2 paired, 1 briefed, each row stamped with the agent
+that consumed it. One `subagent_brief` ledger row, on the child.
+
+**Second project (`repo-b`): 19/19 pass**, including `Dispatch matcher` and
+`all 7 wirings present across 6 events`. Its three warnings (no transcript scan,
+legacy store, stale spool) are pre-existing and untouched by this story.
+
+**Machine-wide store sweep: 36 stores, 0 failures, integrity clean, 1,443
+authored notes intact.** Reported honestly rather than tidily: the sweep
+script's FIRST run passed a bad argument and threw — but `ensureCortexSchema`
+runs `applySchema` *before* the step that threw, so that run had already applied
+the additive change to all 36 stores. The second run completed cleanly and
+confirmed it. No damage is possible from that ordering — the change is
+`CREATE TABLE IF NOT EXISTS` plus one `ALTER TABLE ADD COLUMN` plus
+`CREATE INDEX IF NOT EXISTS`, all idempotent — but the sequence is recorded
+rather than presented as "everything was already migrated", which is what the
+second run alone would have suggested.
+
+No `.gitignore` sweep was needed: this story adds no project-root artifact. The
+hub and consumer `CLAUDE.md` updates belong to the Epic 5 close-out, which Story
+5.3 still gates.
 
 ### Change Log
 
