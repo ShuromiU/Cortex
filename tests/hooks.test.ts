@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import { applySchema } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
@@ -269,5 +271,75 @@ describe('command failure episode dedup', () => {
       .getEpisodesBySession(sessionId)
       .filter(episode => episode.kind === 'command_failure');
     expect(episodes).toHaveLength(2);
+  });
+});
+
+describe('the hook scripts stay runnable on bash 3.2', () => {
+  // Stock macOS ships bash 3.2 at `/bin/bash` and always has — Apple never
+  // shipped bash 4 — and that is the interpreter the installed wiring names,
+  // because `install` writes `bash "<script>"` so the shebang does not decide.
+  // `${key,,}` was the first bash-4 construct to reach these files, and it
+  // broke read substitution on every mac, silently.
+  //
+  // A syntax check cannot replace this. Measured on 3.2.57: all four scripts
+  // are `bash -n` CLEAN with `${key,,}` present, because the operator is
+  // rejected during parameter expansion rather than at parse time. The failure
+  // appears only when the line is REACHED — and CI has no macOS runner, so
+  // nothing else in this suite would ever reach it.
+  const HOOK_TEMPLATE_DIR = path.join('hooks', 'claude');
+
+  const BASH_4_ONLY: Array<{ name: string; pattern: RegExp }> = [
+    // ${v,,} ${v^^} ${v,} ${v^} — case modification, bash 4.0
+    {
+      name: 'case-modifying parameter expansion',
+      pattern: /\$\{[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?(?:,,|\^\^|,|\^)/g,
+    },
+    { name: 'associative array', pattern: /\bdeclare\s+-[A-Za-z]*A\b/g },
+    { name: 'mapfile/readarray', pattern: /\b(?:mapfile|readarray)\b/g },
+    { name: '|& pipe-with-stderr', pattern: /\|&/g },
+    { name: '&>> append-all-output', pattern: /&>>/g },
+    { name: 'coproc', pattern: /\bcoproc\b/g },
+  ];
+
+  const scripts = fs
+    .readdirSync(HOOK_TEMPLATE_DIR)
+    .filter(name => name.endsWith('.sh'))
+    .map(name => {
+      const body = fs.readFileSync(path.join(HOOK_TEMPLATE_DIR, name), 'utf8');
+      // Whole-line comments are stripped before the sweep: a construct inside a
+      // `#` line cannot break any shell, and cortex-capture.sh names `${key,,}`
+      // twice in prose right beside the one real use of it.
+      const code = body.replace(/^[ \t]*#.*$/gm, '');
+      return { name, body, code };
+    });
+
+  it('finds the templates at all — an empty sweep would pass vacuously', () => {
+    expect(scripts.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('uses exactly ONE bash-4 construct, and guards it on the shell version', () => {
+    // Deliberately a whole-set comparison rather than a per-file "is there a
+    // guard somewhere" check: that variant passes the moment one guarded use
+    // exists, so a second, unguarded one could hide behind it forever.
+    const found: string[] = [];
+    for (const { name, code } of scripts) {
+      for (const { name: construct, pattern } of BASH_4_ONLY) {
+        for (const match of code.matchAll(pattern)) {
+          found.push(`${name}: ${construct} — ${JSON.stringify(match[0])}`);
+        }
+      }
+    }
+
+    expect(
+      found,
+      'A bash-4 construct in a hook breaks stock macOS at runtime while `bash -n` stays clean. ' +
+        'Guard it on `"${BASH_VERSINFO[0]}" -ge 4` with a builtin fallback, then update this list.',
+    ).toEqual(['cortex-capture.sh: case-modifying parameter expansion — "${key,,"']);
+
+    const capture = scripts.find(script => script.name === 'cortex-capture.sh')!.body;
+    expect(capture).toContain('BASH_VERSINFO');
+    // The fallback is reachable without a bash 3.2 runner, which is what lets
+    // the substitution suite exercise it on every platform that folds at all.
+    expect(capture).toContain('CORTEX_FOLD_ASCII');
   });
 });

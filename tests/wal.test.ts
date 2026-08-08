@@ -503,14 +503,24 @@ describe('closing a project store', () => {
     const opened = openProjectStore(project, { env: { CORTEX_HOME: home } });
     const store = new CortexStore(opened.db);
     const session = store.createSession({ cwd: project });
-    for (let i = 0; i < 600; i++) {
-      store.insertNote({
-        sessionId: session.id,
-        kind: 'insight',
-        content: `padding ${i} ${'x'.repeat(400)}`,
-        subject: `s${i}`,
-      });
-    }
+    // ONE transaction, not 600. Unbatched, each `insertNote` is its own commit
+    // and its own fsync, and windows-latest/node 22 crossed the 10 s timeout on
+    // exactly this loop while node 20, ubuntu and a local NVMe all absorbed it.
+    // Batching changes nothing this test asserts: the frames still land in the
+    // WAL, which is the precondition below, and the checkpoint under test still
+    // has to move them. Same platform cost the gc-derived-bounds seeder pays,
+    // and production never pays it — `insertNote`'s hook-path callers are
+    // already inside a transaction.
+    opened.db.transaction(() => {
+      for (let i = 0; i < 600; i++) {
+        store.insertNote({
+          sessionId: session.id,
+          kind: 'insight',
+          content: `padding ${i} ${'x'.repeat(400)}`,
+          subject: `s${i}`,
+        });
+      }
+    })();
     expect(walSizeBytes(opened.dbPath)).toBeGreaterThan(0);
 
     closeProjectStore(opened.db);

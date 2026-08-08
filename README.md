@@ -75,13 +75,18 @@ platform:
 |---|---|---|
 | Node.js ≥ 18 | the CLI, the MCP server, every hook that does real work | `node --version` |
 | git | Cortex scopes memory per repository and per branch | `git --version` |
-| **bash** | every hook script is bash. On Windows, Git Bash — installed with Git for Windows | `bash --version` |
+| **bash** ≥ 3.2 | every hook script is bash. On Windows, Git Bash — installed with Git for Windows | `bash --version` |
 | **jq** | the hooks parse their JSON payload in shell, before Node | `jq --version` |
 | Claude Code | the host that fires the hooks | `claude --version` |
 
 On Windows, install jq with `winget install jqlang.jq`. On macOS, `brew install jq`. On Debian or
 Ubuntu, `sudo apt install jq`. Without jq every hook exits silently and Cortex captures nothing —
 `cortex doctor` reports it by name.
+
+The bash floor is 3.2 because that is what macOS still ships at `/bin/bash`, and it is the
+interpreter the installed wiring names. You do not need a newer one: the hooks use a bash-4
+shortcut where the shell has it and an equivalent that works on 3.2 where it does not. Homebrew's
+bash is fine too, and nothing needs configuring either way.
 
 **Then:**
 
