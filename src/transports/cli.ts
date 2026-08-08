@@ -100,6 +100,7 @@ import {
   READ_LEDGER_MAX_PATHS,
 } from '../query/read-ledger.js';
 import { querySearchLedger, renderSearchLedger } from '../query/search-ledger.js';
+import { isEntryPoint } from './entry-point.js';
 import {
   listMemory,
   inspectMemory,
@@ -311,6 +312,28 @@ const INSTALL_BADGE: Record<InstallAction['outcome'], string> = {
  * successful install on a fresh project legitimately fails the diagnostic —
  * and a bare red report there reads as a broken install.
  */
+/**
+ * The exit status `cortex install` should end on, given the diagnostic it just
+ * ran.
+ *
+ * Extracted so it can be tested at all: under vitest the sandboxed install
+ * bakes `<module dir>/cli.js` paths that do not exist beside the `.ts` sources,
+ * so `node-resolution` fails for reasons unrelated to the rule, and no
+ * end-to-end fixture can produce the clean never-run state this decides on.
+ *
+ * The rule: the install's status is the diagnostic's, because every action can
+ * succeed and still leave a broken installation (no jq, a Node that moved).
+ * The one exception is the state `install` cannot avoid creating — it
+ * deliberately does not engage Cortex or create the store, so on a project that
+ * has never run, `engagement` and `database` fail by construction. Measured on
+ * a clean Linux container: the two commands the README opens with ended in a
+ * red report and a non-zero status with nothing wrong, which aborts a scripted
+ * or Dockerfile install at its first step.
+ */
+export function installExitCode(report: DoctorReport): 0 | 1 {
+  return !report.ok && !onlyUnusedProject(report) ? 1 : 0;
+}
+
 export function onlyUnusedProject(report: DoctorReport): boolean {
   const failing = report.checks.filter(check => check.status === 'fail');
   return (
@@ -1513,11 +1536,28 @@ export function createProgram(): Command {
             );
           }
         }
-        // The install's exit code is the diagnostic's: every action can succeed
+        // The install's exit code is the diagnostic's — every action can succeed
         // and still leave a broken installation (no jq, a Node that moved), and
-        // reporting success there would undo the point of the diagnostic.
-        if (!report.ok) {
-          process.exitCode = 1;
+        // reporting success there would undo the point of the diagnostic —
+        // EXCEPT for the one state this command cannot avoid creating.
+        //
+        // `install` deliberately does not engage Cortex or create the store, so
+        // on a project that has never run it, `engagement` and `database` fail
+        // by construction. Exiting 1 there called a successful install a failed
+        // one: measured on a clean Linux container, the documented first two
+        // commands (`npm install -g`, then `cortex install`) ended in a red
+        // report and a non-zero status with nothing actually wrong — which
+        // aborts any scripted or Dockerfile install at the first step, and is
+        // the "cries wolf on a healthy install" failure this codebase already
+        // names as the thing that trains people to ignore the diagnostic.
+        //
+        // `onlyUnusedProject` is the same predicate that prints the explanation
+        // above, and it is strict: it holds only when EVERY failing check is
+        // `engagement` or `database`, so a missing jq alongside them still
+        // exits 1.
+        const status = installExitCode(report);
+        if (status !== 0) {
+          process.exitCode = status;
         }
       },
     );
@@ -2075,8 +2115,11 @@ export function createProgram(): Command {
   return program;
 }
 
-const self = process.argv[1] ?? '';
-if (self.endsWith('cli.js') || self.endsWith('cli.ts')) {
+// Real-path comparison, not a filename suffix: `npm install -g` puts a symlink
+// named `cortex` on PATH, and a suffix test never matches it — measured, the
+// published package installed cleanly and then every command printed nothing
+// and exited 0 on Linux. See `isEntryPoint`.
+if (isEntryPoint(import.meta.url, process.argv[1], ['cli.js', 'cli.ts'])) {
   // A CLI process's lifetime is the command, so exit is where the store closes
   // and the WAL is checkpointed (FR-25 AC #1). Registered here rather than in
   // `createProgram` so importing the module for tests installs nothing.

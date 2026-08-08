@@ -62,11 +62,30 @@ Cortex is retrieval-first and pull-based. It stores decisions, blockers, command
 
 ## Install
 
-> **Cortex is not published to npm, and the name is taken.** `npm install -g cortex-memory`
-> installs an unrelated package by a different author that happens to share the name. Install from
-> a checkout, as below. If this is ever published it will need a different name or a scope.
+```bash
+npm install -g @shuromiu/cortex
+cortex install
+```
 
-### On a new machine, start to finish
+> **Mind the scope.** The unscoped `cortex-memory` on npm is an unrelated package by a different
+> author that happens to share the name; installing it will not give you this tool. The package is
+> `@shuromiu/cortex`; the command it installs is `cortex`.
+
+Then **restart Claude Code**, so it picks up the new hook wiring and the MCP server.
+
+`cortex install` writes the hook scripts with your Node and Cortex paths baked in, merges the
+wiring into `~/.claude/settings.json`, registers the MCP server, adds Cortex's runtime artifacts to
+the project's `.gitignore`, and finishes by running the diagnostic. It is idempotent — a second run
+produces byte-identical files and says `Nothing changed`. Run it once per project you want Cortex
+in; the hook wiring is machine-wide, the store is per repository.
+
+On a brand-new project the diagnostic ends with two failures — the store and engagement state,
+both created by your first session or immediately by `cortex inject-header --quiet`. That is
+expected, the report says so, and the command still exits zero, so it is safe in a script.
+
+### Installing from a checkout instead
+
+Use this if you want to modify Cortex, or track `main` directly.
 
 **Prerequisites.** Cortex's hooks are shell scripts, so two of these are not optional on any
 platform:
@@ -102,24 +121,16 @@ cortex install
 `npm install -g .` links the global `cortex` command to this checkout — it does not copy it. That
 is deliberate and worth understanding: **the checkout is the live installation.** `npm run build`
 there changes the behaviour of every project on the machine, and switching branches in it changes
-Cortex everywhere until you rebuild.
+Cortex everywhere until you rebuild. Installing from npm instead gives you a copy, which does not
+move when you do.
 
-`cortex install` writes the hook scripts with your Node and Cortex paths baked in, merges the
-wiring into `~/.claude/settings.json`, registers the MCP server, adds Cortex's runtime artifacts to
-the project's `.gitignore`, and finishes by running the diagnostic. It is idempotent — a second run
-produces byte-identical files and says `Nothing changed`.
-
-**Verify:**
+**Verify either route the same way:**
 
 ```bash
 cortex doctor
 ```
 
-Every failing check names its own fix. Two failures are expected on a brand-new install and say so:
-the store and engagement state are created by your first session, or immediately by
-`cortex inject-header --quiet`.
-
-**Restart Claude Code** after installing, so it picks up the new hook wiring and the MCP server.
+Every failing check names its own fix.
 
 ### Upgrading an existing machine
 

@@ -1,5 +1,5 @@
 {
-  "name": "cortex-memory",
+  "name": "@shuromiu/cortex",
   "version": "0.1.0",
   "description": "Working memory for AI agents — persistent cognitive state per project",
   "type": "module",
@@ -36,6 +36,8 @@
   "author": "ShuromiU",
   "license": "MIT",
   "engines": { "node": ">=18" },
+  "os": ["darwin", "linux", "win32"],
+  "publishConfig": { "access": "public" },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.8.0",

@@ -47,6 +47,7 @@ import {
   resolveConclusionText,
 } from '../query/subagent-conclusion.js';
 import { evaluateMemoryGuard } from '../query/memory-guard.js';
+import { isEntryPoint } from './entry-point.js';
 import { configureEngagementPath, readEngagement, writeEngagement } from './mcp.js';
 
 const CORTEX_CONSULTED_KEY = 'cortex_consulted';
@@ -1289,8 +1290,10 @@ async function main(): Promise<void> {
   }
 }
 
-const self = process.argv[1] ?? '';
-if (self.endsWith('hook-entry.js') || self.endsWith('hook-entry.ts')) {
+// Same real-path rule as the CLI. The installed hooks invoke this by explicit
+// path so the suffix always matched here, but a guard that depends on how the
+// caller spells the path is the defect one file over — pinned, not repeated.
+if (isEntryPoint(import.meta.url, process.argv[1], ['hook-entry.js', 'hook-entry.ts'])) {
   // Same rule as the CLI: one hook fire is one process, so exit is the close.
   installStoreCloseOnExit();
   void main();

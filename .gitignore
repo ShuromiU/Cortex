@@ -22,5 +22,16 @@ dist/
 .cortex.turn-reads
 
 # Local tooling state, never part of the package
+# Local agent-tooling state. `.nexus/` is listed by its real directory name on
+# purpose: the generic rename swept it out of here, and the very next commit
+# nearly published four files of internal tool state to a public repository.
+# An ignore pattern is not disclosure — every repo ignores its editors' and
+# tools' scratch directories — and not ignoring one is how those directories
+# get committed.
+.nexus/
 .refcertify/
 .serena/
+
+# `npm pack` output. A published tarball in the repo is both noise and a stale
+# copy of the package.
+*.tgz

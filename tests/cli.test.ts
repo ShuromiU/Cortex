@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { Command } from 'commander';
-import { createProgram, formatBytes, onlyUnusedProject, renderDoctorReport, renderInstallResult } from '../src/transports/cli.js';
+import { createProgram, formatBytes, installExitCode, onlyUnusedProject, renderDoctorReport, renderInstallResult } from '../src/transports/cli.js';
 import type { DoctorCheck, DoctorReport } from '../src/query/doctor.js';
 import { HOOK_SCRIPTS, REQUIRED_WIRING, tokenizeCommand } from '../src/query/doctor.js';
 import type { InstallAction, InstallResult } from '../src/query/install.js';
@@ -2401,6 +2401,29 @@ describe('onlyUnusedProject', () => {
 
   it('is false when nothing fails, so it never appears on a clean run', () => {
     expect(onlyUnusedProject(report([pass('jq'), pass('database')]))).toBe(false);
+  });
+
+  it('gates the EXIT CODE, not just the reassuring sentence', () => {
+    // The reassurance was already gated on `onlyUnusedProject`; the exit code
+    // was not, so a successful install into a never-run project reported
+    // failure. Measured on a clean Linux container: the two commands the
+    // README opens with ended in a red report and a non-zero status with
+    // nothing wrong — which aborts any scripted or Dockerfile install at its
+    // first step. These pin the two together.
+    expect(installExitCode(report([fail('engagement'), fail('database'), pass('jq')]))).toBe(0);
+    expect(installExitCode(report([fail('database')]))).toBe(0);
+  });
+
+  it('still fails the install when anything real is broken', () => {
+    // The whole point of running the diagnostic from `install`: actions can
+    // all succeed and leave an installation that cannot work.
+    expect(installExitCode(report([fail('engagement'), fail('jq')]))).toBe(1);
+    expect(installExitCode(report([fail('hook-currency')]))).toBe(1);
+    expect(installExitCode(report([fail('database'), fail('node')]))).toBe(1);
+  });
+
+  it('is zero on a clean report', () => {
+    expect(installExitCode(report([pass('jq'), pass('database')]))).toBe(0);
   });
 });
 
