@@ -2,6 +2,28 @@
 
 **A trust, freshness, and economy layer for coding-agent memory.**
 
+Free and open source (MIT). No account, no API key, no telemetry, no paid tier — it runs entirely
+on your machine and the memory it keeps never leaves it.
+Install is `npm install -g @flowstatepm/cortex` plus one setup command; see [Install](#install).
+
+Built for [Claude Code](https://claude.com/claude-code), and built **with** it: I wrote it as a
+solo project using Claude Code as the development environment throughout, and it targets Claude
+Code as its host — the hooks it installs and the tools it exposes are Claude Code's. Along the way
+it ran on itself, so most of the design decisions recorded below were ones Cortex was holding for
+me while I made the next one.
+
+**What it does, in two sentences.** Claude Code already remembers things between sessions. Cortex
+is a layer on top that tracks whether each remembered thing is still *agreed*, still *true of your
+code*, and what it *cost* to inject — so an agent is told "this decision is contested" or "this
+note points at a file you deleted" instead of being handed a stale fact as settled context.
+
+**Where Claude Code actually helped, specifically**, since "built with AI" on its own says nothing:
+the test suite is ~1,800 cases written alongside the code rather than after it; every substantial
+change went through a review pass where separate agent instances were pointed at the diff with
+instructions to *disprove* the previous one's conclusion, which is how several of the defects
+recorded in [docs/invariants.md](docs/invariants.md) were caught before shipping. That file is the
+honest log — measured failures, ideas that were withdrawn, and gaps that are still open.
+
 Agent memory is no longer hard to come by — as of 2026-08-01 Claude Code ships it on by default and other agents ship comparable features. What none of them tell you is whether the thing they just remembered is still true.
 
 Cortex answers three questions a storage layer normally leaves open:
@@ -16,7 +38,27 @@ Under all three: memory is scoped to a branch and a worktree, capture is ambient
 
 ## How this compares
 
-Competitors move, so each claim below carries how it was checked. Treat the specifics as dated and the axis of difference as the durable part.
+Competitors move, so each claim below carries how it was checked. Treat the specifics as dated and
+the axis of difference as the durable part. Where a cell says *not established*, it means exactly
+that: I have not run the thing, and I am not going to assert a limitation I did not observe.
+
+| | Claude Code's own memory | claude-mem | Cortex |
+|---|---|---|---|
+| To install | nothing, it is built in | npm | npm, plus `jq` |
+| Where memory lives | Markdown files you can edit | SQLite | SQLite |
+| How a session becomes memory | written as prose | compressed by an LLM | projected deterministically |
+| Separated per git branch | **no** — the key is a directory path | not established | **yes**, branch and worktree |
+| Flags a memory that contradicts another | no | not established | **yes**, both sides marked |
+| Flags a memory pointing at deleted or renamed code | no | not established | **yes**, `[stale:` / `[moved:` |
+| Reports what remembering cost you in tokens | no | not established | **yes**, and budgets are enforced |
+| Retrieval quality checked in CI | n/a | not established | **yes**, locked baselines |
+| Editable by hand in a text editor | **yes** | no | no — via CLI commands |
+
+The honest summary of that table: Claude Code's built-in memory is easier and hand-editable, and if
+what you want is an agent that recalls your preferences, it is enough. Cortex is for the case where
+being told *how much to trust* a memory matters more than the convenience — long-lived branches,
+decisions that get revisited, codebases where a six-week-old note may describe files that no longer
+exist.
 
 **Native auto-memory** writes plain Markdown into a per-project directory and reads it back at session start. It is better than Cortex at three real things: nothing to install, files you can read and edit by hand, and no database to migrate or corrupt. If what you want is an agent that remembers your preferences across sessions, it is enough, and Cortex is not competing for that job.
 
@@ -36,6 +78,39 @@ Each is a behavior you can go and check, not a label:
 6. **CI-gated retrieval quality.** Hermetic seeded suites are locked against reference results; `npm run gate` fails on a drop in `top1_hit` or `recall_at_3` or a rise in `output_tokens`, and CI runs it on every push. Suites can also assert on whole rendered surfaces — the SessionStart brief, `cortex header`, `cortex_state` — so a change that quietly stops marking a contested decision, or starts leaking a superseded one into the brief, fails the build instead of passing it. Regenerating a baseline requires a `Baseline-Regenerated:` trailer on the commit that does it. See [Retrieval Quality Gate](#retrieval-quality-gate).
 
 ## How it works
+
+### A session, start to finish
+
+**When a session starts.** Cortex prints a short brief — capped at 150 tokens, and the cap is
+spent rather than suggested — covering what is load-bearing on *this branch*: recent decisions,
+open blockers, what the last session was doing. It also names up to five files this branch has
+already read that are **still unchanged**, verified by re-hashing them, so the agent does not spend
+its opening moves re-reading files to orient itself. On a repository Cortex has never seen, it
+prints nothing.
+
+**While you work.** A hook records what happened — files read and edited, commands run and whether
+they passed, subagents dispatched. This is the part that has to be cheap, because it fires on
+*every* tool call: it is pure shell appending a line to a file, with no database opened and no Node
+process started. Nothing is injected into the conversation here; it is only being written down.
+
+**When something gets decided.** You (or the agent) record it as a note. If that note opposes an
+active decision on the same subject, Cortex marks **both** sides `[contested]` — it does not pick a
+winner and does not quietly retire the older one. The contradiction rule is a fixed lexical test
+with no model involved, so the same two notes always produce the same verdict, and it is
+deliberately strict: a detector that cries wolf gets ignored.
+
+**At the end of a turn.** The recorded lines are flushed to the database in one batch. If a
+subagent ran and reached a conclusion, that conclusion is kept and offered to you as a *suggestion*
+to save — it is never written as memory on its own.
+
+**When you ask.** `cortex_recall(topic)` searches notes, summaries, snapshots and command history,
+ranks the results, and renders them inside a token budget. Every line carries its own trust
+labels: `[contested]` if it is disputed, `(superseded)` if it was retired, `[stale: missing …]` if
+it points at a file that no longer exists, `[moved: a.ts → b.ts]` if the file was renamed. Those
+labels are the product. A memory layer that returns a confident wrong answer is worse than one that
+returns nothing.
+
+### The design in one line
 
 Cortex is retrieval-first and pull-based. It stores decisions, blockers, command outcomes, snapshots, and session summaries in a local SQLite database, captures activity ambiently through hooks, and surfaces *remembered content* in exactly two channels you did not ask for: a validated session brief at startup, and a short whisper when a high-confidence focus shift matches memory. Two other hooks speak unprompted but inject no memory — a one-line consult hint, at most once per session, and a turn-end nudge when a subagent ran and there are high-confidence notes worth saving. Everything else you ask for.
 
@@ -71,6 +146,17 @@ cortex install
 > authors; neither will give you this tool. The package is `@flowstatepm/cortex`. The command it
 > installs is `cortex` — if you already have one of those other packages, its `cortex` command and
 > this one will collide, so uninstall the other first.
+
+> **You almost certainly need to install `jq` first**, and it is the one prerequisite that bites.
+> `jq` is a small command-line JSON reader; the hooks use it because they run on every tool call
+> and starting Node each time would add latency to everything you do. It is not installed by
+> default on any operating system:
+> `brew install jq` (macOS) · `winget install jqlang.jq` (Windows) · `sudo apt install jq` (Debian/Ubuntu).
+>
+> Without it, `cortex install` and `cortex doctor` both **fail loudly and name it** — but if you
+> skip past that, the hooks cannot parse their input and Cortex records nothing while appearing to
+> work. Measured, not theorised. If a session ever looks like it is remembering nothing, run
+> `cortex doctor` first; that is what it is for.
 
 Then **restart Claude Code**, so it picks up the new hook wiring and the MCP server.
 
