@@ -63,13 +63,14 @@ Cortex is retrieval-first and pull-based. It stores decisions, blockers, command
 ## Install
 
 ```bash
-npm install -g @shuromiu/cortex
+npm install -g @flowstatepm/cortex
 cortex install
 ```
 
-> **Mind the scope.** The unscoped `cortex-memory` on npm is an unrelated package by a different
-> author that happens to share the name; installing it will not give you this tool. The package is
-> `@shuromiu/cortex`; the command it installs is `cortex`.
+> **Mind the scope.** Both `cortex` and `cortex-memory` on npm are unrelated packages by different
+> authors; neither will give you this tool. The package is `@flowstatepm/cortex`. The command it
+> installs is `cortex` — if you already have one of those other packages, its `cortex` command and
+> this one will collide, so uninstall the other first.
 
 Then **restart Claude Code**, so it picks up the new hook wiring and the MCP server.
 

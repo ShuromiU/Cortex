@@ -1,5 +1,5 @@
 {
-  "name": "@shuromiu/cortex",
+  "name": "@flowstatepm/cortex",
   "version": "0.1.0",
   "description": "Working memory for AI agents — persistent cognitive state per project",
   "type": "module",
