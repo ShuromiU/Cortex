@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import * as fs from 'node:fs';
@@ -43,20 +43,48 @@ afterEach(() => {
   }
 });
 
-/** A store with enough committed data to leave a WAL worth measuring. */
+// Raised for THIS FILE only; `vitest.config.ts` stays at 10 s so a genuine hang
+// anywhere else still fails fast. This file is disk- and subprocess-bound by
+// construction — it grows real WAL sidecars and spawns real node processes to
+// watch them shut down — and windows-latest/node 22 timed out on two DIFFERENT
+// tests here on two consecutive runs while node 20 on the same OS, both ubuntu
+// jobs and a local NVMe all passed. The seeder below removes the actual cost;
+// this is headroom for a slow shared runner, not a substitute for it. At 30 s
+// against a local worst case of 1.6 s an infinite hang is still caught, which
+// is the only thing the 10 s default was buying here.
+vi.setConfig({ testTimeout: 30_000 });
+
+/**
+ * A store with enough committed data to leave a WAL worth measuring.
+ *
+ * **One transaction, not `rows` of them.** Unbatched, each `insertNote` is its
+ * own commit and its own fsync, and this helper feeds every timing-sensitive
+ * case in the file — so the cost is paid once per test, on a shared disk of
+ * unknown speed. windows-latest/node 22 timed out on two different tests here
+ * at 10 s, on two consecutive runs, while node 20 on the same OS, both ubuntu
+ * jobs and a local NVMe all absorbed it; fixing them one at a time was
+ * whack-a-mole because the cost lives here.
+ *
+ * Nothing this file asserts changes. The frames still land in the WAL — which
+ * is the precondition every one of these tests opens with — and the checkpoint
+ * under test still has to move them. Production never pays it either: the
+ * hook-path callers of `insertNote` are already inside a transaction.
+ */
 function seedWal(dbPath: string, rows: number): ReturnType<typeof openDatabase> {
   const db = openDatabase(dbPath);
   ensureCortexSchema(db, path.dirname(dbPath));
   const store = new CortexStore(db);
   const session = store.createSession({ cwd: path.dirname(dbPath) });
-  for (let i = 0; i < rows; i++) {
-    store.insertNote({
-      sessionId: session.id,
-      kind: 'insight',
-      content: `padding note ${i} ${'x'.repeat(400)}`,
-      subject: `s${i}`,
-    });
-  }
+  db.transaction(() => {
+    for (let i = 0; i < rows; i++) {
+      store.insertNote({
+        sessionId: session.id,
+        kind: 'insight',
+        content: `padding note ${i} ${'x'.repeat(400)}`,
+        subject: `s${i}`,
+      });
+    }
+  })();
   return db;
 }
 
