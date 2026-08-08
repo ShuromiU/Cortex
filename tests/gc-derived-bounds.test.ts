@@ -45,15 +45,36 @@ function session(fx: Fixture, id: string, scopeKey: string): void {
     .run(id, '2026-08-01T00:00:00Z', fx.root, 'project', scopeKey);
 }
 
-/** N command runs in one scope, oldest first. */
+/**
+ * N command runs in one scope, oldest first.
+ *
+ * **One transaction, not N — this is a platform cost, not a style preference.**
+ * `fixture()` opens with a raw `new Database(...)` rather than `openDatabase`,
+ * so it inherits SQLite's DEFAULT `journal_mode = delete` and
+ * `synchronous = FULL` (both read back from the live connection to confirm).
+ * Every autocommit `.run()` is then its own transaction, and on Windows that is
+ * a journal file created, written, fsynced, committed, deleted, plus an NTFS
+ * directory-metadata update — per row. Measured here, 300 rows: **766 ms**
+ * unbatched vs **3 ms** batched. On windows-latest the same loop cost ~10 s of
+ * an 11.3 s test and timed the convergence case out at 10 s, while Linux and a
+ * local NVMe absorbed it; that is also why the neighbours, which seed 20-50
+ * rows, sat at 2-3 s each rather than failing.
+ *
+ * Production never pays this and the tax is the fixture's alone:
+ * `openProjectStore` opens WAL with `synchronous = NORMAL` (19 ms for the same
+ * 300 unbatched rows), and the only caller of `insertCommandRun`,
+ * `handleCmdEvent`, is already inside `runInTransaction`.
+ */
 function commandRuns(fx: Fixture, sessionId: string, n: number): void {
   const insert = fx.db.prepare(
     'INSERT INTO command_runs (id, session_id, timestamp, category, command_summary) VALUES (?,?,?,?,?)',
   );
-  for (let i = 0; i < n; i++) {
-    const ts = new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString();
-    insert.run(`cr-${sessionId}-${i}`, sessionId, ts, 'test', `npm test ${i}`);
-  }
+  fx.db.transaction(() => {
+    for (let i = 0; i < n; i++) {
+      const ts = new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString();
+      insert.run(`cr-${sessionId}-${i}`, sessionId, ts, 'test', `npm test ${i}`);
+    }
+  })();
 }
 
 const countRuns = (fx: Fixture): number =>
@@ -164,7 +185,25 @@ describe('the command-run cap survives a backfill (the Story 4.6 defect)', () =>
     expect(countRuns(fx)).toBeLessThanOrEqual(10);
   });
 
-  it('converges: repeated gc + backfill cycles do not grow the store', () => {
+  it('converges: repeated gc + backfill cycles do not grow the store', { timeout: 30_000 }, () => {
+    // **Timeout raised HERE and nowhere else — `vitest.config.ts` stays at 10 s
+    // deliberately, so a real hang anywhere else still fails fast.**
+    //
+    // This case does ~10x the database work of its neighbours: 300 seeded rows
+    // against their 20-50, and three gc + backfill cycles against their one. A
+    // windows-latest runner's fsync is roughly an order of magnitude slower than
+    // ext4 or a local NVMe, which is what turned 1.5 s locally into 11.3 s on
+    // CI. With the batched seed above the body measures 93 ms locally and
+    // projects to ~1-2 s on that runner, so 30 s is more than 10x headroom over
+    // the slowest observed platform — generous enough that disk speed can never
+    // flake this, tight enough that a hang or a regression reintroducing
+    // superlinear work still fails rather than passing slowly.
+    //
+    // The work is NOT superlinear today, and that is measured, not assumed: the
+    // three cycles cost 9/4/4 ms of gc and 29/23/26 ms of backfill and settle at
+    // 25/25/25 runs. VACUUM never fires here (the freelist ratio stays under the
+    // 0.2 threshold), so it is not part of the cost either.
+    //
     // A bound that oscillates upward is not a bound. Measured on the live store
     // copy: 5,434 runs / 25.2 MB settles at 759 / 11.4 MB and holds there across
     // five cycles.

@@ -865,15 +865,41 @@ export function installStoreCloseOnExit(): void {
     return;
   }
   exitHookInstalled = true;
-  // `exit` only: better-sqlite3 is synchronous, so a checkpoint and close both
-  // complete inside the handler. An async teardown could not.
-  process.on('exit', () => {
+  const closeQuietly = (): void => {
     try {
       closeAllProjectStores();
     } catch {
       /* nothing left to report to */
     }
-  });
+  };
+  // `exit` only: better-sqlite3 is synchronous, so a checkpoint and close both
+  // complete inside the handler. An async teardown could not.
+  process.on('exit', closeQuietly);
+  // `exit` alone is not enough on POSIX, and this is measured rather than
+  // inferred. A signal with no JS listener leaves the kernel's default
+  // disposition in place, so the process is torn down without Node emitting
+  // `exit` at all: on linux/node 20 a SIGTERM'd MCP server left its entire
+  // 78,312-byte WAL sidecar on disk, skipping the checkpoint FR-25 AC #1
+  // promises on the ordinary path a host uses to end a session. Installing a
+  // listener is what turns the signal into a real `process.exit()`, which does
+  // emit `exit`; the close is repeated here so the signal path does not depend
+  // on that. `128 + signo` is the wait status a POSIX shell reports.
+  //
+  // These are inert on win32 by design rather than skipped: `kill()` there is
+  // `TerminateProcess`, the hard-kill analogue of SIGKILL, which runs no
+  // handler of any kind. Windows' graceful stop is the host closing stdin,
+  // which drains the loop into the `exit` listener above (verified).
+  //
+  // Registering a signal listener does not hold the event loop open, because
+  // Node unrefs the handle, so a one-shot CLI or hook process still exits the
+  // moment its work is done.
+  const closeAndExit = (code: number) => (): void => {
+    closeQuietly();
+    process.exit(code);
+  };
+  process.on('SIGTERM', closeAndExit(128 + 15));
+  process.on('SIGINT', closeAndExit(128 + 2));
+  process.on('SIGHUP', closeAndExit(128 + 1));
 }
 
 export function closeProjectStore(db: Database.Database): WalCheckpointResult | null {

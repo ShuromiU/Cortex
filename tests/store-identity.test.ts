@@ -33,7 +33,18 @@ let root: string;
 let home: string;
 
 beforeEach(() => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-identity-'));
+  // `.native` is not decoration. Identity canonicalises with
+  // `fs.realpathSync.native` (see `resolveRealPath`), and on win32 that is the
+  // ONLY variant that expands an 8.3 short name — measured: `fs.realpathSync`
+  // answers `C:\PROGRA~1` where `.native` answers `C:\Program Files`.
+  // `os.tmpdir()` hands back TEMP verbatim, so on a host whose user name
+  // exceeds eight characters (CI: `runneradmin` -> `C:\Users\RUNNER~1\...`)
+  // every fixture path built from it is the alias, and the exact-equality
+  // assertions below compared it against the product's expanded form. A
+  // user name of eight characters or fewer makes the two identical and hides the
+  // whole class. macOS hides it too, on every machine: `/var` -> `/private/var`.
+  const created = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-identity-'));
+  root = fs.realpathSync.native(created);
   home = path.join(root, 'cortex-home');
   clearProjectStoreCache();
 });
@@ -599,7 +610,14 @@ describe('which pre-relocation store gets migrated', () => {
     const resolved = openProjectStore(wt, { env: env() });
     resolved.db.close();
 
-    expect(resolved.migration.sourcePath).toBe(path.join(fs.realpathSync(main), '.cortex.db'));
+    // `.native`, not `fs.realpathSync`: the plain variant leaves an 8.3 alias
+    // alone on win32, so it never was the right yardstick for a path the
+    // product canonicalises — this assertion failed on CI *despite* the guard.
+    // `main` is already canonical (see `beforeEach`), which is what makes this
+    // an equality rather than a coincidence.
+    expect(resolved.migration.sourcePath).toBe(
+      path.join(fs.realpathSync.native(main), '.cortex.db'),
+    );
     expect(countNotes(resolved.dbPath)).toBe(60);
   });
 
@@ -708,6 +726,21 @@ describe('identity uses a realpath, not path.resolve', () => {
 
     expect(path.resolve(link)).not.toBe(path.resolve(real));
     expect(resolveRealPath(link)).toBe(resolveRealPath(real));
+  });
+
+  it('reduces whatever spelling the host hands out to one canonical form', () => {
+    // The rule the CI failure exposed, asserted rather than assumed.
+    // `os.tmpdir()` returns TEMP/TMP verbatim, and on a win32 host whose user
+    // name exceeds eight characters that value is the 8.3 alias — measured on
+    // GitHub Actions: `C:\Users\RUNNER~1\AppData\Local\Temp` for `runneradmin`.
+    // On macOS it is `/var/...` against a real `/private/var/...`. Where this
+    // maintainer's machine hands out the canonical form already the assertion
+    // is a tautology, and that is precisely why the class went unseen.
+    const handedOut = os.tmpdir();
+    const canonical = fs.realpathSync.native(handedOut);
+    expect(resolveRealPath(handedOut)).toBe(canonical);
+    // One store, not two — the split this canonicalisation exists to prevent.
+    expect(computeStoreId(resolveRealPath(handedOut))).toBe(computeStoreId(canonical));
   });
 
   it('falls back to an absolute path when the target does not exist', () => {

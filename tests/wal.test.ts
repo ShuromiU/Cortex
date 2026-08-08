@@ -308,14 +308,18 @@ describe('the transports actually wire it', () => {
     expect(run('install')).toBe(0);
   });
 
-  // POSIX only. On win32 `child.kill()` is `TerminateProcess`, which runs no
-  // handler at all, so this would fail for a platform reason rather than a code
-  // one. It is the only *behavioural* test that can distinguish a transport
-  // which installs the handler from one that does not — see the inventory
-  // assertions below for why nothing else can.
-  const signalIt = process.platform === 'win32' ? it.skip : it;
-
-  signalIt('the MCP server checkpoints when a signal stops it', async () => {
+  // **Both platforms assert the guarantee; neither goes silent.** The product
+  // promise is one thing (stopping the MCP server reclaims its WAL) but the
+  // graceful stop differs by OS, so each platform is exercised with its own.
+  // On POSIX the host sends SIGTERM, and a signal with no JS listener kills the
+  // process without Node emitting `exit`, so this is the only test that can
+  // observe the signal wiring at all (see the inventory assertions below for
+  // why nothing else can). On win32 there is no graceful signal: `kill()` is
+  // `TerminateProcess`, the hard-kill analogue of SIGKILL, which runs no
+  // handler of any kind, so the host's graceful stop there is closing stdin and
+  // letting the loop drain into the same exit handler. Skipping win32 outright,
+  // as this used to, left the Windows half of the guarantee unasserted.
+  it('the MCP server checkpoints when the host stops it', async () => {
     assertDistIsCurrent('src/transports/cli.ts', 'dist/transports/cli.js');
     const home = fs.mkdtempSync(path.join(root, 'sig-home-'));
     const project = fs.mkdtempSync(path.join(root, 'sig-proj-'));
@@ -329,14 +333,25 @@ describe('the transports actually wire it', () => {
       env: { ...process.env, CORTEX_HOME: home },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    // Give the server time to open its store and park some WAL.
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    child.kill('SIGTERM');
+    // Poll for a parked WAL instead of sleeping a guessed 1500 ms. A fixed
+    // delay both flakes on a slow CI runner and lets this test pass vacuously
+    // if the server never started at all, because the assertion below is `0`.
+    const deadline = Date.now() + 8_000;
+    while (walSizeBytes(dbPath) === 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    expect(walSizeBytes(dbPath), 'the server parked no WAL to reclaim').toBeGreaterThan(0);
+
+    if (process.platform === 'win32') {
+      child.stdin?.end();
+    } else {
+      child.kill('SIGTERM');
+    }
     await new Promise(resolve => child.on('exit', resolve));
 
     expect(walSizeBytes(dbPath)).toBe(0);
     expect(fs.existsSync(walPath(dbPath))).toBe(false);
-  });
+  }, 20_000);
 
   it.each([
     ['src/transports/cli.ts'],

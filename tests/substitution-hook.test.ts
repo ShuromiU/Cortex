@@ -12,7 +12,7 @@ import {
   HOT_PATH_STATE_KEYS,
 } from '../src/capture/substitution.js';
 import { escapeIndexField, formatIndexLine } from '../src/capture/digest-index.js';
-import { normalizeScopePath, toScopeRelativeKey } from '../src/scope/keys.js';
+import { normalizeFilePathKey, normalizeScopePath, toScopeRelativeKey } from '../src/scope/keys.js';
 import { applySchema, initializeMeta } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import { appendSpoolEntry, flushSpool } from '../src/capture/spool.js';
@@ -49,6 +49,28 @@ if (!canRun) {
 }
 
 const SESSION = 'sess-primary-1';
+
+/**
+ * The fold the COLD path publishes on THIS platform — the same predicate
+ * `renderHotPathStateLines` uses, already asserted against it in
+ * `tests/substitution.test.ts` and `tests/cli.test.ts`.
+ *
+ * Hardcoding `'lower'` here pinned Windows/macOS semantics onto fixtures whose
+ * index records come from the real, platform-conditional `toScopeRelativeKey`.
+ * On linux the writer leaves `Module.TS` exact while the hook was told to fold,
+ * so every mixed-case lookup missed: green on the maintainer's Windows box,
+ * red on ubuntu, and invisible for two weeks because every other fixture path
+ * in this file is already all-lowercase and folding is the identity on those.
+ *
+ * Re-derived rather than imported: the shell and the cold path AGREEING is what
+ * is under test, and a fixture that asks the writer what it thinks the answer
+ * is can only watch the two agree on the wrong answer together.
+ */
+const PATH_FOLD: 'lower' | 'none' =
+  process.platform === 'win32' || process.platform === 'darwin' ? 'lower' : 'none';
+
+/** `Module.TS` and `module.ts` are ONE file here, and TWO files elsewhere. */
+const CASE_INSENSITIVE_FS = PATH_FOLD === 'lower';
 
 interface Fixture {
   cwd: string;
@@ -93,8 +115,8 @@ function makeFixture(options: FixtureOptions = {}): Fixture {
     enabled: 'true',
     [HOT_PATH_STATE_KEYS.sessionId]: SESSION,
     [HOT_PATH_STATE_KEYS.indexScope]: escapeIndexField(scopeKey),
-    [HOT_PATH_STATE_KEYS.scopeRoot]: posixCwd.toLowerCase(),
-    [HOT_PATH_STATE_KEYS.pathFold]: 'lower',
+    [HOT_PATH_STATE_KEYS.scopeRoot]: normalizeFilePathKey(cwd),
+    [HOT_PATH_STATE_KEYS.pathFold]: PATH_FOLD,
   };
   for (const key of options.omitStateKeys ?? []) delete stateLines[key];
   fs.writeFileSync(
@@ -494,7 +516,7 @@ describe.skipIf(!canRun)('substitution: the shell finds what the cold path wrote
   // real writers — and require the SHELL to find it. Each transformation these
   // cover fails silently as a false "unread" if the two sides drift.
   for (const rel of [
-    'src/nested/deep/Module.TS', // case folding
+    'src/nested/deep/Module.TS', // mixed case: FOLDED on win32/darwin, EXACT on linux
     'src/one hundred%/mod.ts', // percent escaping
     'src/a-b.c[d]/mod.ts', // regex metacharacters, which is why grep -F is required
     'mod.ts', // scope root itself
@@ -504,6 +526,69 @@ describe.skipIf(!canRun)('substitution: the shell finds what the cold path wrote
       expect(runRead(fx).substituted).toBe(true);
     });
   }
+
+  it.skipIf(!CASE_INSENSITIVE_FS)(
+    'finds it without `${key,,}` too — the fold stock macOS has to fall back to',
+    () => {
+      // `${key,,}` is bash 4.0+. Stock macOS ships bash 3.2 at `/bin/bash`, and
+      // that is the interpreter `cortex install` names: it wires
+      // `bash "<script>"`, so the shebang does not decide. Measured on 3.2.57 —
+      // the script PARSES (`bash -n` is clean, which is why no syntax gate ever
+      // saw it), but reaching the expansion raises `bad substitution`, aborts
+      // `try_substitute`, and writes to stderr. Since darwin is the one platform
+      // where the cold path publishes `path_fold=lower` unconditionally, the
+      // cost was a feature that silently never fired on exactly the machines
+      // that always take that branch.
+      //
+      // No runner has bash 3.2, so the fallback is FORCED rather than waited
+      // for. Skipped where `path_fold` is `none`, because there the fold branch
+      // is never entered and the flag would prove nothing.
+      const fx = makeFixture({ relPath: 'src/nested/deep/Module.TS' });
+      expect(runRead(fx, {}, {}, undefined, { CORTEX_FOLD_ASCII: '1' }).substituted).toBe(true);
+    },
+  );
+
+  it(
+    CASE_INSENSITIVE_FS
+      ? 'matches a differently-cased record — one file on this filesystem'
+      : 'refuses a differently-cased record — a DIFFERENT file on this filesystem',
+    () => {
+      // The judgement the hot path must not get wrong, asserted in BOTH
+      // directions rather than on the platform that happens to run it.
+      //
+      // `src/Module.TS` and `src/module.ts` are one file on win32/darwin and two
+      // files on linux. Folding the lookup unconditionally would hand the agent
+      // `module.ts`'s digest for a read of `Module.TS` — reporting a file it has
+      // never seen as already in its context, which is the AD-6 false-confidence
+      // failure this whole mechanism exists to make unreachable.
+      //
+      // The hook cannot work this out for itself: it may not spawn Node (N-4)
+      // and no bash builtin reports filesystem case sensitivity. It is TOLD, by
+      // `path_fold` in `.cortex.state`, which `renderHotPathStateLines` computes
+      // from `process.platform` at SessionStart and the hook applies at the one
+      // `${key,,}` in the script.
+      //
+      // Both verdicts are asserted on purpose. Asserting only the one that holds
+      // where the suite usually runs is exactly how this arrived.
+      const fx = makeFixture({ relPath: 'src/Module.TS' });
+      // The record under the CASE-FOLDED key. A no-op on win32/darwin, where
+      // `toScopeRelativeKey` folded it already; on linux it is a record for a
+      // genuinely different file, which a folding lookup would wrongly find and
+      // a correct one must miss.
+      fs.writeFileSync(
+        path.join(fx.cwd, '.cortex.index'),
+        `${formatIndexLine({
+          scopeKey: fx.scopeKey,
+          path: fx.storedKey.toLowerCase(),
+          sha256: fx.sha,
+          byteSize: fx.bytes,
+          sessionId: SESSION,
+          agentId: null,
+        })}\n`,
+      );
+      expect(runRead(fx).substituted).toBe(CASE_INSENSITIVE_FS);
+    },
+  );
 
   it('does not match a record belonging to another scope', () => {
     const fx = makeFixture();
@@ -776,8 +861,8 @@ describe.skipIf(!canRun)('substitution: review-round guards', () => {
       path.join(root, '.cortex.state'),
       `enabled=true\n${HOT_PATH_STATE_KEYS.sessionId}=${session.id}\n` +
         `${HOT_PATH_STATE_KEYS.indexScope}=${escapeIndexField(scopeKey)}\n` +
-        `${HOT_PATH_STATE_KEYS.scopeRoot}=${posixRoot.toLowerCase()}\n` +
-        `${HOT_PATH_STATE_KEYS.pathFold}=lower\n`,
+        `${HOT_PATH_STATE_KEYS.scopeRoot}=${normalizeFilePathKey(root)}\n` +
+        `${HOT_PATH_STATE_KEYS.pathFold}=${PATH_FOLD}\n`,
     );
     fs.writeFileSync(path.join(root, SUBSTITUTION_FLAG_FILENAME), 'on\n');
 

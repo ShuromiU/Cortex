@@ -54,6 +54,44 @@ json_escape() {
   JSON_ESC="$s"
 }
 
+FOLD_LOWER=""
+# ASCII lowercase in builtins, into a global for the same reason `json_escape`
+# uses one: `$(...)` would fork, and a fork per read is what this path exists to
+# avoid (AD-2, N-4).
+#
+# This is a FALLBACK, not the primary. `${key,,}` is bash 4.0+, and stock macOS
+# ships bash 3.2 at `/bin/bash` — which is the interpreter `cortex install`
+# names, since it wires `bash "<script>"` and the shebang therefore does not
+# decide. Measured on 3.2.57: the script still PARSES (`bash -n` is clean, so a
+# syntax gate cannot see this), but REACHING the expansion raises `bad
+# substitution`, which aborts the enclosing function and writes to stderr. The
+# fold is only reached with read substitution enabled, so the cost was a feature
+# that silently never fired plus stderr on every Read — on darwin, the one
+# platform where the cold path publishes `path_fold=lower` unconditionally.
+#
+# The bracket list is spelled out rather than written `[A-Z]` because a range is
+# locale-dependent. ASCII-only is a deliberate narrowing: on bash 3.2 a path
+# containing a non-ASCII capital folds short of what the TypeScript side's
+# `toLowerCase()` produces, so the lookup MISSES. That is the safe direction —
+# a miss costs a refund, a wrong hit would tell the agent it holds a file it
+# does not.
+fold_lower() {
+  local s="$1" i=0 u l upper lower
+  case "$s" in
+    *[ABCDEFGHIJKLMNOPQRSTUVWXYZ]*) ;;
+    *) FOLD_LOWER="$s"; return 0 ;;
+  esac
+  upper="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  lower="abcdefghijklmnopqrstuvwxyz"
+  while [ "$i" -lt 26 ]; do
+    u="${upper:$i:1}"
+    l="${lower:$i:1}"
+    s="${s//$u/$l}"
+    i=$((i + 1))
+  done
+  FOLD_LOWER="$s"
+}
+
 SUBST_TEXT=""
 try_substitute() {
   local file="$1" full="$2" aid="$3"
@@ -100,7 +138,20 @@ try_substitute() {
   # leaked into the agent-facing payload and the ledger's evidence ref
   # (review-measured: a `%` in the path named a file that does not exist).
   local key="${file//\\//}"
-  [ "$fold" = "lower" ] && key="${key,,}"
+  # `${key,,}` where the shell has it, the ASCII table where it does not. The
+  # native operator stays the primary because it matches `toLowerCase()` beyond
+  # ASCII, so nothing regresses on the bash 4+ every CI runner and every Git
+  # Bash actually has. `CORTEX_FOLD_ASCII` forces the fallback so the branch
+  # stock macOS depends on is exercised by the suite on every platform —
+  # untested-because-unreachable is the shape of defect this file just paid for.
+  if [ "$fold" = "lower" ]; then
+    if [ -z "$CORTEX_FOLD_ASCII" ] && [ "${BASH_VERSINFO[0]}" -ge 4 ] 2>/dev/null; then
+      key="${key,,}"
+    else
+      fold_lower "$key"
+      key="$FOLD_LOWER"
+    fi
+  fi
   if [ -n "$sroot" ]; then
     case "$key" in
       "$sroot"/*) key="${key#"$sroot"/}" ;;

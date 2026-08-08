@@ -1,0 +1,16 @@
+# Line endings were per-machine until this file existed. Every blob in the
+# history happens to be LF, but only because the maintainer's `core.autocrlf`
+# is `true` and normalises on the way in — nothing in the repository required
+# it. One contributor with a different setting commits a CRLF hook and the
+# product breaks on Linux and macOS, where bash reads the CR as part of the
+# command and dies with `$'\r': command not found` at the first line it
+# reaches. Measured: a CRLF `cortex-capture.sh` fails to parse under bash,
+# taking ambient capture down with it, while `bash -n` on the LF copy is clean.
+* text=auto
+
+# The hooks additionally need LF in the WORKING TREE, not just in the object
+# store, because they are executed straight from a checkout — `cortex install`
+# renders these files, and on Windows they are run by Git Bash, which is happy
+# with LF. Without `eol=lf` a Windows checkout materialises them as CRLF, and
+# that tree copied or shared onto a POSIX host carries the failure above.
+*.sh text eol=lf

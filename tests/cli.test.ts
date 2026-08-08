@@ -1805,13 +1805,30 @@ describe('cortex inspect-memory — repairs', () => {
 // ── doctor (FR-23) ────────────────────────────────────────────────────
 
 /**
- * A directory holding fake `jq` and `bash`, prepended to PATH so the diagnostic
- * resolves them without depending on what the runner happens to have
- * installed. Both bare and `.exe` names, so one fixture serves both platforms.
+ * A directory holding fake `jq`, `bash` and `cortex`, prepended to PATH so the
+ * diagnostic resolves them without depending on what the runner happens to have
+ * installed. Both bare and Windows-shim names, so one fixture serves both
+ * platforms.
+ *
+ * `cortex` belongs here for the same reason `jq` and `bash` do, and it was the
+ * omission that made this fixture lie. The SessionStart wiring the README
+ * documents is `cortex inject-header --quiet`, so `doctor`'s N-6 interpreter
+ * check resolves a BARE `cortex` on PATH — and `withSandbox` only PREPENDS this
+ * directory, leaving the machine's own PATH searched behind it. Without a shim
+ * the check was answered by whatever global install the developer happened to
+ * have: green on a maintainer's machine, red on all four CI jobs, on both
+ * operating systems. Not a platform difference — a clean-machine one.
+ *
+ * The files are empty on purpose. `doctor` LOCATES an interpreter and never
+ * executes it, so a zero-byte file is a faithful fixture and needs no exec bit
+ * (`resolveExecutable` stats, it does not check X_OK).
  */
 function seedFakeBinDir(): string {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-bin-'));
-  for (const name of ['jq', 'bash', 'jq.exe', 'bash.exe']) {
+  // `.cmd` is the shim npm writes for a global bin on Windows; the
+  // extension-less name is what a POSIX PATH carries and what `PATHEXT`
+  // probing finds first on win32.
+  for (const name of ['jq', 'bash', 'cortex', 'jq.exe', 'bash.exe', 'cortex.cmd']) {
     fs.writeFileSync(path.join(binDir, name), '');
   }
   return binDir;
@@ -2219,6 +2236,19 @@ describe('cortex doctor', () => {
     expect(`${currency?.status}: ${currency?.detail}`).toBe(
       'pass: installed scripts match the templates shipped by this build',
     );
+
+    // Both interpreters must resolve FROM THE SANDBOX, and this asserts the
+    // resolved paths rather than settling for `pass`. `withSandbox` only
+    // prepends the fake bin directory, so the runner's real PATH is still
+    // searched behind it — and the SessionStart wiring names a bare `cortex`,
+    // which exists only where the package is globally installed. That leak is
+    // exactly how this test read green on a maintainer's machine while failing
+    // on every CI job. Asserting where each interpreter came from means the
+    // leak fails here instead of passing by accident, on both platforms.
+    const interpreter = parsed.checks.find(check => check.id === 'hook-interpreter');
+    expect(interpreter?.status).toBe('pass');
+    expect(interpreter?.detail).toContain(path.join(binDir, 'cortex'));
+    expect(interpreter?.detail).toContain(path.join(binDir, 'bash'));
 
     // Nothing may FAIL. Kept as an exact list rather than a count so a new
     // failure names itself instead of shifting a number.

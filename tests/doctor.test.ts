@@ -255,7 +255,15 @@ function detailOf(report: DoctorReport, id: string): string {
 }
 
 beforeEach(() => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-doctor-'));
+  // Canonical, in the same sense `resolveStoreIdentity` canonicalises — see the
+  // longer note in `tests/store-identity.test.ts`. `identity.legacyDbPaths` is
+  // built from the realpath of the project root, so a fixture root left in
+  // win32 8.3 form (CI: `C:\Users\RUNNER~1\...`) makes the `migrated_from`
+  // value written here by hand from `fixture.projectDir` unequal to the path
+  // `doctor` computes, and the legacy-store row silently reports the store as
+  // "present and not migrated" instead of naming its source.
+  const created = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-doctor-'));
+  root = fs.realpathSync.native(created);
 });
 
 afterEach(() => {
@@ -473,18 +481,33 @@ describe('interpreter resolution (AC #5, N-6)', () => {
     expect(detailOf(report, 'hook-interpreter')).toContain(path.join(fixture.binDir, 'bash.exe'));
   });
 
-  it('does not assume a POSIX default: /usr/bin/bash resolves via PATH on win32', () => {
+  it('does not assume a POSIX default: an absolute POSIX path resolves via PATH on win32', () => {
     const fixture = buildFixture();
-    // Precondition: the literal path does not exist as Node sees it. This is
-    // the measured Git Bash case — `which bash` answers /usr/bin/bash and
-    // fs.existsSync says false.
-    expect(fs.existsSync('/usr/bin/bash')).toBe(false);
+    // The measured case is Git Bash's `/usr/bin/bash` — `which bash` answers it
+    // while `fs.existsSync` says false, because Node resolves a POSIX-absolute
+    // path against the drive root. But that literal is absent only on Windows:
+    // on Linux it is a real file, and `resolveExecutable` correctly returns it
+    // literally there, which made this test's Windows-only precondition fail on
+    // every POSIX runner. The probe therefore keeps the shape that matters —
+    // POSIX-absolute, basename resolvable on the fixture's PATH — and takes its
+    // directory from this run's unique temp name, which exists at no filesystem
+    // root on any platform. The precondition is asserted rather than assumed, so
+    // a probe that ever does exist fails here instead of quietly testing
+    // something else.
+    const absentPosixPath = path.posix.join('/', path.basename(root), 'bash');
+    const presentPath = path.join(fixture.binDir, 'bash.exe');
+    expect(fs.existsSync(absentPosixPath)).toBe(false);
 
-    expect(resolveExecutable('/usr/bin/bash', fixture.env, 'win32', fixture.homeDir)).toBe(
-      path.join(fixture.binDir, 'bash.exe'),
+    // win32: nothing to find literally, so the basename is resolved via PATH.
+    expect(resolveExecutable(absentPosixPath, fixture.env, 'win32', fixture.homeDir)).toBe(
+      presentPath,
     );
-    // The same path on a POSIX platform is checked literally, not via PATH.
-    expect(resolveExecutable('/usr/bin/bash', fixture.env, 'linux', fixture.homeDir)).toBeNull();
+    // POSIX: checked literally, never via PATH. Both halves are asserted so that
+    // "literal" means literal and not "happened to be missing" — the absent path
+    // stays null even though `bash` IS on the fixture's PATH, and a path that
+    // does exist resolves to itself.
+    expect(resolveExecutable(absentPosixPath, fixture.env, 'linux', fixture.homeDir)).toBeNull();
+    expect(resolveExecutable(presentPath, fixture.env, 'linux', fixture.homeDir)).toBe(presentPath);
   });
 
   it('fails when the configured interpreter resolves nowhere', () => {
@@ -1482,9 +1505,15 @@ describe('spool boundaries', () => {
     // Duplicated constant: `doctor.ts` and `cortex-capture.sh` each carry the
     // literal. CLAUDE.md requires this class of duplication to be pinned by
     // test rather than by comment.
+    //
+    // Anchored on `$SIZE`, not on the first `-ge` in the file. The script holds
+    // several numeric comparisons, and a first-match scan silently re-points at
+    // whichever one moves above this line: measured, when the fold's
+    // `"${BASH_VERSINFO[0]}" -ge 4` guard was added the assertion began
+    // comparing 4 against 262144 — a real failure, but naming the wrong line.
     const script = fs.readFileSync('hooks/claude/cortex-capture.sh', 'utf8');
-    const match = /-ge\s+(\d+)/.exec(script);
-    expect(match, 'no threshold comparison found in cortex-capture.sh').toBeTruthy();
+    const match = /\$\{SIZE:-0\}"\s+-ge\s+(\d+)/.exec(script);
+    expect(match, 'no spool-size threshold comparison found in cortex-capture.sh').toBeTruthy();
     expect(Number(match![1])).toBe(SPOOL_THRESHOLD_BYTES);
   });
 });

@@ -46,7 +46,30 @@ export function normalizeScopePath(rawPath: string): string {
  * compare time would report "not read" for a file that was read.
  */
 export function normalizeFilePathKey(rawPath: string): string {
-  const resolved = path.resolve(rawPath).replace(/\\/g, '/');
+  // Separators are normalized BEFORE `path.resolve`, never after, and the
+  // ordering is the platform contract rather than a style choice.
+  // `path.resolve` is the only platform-DEPENDENT step in this function: on
+  // win32 it splits on a backslash, on POSIX a backslash is an ordinary
+  // filename byte. Resolving first and stripping backslashes afterwards
+  // therefore made an absolute backslashed path resolve as a *relative* name
+  // off-Windows and come back anchored to `process.cwd()`. Measured:
+  // `\p\src\a.ts` under root `/p` keyed `<cwd>//p/src/a.ts` instead of
+  // `src/a.ts`, so `sessionEditedPathAfter`'s join silently missed and AC #4's
+  // `edited-by-you-since` was unreachable on every non-win32 host while the
+  // reference platform stayed green. A cwd-dependent key is also the exact
+  // thing docs/invariants.md forbids: the three transports run from three
+  // different directories, so one file would be written and looked up under
+  // two keys.
+  //
+  // Backslash-as-separator is deliberately platform-INDEPENDENT here.
+  // `toScopeRelativeKey`'s guard, `normalizeRelativeKey`, `normalizeScopePath`,
+  // `isAbsoluteFileKey` (which accepts a Windows drive on any platform) and
+  // `resolveOnDiskPath` all already treat it that way everywhere — and the
+  // guard in particular decides absolute-vs-relative from the
+  // backslash-normalized string, so this line deciding otherwise put the branch
+  // choice and the branch body on two different platform rules. The trailing
+  // replace stays: on win32 `path.resolve` RETURNS backslashes.
+  const resolved = path.resolve(rawPath.replace(/\\/g, '/')).replace(/\\/g, '/');
   const caseInsensitive = process.platform === 'win32' || process.platform === 'darwin';
   return caseInsensitive ? resolved.toLowerCase() : resolved;
 }

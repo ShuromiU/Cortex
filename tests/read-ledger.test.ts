@@ -340,10 +340,30 @@ describe('read ledger: edited-by-you-since (AC #4)', () => {
 
     advancePast(fx.store.getContentDigest(fx.scopeKey, file)!.recordedAt);
     fs.writeFileSync(file, 'two\n');
-    handleEditEvent(fx.store, fx.sessionId, { file: file.replace(/\//g, '\\') });
+    // Backslashed on EVERY platform, which `file.replace(/\//g, '\\')` was not:
+    // `path.join` has already back-slashed the whole path on win32, so that
+    // expression was a no-op there and the case this test names only ever ran
+    // for real on POSIX — where it failed, while the reference platform ran a
+    // silent duplicate of the plain `edited-by-you-since` test above.
+    const backslashed = file.replace(/[\\/]+/g, '\\');
+    expect(backslashed).toContain('\\');
+    // Platform-explicit, and asserted in BOTH directions so the case cannot go
+    // vacuous again: on win32 this is already the tool's own spelling, so the
+    // re-spelling is an identity; on POSIX it must genuinely differ from the
+    // slashed path the query asks with.
+    expect(backslashed === file).toBe(process.platform === 'win32');
+    // The verdict below is asserted identically on every platform on purpose.
+    // Backslash is a separator on every host in this codebase (see
+    // `normalizeFilePathKey`), so a Windows-shaped target has to JOIN on Linux,
+    // not merely be tolerated there.
+    handleEditEvent(fx.store, fx.sessionId, { file: backslashed });
     const raw = rawDb(fx)
       .prepare("SELECT target FROM events WHERE type = 'edit' LIMIT 1")
       .get() as { target: string };
+    // Raw, exactly as the tool reported it: `insertEvent` stores `target`
+    // verbatim, and the join must not depend on the capture path having
+    // normalized anything on its way in.
+    expect(raw.target).toBe(backslashed);
     expect(raw.target).not.toBe('src/a.ts');
 
     expect(one(fx, file).verdict).toBe('edited-by-you-since');

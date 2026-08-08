@@ -581,7 +581,15 @@ describe('digest index: the 3.1 path migration', () => {
   it('rewrites absolute keys to scope-relative rather than orphaning them', () => {
     const root = tempRoot();
     const { store, sessionId, scopeKey, db } = createStore(root);
-    const absolute = `${root.replace(/\\/g, '/')}/src/legacy.ts`.toLowerCase();
+    // Keyed exactly as Story 3.1 keyed it — `normalizeFilePathKey(opts.path)` —
+    // which folds case on win32/darwin and PRESERVES it on linux. A blanket
+    // `.toLowerCase()` here fabricated a key 3.1 could never have written on a
+    // case-sensitive filesystem: `fs.mkdtempSync` draws its suffix from
+    // [A-Za-z0-9], so the lowered string named a directory that does not exist,
+    // the migration correctly left it absolute (a file outside the scope root
+    // keeps its absolute key), and the test failed on Linux in ~96% of runs
+    // while passing on Windows forever.
+    const absolute = normalizeFilePathKey(path.join(root, 'src/legacy.ts'));
 
     // Seed the row exactly as Story 3.1 wrote it: keyed absolute, bypassing the
     // store helper so the migration has something real to convert.
@@ -661,6 +669,26 @@ describe('digest index: the 3.1 path migration', () => {
     expect(toScopeRelativeKey(`${root}/src/a.ts`, `${root}/`)).toBe('src/a.ts');
     // The root itself is never reduced to an empty key.
     expect(toScopeRelativeKey(root, root)).toBe(root);
+  });
+
+  it('folds case in an absolute key only where the filesystem folds it', () => {
+    // The platform contract behind the fixtures above, asserted directly rather
+    // than left implicit — this is the assertion that would have caught the
+    // hand-lowercased legacy keys. `normalizeFilePathKey` folds case on win32
+    // and darwin and PRESERVES it on linux, where `Src` and `src` are two
+    // directories; a lowercased absolute key is therefore a DIFFERENT file
+    // there, outside the scope root, and keeping it absolute is correct rather
+    // than a miss. Both platforms are asserted, neither is skipped.
+    const caseInsensitive = process.platform === 'win32' || process.platform === 'darwin';
+    const root = normalizeFilePathKey('/Repo/MixedCase');
+    const file = `${root}/Src/A.ts`;
+
+    expect(toScopeRelativeKey(file, root)).toBe(caseInsensitive ? 'src/a.ts' : 'Src/A.ts');
+
+    // The same path with its case flattened: sliced on a folding filesystem,
+    // left whole on a case-sensitive one.
+    const lowered = file.toLowerCase();
+    expect(toScopeRelativeKey(lowered, root)).toBe(caseInsensitive ? 'src/a.ts' : lowered);
   });
 
   it('leaves a file outside the scope root absolute', () => {
@@ -860,8 +888,11 @@ describe('digest index: review repairs', () => {
     setStarted.run('2026-08-01T00:00:00.000Z', older.id);
     setStarted.run('2026-08-02T00:00:00.000Z', newer.id);
 
-    // A legacy absolute row under the NEWER root.
-    const legacy = `${rootB.replace(/\\/g, '/')}/legacy.ts`.toLowerCase();
+    // A legacy absolute row under the NEWER root, keyed as Story 3.1 keyed it.
+    // NOT hand-lowercased: `normalizeFilePathKey` preserves case on linux, and
+    // `fs.mkdtempSync` suffixes are drawn from [A-Za-z0-9], so a lowered key is
+    // a path outside the scope root there and is correctly left absolute.
+    const legacy = normalizeFilePathKey(path.join(rootB, 'legacy.ts'));
     db.prepare(
       `INSERT INTO content_digests
          (scope_key, path, sha256, byte_size, session_id, oversize, read_count, recorded_at)
@@ -881,7 +912,12 @@ describe('digest index: review repairs', () => {
   it('a migration collision keeps the CURRENT row, not the legacy one', () => {
     const root = tempRoot();
     const { store, sessionId, scopeKey, db } = createStore(root);
-    const absolute = `${root.replace(/\\/g, '/')}/x.ts`.toLowerCase();
+    // Keyed as Story 3.1 keyed it, not hand-lowercased — see the fixture note in
+    // 'rewrites absolute keys to scope-relative'. This test has its own fixture,
+    // so its Linux failure was the same defect independently, not a knock-on:
+    // an unmigrated legacy row never collides with the 'x.ts' row, `exists`
+    // misses, `dropLegacy` never runs, and two rows survive.
+    const absolute = normalizeFilePathKey(path.join(root, 'x.ts'));
 
     // Both forms present for one file, as `scopeRootFor` caching null could produce.
     db.prepare(
