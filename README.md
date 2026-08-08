@@ -347,65 +347,6 @@ node dist/transports/cli.js eval-gate --regenerate-baseline budget
 
 The command prints the regressions it is about to bake in, and CI rejects the change unless **the commit that makes it** carries a `Baseline-Regenerated: <reason>` line — a trailer elsewhere in the range cannot launder it, and a placeholder reason is rejected. `eval/kind-coverage.json` is guarded the same way. Regenerating is never the way to turn a red gate green.
 
-## Codex Setup
-
-Codex is the primary Cortex runtime. Use MCP for explicit tools and hooks for quiet capture/reflex behavior.
-
-### Global MCP
-
-Add Cortex to `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.cortex]
-command = "C:\\Program Files\\nodejs\\node.exe"
-args = ["C:\\Claude Code\\cortex\\dist\\transports\\cli.js", "serve"]
-```
-
-### Hooks
-
-Enable Codex hooks and add quiet Cortex wiring to `~/.codex/config.toml`:
-
-```toml
-[features]
-hooks = true
-
-[[hooks.SessionStart]]
-matcher = "^(startup|resume)$"
-
-[[hooks.SessionStart.hooks]]
-type = "command"
-command = 'cmd.exe /d /s /c call "C:/Users/dev/.codex/cortex-hooks/cortex-hook.cmd" session-start'
-timeout = 30
-
-[[hooks.UserPromptSubmit]]
-matcher = ".*"
-
-[[hooks.UserPromptSubmit.hooks]]
-type = "command"
-command = 'cmd.exe /d /s /c call "C:/Users/dev/.codex/cortex-hooks/cortex-hook.cmd" reflect-prompt'
-timeout = 15
-
-[[hooks.PreToolUse]]
-matcher = "(apply_patch|shell_command|Bash|Agent)"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = 'cmd.exe /d /s /c call "C:/Users/dev/.codex/cortex-hooks/cortex-hook.cmd" reflect-pre'
-timeout = 15
-
-[[hooks.PostToolUse]]
-matcher = "(apply_patch|shell_command|Bash|Agent)"
-
-[[hooks.PostToolUse.hooks]]
-type = "command"
-command = 'cmd.exe /d /s /c call "C:/Users/dev/.codex/cortex-hooks/cortex-hook.cmd" post'
-timeout = 15
-```
-
-The wrapper calls `cortex inject-header --quiet` for SessionStart and `dist/transports/hook-entry.js` for hook JSON parsing. The hook bridge owns the consult gate policy; the wrapper should stay a thin passthrough. If Codex asks to trust the new hook entries, approve them through Codex's normal trusted-hash flow.
-
-For new projects, keep the global `~/.codex/AGENTS.md` Cortex section aligned with this consult policy. Codex loads that global guidance outside this repo, while the global hooks above enforce the same fact-silent gate for Cortex-enabled workspaces.
-
 ## MCP Tools
 
 | Tool | Purpose |
