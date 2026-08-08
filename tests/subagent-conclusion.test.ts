@@ -5,6 +5,7 @@ import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { applySchema, initializeMeta } from '../src/db/schema.js';
 import { CortexStore, normalizeNoteSubject } from '../src/db/store.js';
+import { KIND_WEIGHTS } from '../src/memory/kind-weights.js';
 import { HOOK_ACTIONS, handleHookPayload } from '../src/transports/hook-entry.js';
 import {
   SUBAGENT_AUDITED_COUNT_KEY,
@@ -465,6 +466,51 @@ describe('a conclusion is offered once, not on every later turn', () => {
     expect(second, 'the same conclusion was offered twice').toBe('');
   });
 
+  it('does not consume a conclusion the user was never actually shown', () => {
+    // THE DEFECT ALL THREE REVIEW LAYERS FOUND, and the one that quietly
+    // defeated the story's whole deliverable. `getSessionTreeIds` returns
+    // `[root, ...children]`, the root is the live primary, and three or more
+    // root suggestions is the NORMAL state of a working session — so the root
+    // filled `slice(0, 3)`, every child's conclusion was consumed unshown, and
+    // the marker is one-way. Reproduced against `dist/` before the fix.
+    //
+    // MUTATION ANCHOR: marking every collected conclusion instead of only the
+    // shown ones must turn this red.
+    const { store, sessionId } = createTestStore();
+    const cwd = tempCwd();
+    const childId = startChild(store, cwd, 'agent-crowded');
+
+    for (const text of [
+      'Decided to use postgres for the ledger store.',
+      'Decided to use vitest for the harness.',
+      'Decided to use esbuild for the bundler.',
+    ]) {
+      store.insertEpisode({ sessionId, kind: 'message', summary: text });
+    }
+
+    handleHookPayload(
+      store,
+      'subagent-stop',
+      stopPayload('agent-crowded', 'Decided to use kafka for the event bus, rejecting rabbitmq.'),
+      cwd,
+      { requireEngagement: false },
+    );
+
+    const first = handleHookPayload(
+      store,
+      'end-of-turn',
+      JSON.stringify({ cwd: '/repo', agent_used: true }),
+      cwd,
+      { sessionId, requireEngagement: false },
+    );
+    expect(first).not.toBe('');
+    expect(JSON.parse(first).reason, 'the root did not crowd it out').not.toContain('kafka');
+    expect(
+      conclusionsOf(store, childId)[0]!.metadata[CONCLUSION_SURFACED_KEY],
+      'consumed a conclusion the user never saw',
+    ).toBeUndefined();
+  });
+
   it('does not consume a conclusion on a pass that surfaces nothing', () => {
     // Marking at collection time would burn a conclusion on a turn the user
     // never saw. Only a nudge that actually fires consumes one.
@@ -600,7 +646,110 @@ describe('the memory guard allows (AC #3, the half that matters most)', () => {
   });
 });
 
+describe('the memory guard allows — the three fail-closed paths review found', () => {
+  it('does not deny when the agent id was RECYCLED from an earlier conversation', () => {
+    // `getSessionByAgentId` filters by neither parent nor status, deliberately,
+    // so a reused id resolves to a row from a previous conversation and
+    // `getSessionTreeIds` returned the WRONG tree — making the CURRENT
+    // primary's own notes read as "outside". Reproduced in review as a denial
+    // of a note the primary had written seconds earlier: the exact fail-closed
+    // outcome ruling (a) forbids. `captureConclusion` already had this check.
+    const { store, sessionId } = createTestStore();
+    const cwd = tempCwd();
+    startChild(store, cwd, 'agent-recycled-guard');
+
+    // A new conversation takes over; the old child keeps its old parent.
+    store.endSession(sessionId);
+    const newPrimary = store.createSession({ scopeType: 'branch', scopeKey: SCOPE_KEY });
+    const own = store.insertNote({
+      sessionId: newPrimary.id,
+      kind: 'decision',
+      subject: 'retry ceiling',
+      content: 'The ceiling is sixty seconds.',
+    });
+
+    const output = handleHookPayload(
+      store,
+      'guard-memory',
+      guardPayload('agent-recycled-guard', 'mcp__cortex__cortex_resolve', { note_id: own.id }),
+      cwd,
+      { requireEngagement: false },
+    );
+    expect(output, 'denied a note the current conversation just wrote').toBe('');
+  });
+
+  it('does not deny a write whose only collision is on ANOTHER branch', () => {
+    // `insertNote`'s auto-supersede is scope-BLIND while detection is
+    // scope-filtered, so a target can sit on a completely different branch. A
+    // subagent writing a brand-new decision on this branch was denied because
+    // `main` used the same subject — a note it cannot even retrieve, since
+    // retrieval is scope-scoped, so the refusal was unactionable.
+    const { store } = createTestStore();
+    const cwd = tempCwd();
+    startChild(store, cwd, 'agent-crossbranch');
+
+    const other = store.createSession({
+      scopeType: 'branch',
+      scopeKey: 'branch:/repo/.git:/repo:main',
+    });
+    store.insertNote({
+      sessionId: other.id,
+      kind: 'decision',
+      subject: 'api',
+      content: 'The api uses REST.',
+    });
+    store.endSession(other.id);
+
+    const output = handleHookPayload(
+      store,
+      'guard-memory',
+      guardPayload('agent-crossbranch', 'mcp__cortex__cortex_note', {
+        kind: 'decision',
+        subject: 'api',
+        content: 'On this branch the api uses gRPC.',
+      }),
+      cwd,
+      { requireEngagement: false },
+    );
+    expect(output, 'denied for a note on an unrelated branch').toBe('');
+  });
+});
+
 describe('the memory guard denies (AC #3)', () => {
+  it('a note whose content is only whitespace, which still supersedes', () => {
+    // `stringField` required a trimmed non-empty string, so blank content read
+    // as absent and the guard allowed it — while `insertNote` performs no
+    // content validation at all and the write went on to retire the earlier
+    // decision. Reproduced: prose DENIED, whitespace allowed and superseded.
+    const { store } = createTestStore();
+    const cwd = tempCwd();
+    startChild(store, cwd, 'agent-blank');
+    const { noteId } = seedForeignNote(
+      store,
+      'decision',
+      'retry ceiling',
+      'The ceiling is sixty seconds.',
+    );
+
+    for (const content of ['   ', 42 as unknown as string]) {
+      const reason = denial(
+        handleHookPayload(
+          store,
+          'guard-memory',
+          guardPayload('agent-blank', 'mcp__cortex__cortex_note', {
+            kind: 'decision',
+            subject: 'retry ceiling',
+            content,
+          }),
+          cwd,
+          { requireEngagement: false },
+        ),
+      );
+      expect(reason, `allowed content ${JSON.stringify(content)}`).toBeDefined();
+      expect(reason).toContain(noteId);
+    }
+  });
+
   it('a subagent resolving a note from an earlier session', () => {
     const { store } = createTestStore();
     const cwd = tempCwd();
@@ -623,7 +772,7 @@ describe('the memory guard denies (AC #3)', () => {
     );
 
     expect(reason).toBeDefined();
-    expect(reason).toContain('earlier session');
+    expect(reason).toContain('earlier work on this branch');
     expect(reason).toContain(noteId);
     // SM-C3: the reason must say what to do instead, not merely refuse.
     expect(reason).toContain('final message');
@@ -960,12 +1109,141 @@ describe('the shell pre-filter', () => {
     }
   });
 
-  it('covers the three routes and nothing else', () => {
+  it('covers the two memory tools and every shell tool, and nothing else', () => {
+    // `Bash` alone was not enough: this host also exposes `PowerShell`, which
+    // runs the same CLI, and `postToolUse` already knew `shell_command` exists.
+    // A route the guard never sees is worse than one it declines to act on,
+    // because nothing reports the difference.
     expect([...MEMORY_GUARD_TOOLS]).toEqual([
       'mcp__cortex__cortex_note',
       'mcp__cortex__cortex_resolve',
       'Bash',
+      'PowerShell',
+      'shell_command',
     ]);
+  });
+
+  it('denies through a NON-Bash shell tool', () => {
+    const { store } = createTestStore();
+    const cwd = tempCwd();
+    startChild(store, cwd, 'agent-pwsh');
+    const { noteId } = seedForeignNote(
+      store,
+      'decision',
+      'retry ceiling',
+      'The ceiling is sixty seconds.',
+    );
+
+    const reason = denial(
+      handleHookPayload(
+        store,
+        'guard-memory',
+        guardPayload('agent-pwsh', 'PowerShell', {
+          command: `cortex delete-memory ${noteId} --yes`,
+        }),
+        cwd,
+        { requireEngagement: false },
+      ),
+    );
+    expect(reason).toBeDefined();
+  });
+
+  it('sees a target nested inside a quoted `bash -c` payload', () => {
+    // `tokenizeCommand` treats a quoted region as one token, so the whole
+    // payload collapsed into a single token and `includes('delete-memory')`
+    // was false — the bare form was denied, the wrapped one allowed. This
+    // target is sitting there in plain text; treating it as unresolvable was
+    // the "cannot tell" excuse applied to a case we plainly can tell.
+    const { store } = createTestStore();
+    const cwd = tempCwd();
+    startChild(store, cwd, 'agent-nested');
+    const { noteId } = seedForeignNote(
+      store,
+      'decision',
+      'retry ceiling',
+      'The ceiling is sixty seconds.',
+    );
+
+    const reason = denial(
+      handleHookPayload(
+        store,
+        'guard-memory',
+        guardPayload('agent-nested', 'Bash', {
+          command: `bash -c "cortex delete-memory ${noteId} --yes"`,
+        }),
+        cwd,
+        { requireEngagement: false },
+      ),
+    );
+    expect(reason).toBeDefined();
+  });
+
+  it('scans EVERY memory subcommand on a chained line, not just the first', () => {
+    // Three reproduced bypasses shared one cause: the scan returned on its
+    // first recognised subcommand. So putting a harmless in-tree command first
+    // disarmed the guard for everything after it — and the most destructive
+    // route ruling (b) exists to cover stopped covering, silently.
+    const { store, sessionId } = createTestStore();
+    const cwd = tempCwd();
+    startChild(store, cwd, 'agent-chain');
+    const own = store.insertNote({
+      sessionId,
+      kind: 'decision',
+      subject: 'own subject',
+      content: 'Mine.',
+    });
+    const { noteId: foreign } = seedForeignNote(
+      store,
+      'decision',
+      'retry ceiling',
+      'The ceiling is sixty seconds.',
+    );
+
+    for (const command of [
+      `cortex note-resolve --id ${own.id} && cortex delete-memory ${foreign} --yes`,
+      `cortex edit-memory ${own.id} --text "x" && cortex delete-memory ${foreign} --yes`,
+      `cortex delete-memory missing-id --yes; cortex delete-memory ${foreign} --yes`,
+    ]) {
+      const reason = denial(
+        handleHookPayload(
+          store,
+          'guard-memory',
+          guardPayload('agent-chain', 'Bash', { command }),
+          cwd,
+          { requireEngagement: false },
+        ),
+      );
+      expect(reason, `allowed: ${command}`).toBeDefined();
+      // The most destructive verb present names the action, so a chain
+      // containing a delete is never described as an edit.
+      expect(reason).toContain('delete');
+    }
+  });
+
+  it('does not let a later command’s --yes arm an earlier delete', () => {
+    // `flagValue`/`--yes` used to scan the whole token list, so flags leaked
+    // across chained commands in both directions.
+    const { store } = createTestStore();
+    const cwd = tempCwd();
+    startChild(store, cwd, 'agent-flagleak');
+    const { noteId } = seedForeignNote(
+      store,
+      'decision',
+      'retry ceiling',
+      'The ceiling is sixty seconds.',
+    );
+
+    const output = handleHookPayload(
+      store,
+      'guard-memory',
+      guardPayload('agent-flagleak', 'Bash', {
+        command: `cortex delete-memory ${noteId} && echo --yes`,
+      }),
+      cwd,
+      { requireEngagement: false },
+    );
+    // A preview, because its own command carried no `--yes`.
+    expect(output).toBe('');
   });
 
   it('is never consulted for a read-only Cortex tool', () => {
@@ -982,6 +1260,50 @@ describe('the shell pre-filter', () => {
       { requireEngagement: false },
     );
     expect(output).toBe('');
+  });
+});
+
+// ── AD-5: the two registries that fail SILENTLY ──────────────────────
+
+describe('the new episode kind is registered where it must be', () => {
+  // The locked eval suite claimed in its own comment to turn a missing
+  // `episodeState` / `episodeImportance` registration into a red build. It does
+  // not, and the review proved it: `seed.ts` writes `state` and `importance`
+  // from the fixture's literal values and never calls either function, and
+  // `checkKindCoverage` reads `KIND_WEIGHTS` only. Both functions were
+  // referenced ONLY from the projection in `store.ts` and asserted by nothing,
+  // so deleting the registrations left gate and suite green with the kind
+  // silently mis-ranked. These are the assertions the comment promised.
+  it('lands hot with its own importance when a real episode projects', () => {
+    const { store } = createTestStore();
+    const cwd = tempCwd();
+    const childId = startChild(store, cwd, 'agent-registry');
+
+    handleHookPayload(
+      store,
+      'subagent-stop',
+      stopPayload('agent-registry', 'A conclusion worth ranking.'),
+      cwd,
+      { requireEngagement: false },
+    );
+
+    const item = store.db
+      .prepare(`SELECT kind, state, importance FROM memory_items WHERE kind = ?`)
+      .get(`episode:${SUBAGENT_CONCLUSION_KIND}`) as
+      | { kind: string; state: string; importance: number }
+      | undefined;
+
+    expect(item, 'the conclusion never projected').toBeDefined();
+    // MUTATION ANCHORS: removing either registration from `src/memory/items.ts`
+    // drops these to the silent fall-through `'warm'` / 0.6.
+    expect(item!.state, 'episodeState fell through to its default').toBe('hot');
+    expect(item!.importance, 'episodeImportance fell through to its default').toBeCloseTo(0.75, 5);
+  });
+
+  it('carries a retrieval weight of its own', () => {
+    // The third registry, which the gate DOES read — asserted here so all three
+    // sit together rather than one being pinned somewhere else entirely.
+    expect(KIND_WEIGHTS[`episode:${SUBAGENT_CONCLUSION_KIND}`]).toBeDefined();
   });
 });
 

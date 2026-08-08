@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { deriveSpoolPath, SCAN_STATUS_KEY } from '../capture/spool.js';
 import {
   SUBAGENT_AMBIGUOUS_COUNT_KEY,
+  MEMORY_GUARD_DENIED_COUNT_KEY,
+  MEMORY_GUARD_KEY,
   SUBAGENT_AUDITED_COUNT_KEY,
   SUBAGENT_BRIEFED_COUNT_KEY,
   SUBAGENT_DISPATCH_COUNT_KEY,
@@ -1351,6 +1353,8 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
   let dispatchPaired = 0;
   let dispatchBriefed = 0;
   let dispatchAmbiguous = 0;
+  let guardFirstSeen: string | null = null;
+  let guardDenied = 0;
   let dispatchAudited = 0;
   let dispatchMispaired = 0;
   let dispatchCountersCorrupt = false;
@@ -1383,6 +1387,11 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
           dispatchMispaired = mispaired.value;
           dispatchCountersCorrupt =
             dispatchCountersCorrupt || audited.corrupt || mispaired.corrupt;
+        }
+        const firstGuard = getMetaValue(db, MEMORY_GUARD_KEY) ?? '';
+        guardFirstSeen = firstGuard.length > 0 ? firstGuard : null;
+        if (guardFirstSeen !== null) {
+          guardDenied = metaCount(db, MEMORY_GUARD_DENIED_COUNT_KEY);
         }
         const firstSeen = getMetaValue(db, SUBAGENT_START_KEY) ?? '';
         subagentFirstSeen = firstSeen.length > 0 ? firstSeen : null;
@@ -1566,6 +1575,27 @@ export function runDoctor(options: DoctorOptions): DoctorReport {
             fix: 'Re-run `cortex install` so the SubagentStart and PreToolUse(Agent) wirings and scripts are current, then dispatch a subagent and re-run `cortex doctor`.',
           },
     );
+
+    // ── Memory guard (FR-19 AC #3) ────────────────────────────────────
+    //
+    // What the guard has actually DONE. `guard-matcher` proves the wiring
+    // EXISTS; this proves it ACTS, and AD-12 draws exactly that distinction.
+    // Review found the epic's only blocking hook shipping with no counter at
+    // all, so neither over-blocking — the worst outcome it can produce — nor a
+    // route going dark was visible from any Cortex surface.
+    //
+    // Conditional on having fired at least once, and REPORTED rather than
+    // warned on: a refusal is the design working, and warning on it would be
+    // the cries-wolf half of AD-12. What a reader needs is the rate, so an
+    // unexpected climb is legible.
+    if (guardFirstSeen !== null) {
+      add({
+        id: 'memory-guard',
+        label: 'Memory guard',
+        status: 'pass',
+        detail: `${plural(guardDenied, 'refusal', 'refusals')} since ${guardFirstSeen} — a subagent tried to change memory from earlier work on this branch`,
+      });
+    }
   }
 
   const candidates = findAdoptionCandidates(identity);

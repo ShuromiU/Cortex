@@ -273,6 +273,17 @@ export function resolveConclusionText(
  */
 export const CONCLUSION_SURFACED_KEY = 'surfaced_at';
 
+/**
+ * The metadata key marking a pairing audit already booked for this subagent.
+ *
+ * Same once-only discipline as {@link CONCLUSION_SURFACED_KEY} and for a
+ * sharper reason: the host can fire `SubagentStop` more than once for one agent,
+ * and a repeated audit inflates the DENOMINATOR of the mispairing rate — the
+ * one counter in this epic that warns. `recordSubagentConclusion` was already
+ * idempotent; the audit beside it was not.
+ */
+export const CONCLUSION_AUDITED_KEY = 'audited_at';
+
 /** The conclusion episode for a session, if it has one. */
 export function findSubagentConclusion(
   store: CortexStore,

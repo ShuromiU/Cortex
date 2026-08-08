@@ -22,6 +22,7 @@ import { writeDigestIndex } from '../capture/digest-index.js';
 import {
   ensureScopedSession,
   recordSubagentAmbiguity,
+  recordMemoryGuardDenial,
   recordSubagentAudit,
   recordSubagentBriefed,
   recordSubagentDispatch,
@@ -37,6 +38,7 @@ import {
   summarizeDispatchPrompt,
 } from '../query/subagent-brief.js';
 import {
+  CONCLUSION_AUDITED_KEY,
   conclusionSurfaced,
   findSubagentConclusion,
   markConclusionSurfaced,
@@ -861,14 +863,23 @@ function guardMemory(store: CortexStore, payload: Record<string, unknown>): stri
       },
     });
 
-    // The reason lands in the SUBAGENT's context, so it is billed to the
-    // subagent's session — the same rule Story 5.2 applied to the brief. A
-    // channel nobody accounts for is how the ledger stops describing reality.
-    const primary = store.getCurrentSession();
-    const child = primary?.scope_key
-      ? store.getSessionByAgentId(primary.scope_key, identity.agentId)
-      : undefined;
-    bookHookInjection(store, 'memory_guard_deny', denial.reason, child?.id);
+    // Bookkeeping AFTER the decision is built, and inside its own guard.
+    // Previously a throw from the ledger write fell into the fail-open catch
+    // below and converted a computed denial into an allow — consistent with the
+    // contract, but avoidable, and enforcement should not hinge on accounting.
+    try {
+      // The reason lands in the SUBAGENT's context, so it is billed to the
+      // subagent's session — the same rule Story 5.2 applied to the brief. A
+      // channel nobody accounts for is how the ledger stops describing reality.
+      const primary = store.getCurrentSession();
+      const child = primary?.scope_key
+        ? store.getSessionByAgentId(primary.scope_key, identity.agentId)
+        : undefined;
+      bookHookInjection(store, 'memory_guard_deny', denial.reason, child?.id);
+      recordMemoryGuardDenial(store);
+    } catch {
+      // Advisory. The denial stands.
+    }
 
     return output;
   } catch {
@@ -902,6 +913,30 @@ function auditPairing(store: CortexStore, payload: Record<string, unknown>): voi
     const dispatch = store.getSubagentDispatchByConsumer(hostSessionId, identity.agentId);
     if (!dispatch?.toolUseId) {
       return;
+    }
+
+    // ONCE per subagent, marked on the child — the same discipline
+    // `recordSubagentConclusion` already had, and review caught this half
+    // missing it. The host can send a second `SubagentStop` for one agent (the
+    // code above says so), and a repeated audit inflates the DENOMINATOR of the
+    // one counter in this epic that warns, so `mispaired / audited` stops being
+    // a ratio over the same population — the exact property its docstring
+    // claims to hold.
+    const primary = store.getCurrentSession();
+    const child = primary?.scope_key
+      ? store.getSessionByAgentId(primary.scope_key, identity.agentId)
+      : undefined;
+    if (child && child.parent_session_id === primary?.id) {
+      const conclusion = findSubagentConclusion(store, child.id);
+      if (conclusion) {
+        if (conclusion.metadata[CONCLUSION_AUDITED_KEY] !== undefined) {
+          return;
+        }
+        store.setEpisodeMetadata(conclusion.id, {
+          ...conclusion.metadata,
+          [CONCLUSION_AUDITED_KEY]: new Date().toISOString(),
+        });
+      }
     }
 
     const sidecar = readDispatchSidecar(
@@ -988,9 +1023,10 @@ function endOfTurn(
   writeEngagement(AGENT_USED_KEY, 'false');
 
   let suggestions;
-  // The conclusions considered on this pass. Marked only if the nudge actually
-  // fires — a pass that surfaces nothing must not consume them.
-  const offeredConclusions: ParsedEpisode[] = [];
+  // The conclusion each eligible child carries, keyed by that child's session
+  // id. Consumed at the END, and only for the children whose suggestion
+  // actually reached the user — see the marking loop below.
+  const conclusionBySession = new Map<string, ParsedEpisode>();
   try {
     const sessionId = resolveSessionId(store, cwd, options);
     // The nudge fires only when a subagent ran, and a subagent's evidence lives
@@ -1015,15 +1051,20 @@ function endOfTurn(
       if (conclusionSurfaced(conclusion)) {
         return false;
       }
-      offeredConclusions.push(conclusion);
+      conclusionBySession.set(id, conclusion);
       return true;
     });
 
+    // Each suggestion keeps the session it came from, so the marking loop below
+    // can tell which conclusions actually reached the user. Without that link
+    // the marker consumed every collected conclusion whether or not it was
+    // shown — and a root-first ordering plus `slice(0, 3)` meant the common case
+    // was consuming all of them and showing none.
     const seen = new Set<string>();
     suggestions = eligible
-      .flatMap(id => suggestNotes(store, id))
-      .filter(suggestion => suggestion.confidence >= STOP_NUDGE_CONFIDENCE_THRESHOLD)
-      .filter(suggestion => {
+      .flatMap(id => suggestNotes(store, id).map(suggestion => ({ suggestion, sessionId: id })))
+      .filter(entry => entry.suggestion.confidence >= STOP_NUDGE_CONFIDENCE_THRESHOLD)
+      .filter(({ suggestion }) => {
         const key = `${suggestion.kind}\u0000${suggestion.content}`;
         if (seen.has(key)) {
           return false;
@@ -1039,20 +1080,36 @@ function endOfTurn(
     return '';
   }
 
-  const shown = suggestions
-    .slice(0, 3)
-    .map(suggestion => `- ${suggestion.kind}: ${truncateSuggestion(suggestion.content)}`);
+  const shownEntries = suggestions.slice(0, 3);
+  const shown = shownEntries.map(
+    entry => `- ${entry.suggestion.kind}: ${truncateSuggestion(entry.suggestion.content)}`,
+  );
   const reason = [
     'Cortex found candidate notes from this turn:',
     ...shown,
     'Write the load-bearing ones with cortex_note(kind, content); if none apply, reply DONE.',
   ].join('\n');
 
-  // Consumed here and nowhere earlier: the nudge is about to fire, so these
-  // conclusions have genuinely been offered. Marking them at collection time
-  // instead would burn a conclusion on a pass that showed the user nothing.
-  for (const conclusion of offeredConclusions) {
-    markConclusionSurfaced(store, conclusion);
+  // **Only the conclusions the user is actually about to SEE.**
+  //
+  // The first version marked every conclusion collected above, reasoning that
+  // the nudge was firing so they had "genuinely been offered". All three review
+  // layers reproduced why that is false: `getSessionTreeIds` returns
+  // `[root, ...children]`, the root is the live primary, and three or more root
+  // suggestions is the NORMAL state of a working session — so the root fills
+  // `slice(0, 3)`, every child's conclusion is consumed unshown, and the marker
+  // is one-way. The story's entire deliverable evaporated in the common case
+  // while every test stayed green.
+  //
+  // A conclusion that ranked below the cut stays unmarked and is offered again
+  // on a later turn. That can show it once the root has less to say, which is
+  // the correct direction: showing something twice costs a line; losing it
+  // costs the run that produced it.
+  const shownSessions = new Set(shownEntries.map(entry => entry.sessionId));
+  for (const [sessionId, conclusion] of conclusionBySession) {
+    if (shownSessions.has(sessionId)) {
+      markConclusionSurfaced(store, conclusion);
+    }
   }
 
   bookHookInjection(store, 'stop_nudge', reason);

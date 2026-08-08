@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { findPosixTool } from './posix-tools.js';
 import { renderHookScript } from '../src/query/install.js';
 import { REQUIRED_WIRING } from '../src/query/doctor.js';
-import { SHELL_MEMORY_COMMANDS } from '../src/query/memory-guard.js';
+import { SHELL_MEMORY_COMMANDS, SHELL_TOOL_NAMES } from '../src/query/memory-guard.js';
 
 /**
  * Executes the real PostToolUse hook script. Nothing else can: the script is
@@ -654,6 +654,29 @@ describe.skipIf(!canRun)('cortex-subagent.sh', () => {
     });
   }
 
+  it('exits 0 even when the Node invocation itself fails (Trap 1)', () => {
+    // THE STORY'S OWN NAMED WORST OUTCOME, and it was pinned by nothing until
+    // the review caught it. The host dispatches a blocking error for
+    // `SubagentStop`, so a non-zero exit here can stop a subagent finishing.
+    // The Node-side half is covered (`subagentStop` swallows a throwing store);
+    // this is the shell-side half.
+    //
+    // MUTATION ANCHOR, proven: deleting the script's trailing `exit 0` turns
+    // this from 0 into 127, and before this test the whole suite stayed green.
+    // Every other `status === 0` assertion in this file is on a path that exits
+    // BEFORE Node, so none of them could see it.
+    for (const action of ['subagent-stop', 'subagent-start', 'dispatch-pre']) {
+      const result = runSubagentHook(
+        { hook_event_name: 'SubagentStop', agent_id: 'a1b2c3d4e5f60718' },
+        'enabled=true\n',
+        action,
+      );
+      // The placeholder is not an executable, so Node genuinely failed here.
+      expect(result.stderr.length, `${action} did not reach Node`).toBeGreaterThan(0);
+      expect(result.status, `${action} leaked a non-zero exit to the host`).toBe(0);
+    }
+  });
+
   it('reaches Node for a subagent’s cortex_note without any text screening', () => {
     const result = runSubagentHook(
       {
@@ -693,30 +716,14 @@ describe('cortex-subagent.sh — structure', () => {
     for (const line of nodeLines) {
       expect(line.match(/__CORTEX_NODE__/g) ?? [], line).toHaveLength(1);
     }
-    // Exactly one jq OUTSIDE the case — the payload read — so it is paid once
-    // however many arms exist. Story 5.3's `guard-memory` arm adds more, and
-    // that is the point rather than an exception: its matcher includes `Bash`,
-    // so it fires on every command the agent runs, and the way it honours N-4
-    // is by deciding in SHELL and spawning Node only for the rare call that
-    // survives both gates. So the assertion is placement, not a count — a jq
-    // added anywhere else still fails, and the arm's own jq calls are pinned to
-    // sit before Node in the test below.
-    const caseLine = lines.findIndex(line => /^case\s/.test(line.trim()));
-    expect(caseLine).toBeGreaterThan(-1);
-    const preamble = lines.slice(0, caseLine).join('\n');
-    expect(preamble.match(/\bjq\b/g) ?? []).toHaveLength(1);
-
-    const armOf = (index: number): string | undefined => {
-      for (let cursor = index; cursor >= 0; cursor -= 1) {
-        const opened = /^\s{2}([a-z][a-z-]*|\*)\)\s*$/.exec(lines[cursor]!);
-        if (opened) return opened[1];
-      }
-      return undefined;
-    };
-    lines.forEach((line, index) => {
-      if (index <= caseLine || !/\bjq\b/.test(line)) return;
-      expect(armOf(index), `jq inside the \`${armOf(index)}\` arm`).toBe('guard-memory');
-    });
+    // EXACTLY ONE jq in the whole script, and it sits outside every arm — the
+    // stronger form of the old "one jq" rule, which Story 5.3's review turned
+    // from tidiness into a measured requirement. `guard-memory` fires before
+    // every command the agent runs, and the first version read four fields with
+    // four separate jq processes: 383 ms per parent command against a bash+cat
+    // floor of ~105 ms. Process spawns dominate on this platform, so a second
+    // jq anywhere is a real regression on the hottest path in the product.
+    expect(body.match(/\bjq\b/g) ?? []).toHaveLength(1);
     // No SQLite, no network, and nothing that blocks waiting on a file.
     for (const banned of ['sqlite', 'curl', 'wget', 'sleep', 'sha256sum']) {
       expect(body, `subagent hook must not use ${banned}`).not.toContain(banned);
@@ -780,6 +787,47 @@ describe('cortex-subagent.sh — structure', () => {
     expect(bashGate, 'no Bash command-text gate in the guard arm').toBeGreaterThan(-1);
     expect(nodeLine).toBeGreaterThan(agentGate);
     expect(nodeLine).toBeGreaterThan(bashGate);
+  });
+
+  it('routes tool names by an ALLOW-LIST, so an unknown tool never reaches Node', () => {
+    // The first version tested `[ "$GUARD_TOOL" = "Bash" ]` and fell through to
+    // Node for every other name. `doctor` blesses a catch-all matcher as
+    // "broader than canonical and therefore fine", so that configuration
+    // removed the only gate between this arm and N-4 — Node on every subagent
+    // tool call. Found in review; the shape, not the string, is what matters.
+    const lines = fs.readFileSync(SUBAGENT_SCRIPT, 'utf8').split(/\r?\n/);
+    const armStart = lines.findIndex(line => /^\s{2}guard-memory\)\s*$/.test(line));
+    const armEnd = lines.findIndex(
+      (line, index) => index > armStart && /^\s{4};;\s*$/.test(line),
+    );
+    const arm = lines.slice(armStart, armEnd);
+
+    const routeCase = arm.findIndex(line => /case "\$GUARD_TOOL" in/.test(line));
+    expect(routeCase, 'the guard arm does not route on the tool name').toBeGreaterThan(-1);
+    // The LAST `esac` in the arm closes this switch — the shell-command screen
+    // nests one inside it, so the first `esac` closes the inner one.
+    const routes = arm.slice(routeCase);
+    // A default arm that exits is what makes it an allow-list rather than a
+    // deny-list; without it every unlisted tool falls through to Node.
+    const fallthrough = routes.findIndex(line => /^\s{6}\*\)\s*$/.test(line));
+    expect(fallthrough, 'no default route in the tool switch').toBeGreaterThan(-1);
+    expect(routes.slice(fallthrough, fallthrough + 3).join('\n')).toContain('exit 0');
+  });
+
+  it('screens the same shell tool names the guard module knows about', () => {
+    // `Bash` alone missed `PowerShell`, which this host also exposes and which
+    // runs the same CLI. Two lists in two languages: a name dropped from the
+    // shell `case` disables the guard for that tool while every TypeScript test
+    // still passes, because the guard would simply never be asked.
+    const script = fs.readFileSync(SUBAGENT_SCRIPT, 'utf8');
+    const armStart = script.indexOf('guard-memory)');
+    // `[\s\S]*?` and `\s*` rather than `\n`: this file is CRLF in the working
+    // tree, and a `\n`-anchored regex silently matches nothing here.
+    const match = /case "\$GUARD_TOOL" in[\s\S]*?\s([A-Za-z_|]+)\)\s*case "\$GUARD_CMD"/.exec(
+      script.slice(armStart),
+    );
+    expect(match, 'no shell-tool route in the guard arm').not.toBeNull();
+    expect(match![1]!.split('|').sort()).toEqual([...SHELL_TOOL_NAMES].sort());
   });
 
   it('screens the same shell commands the guard module knows about', () => {

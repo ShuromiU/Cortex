@@ -396,6 +396,39 @@ export function recordSubagentAmbiguity(store: CortexStore): void {
 }
 
 /**
+ * Times the memory guard actually refused a subagent (FR-19 AC #3).
+ *
+ * **Cortex's first blocking hook shipped with no observability at all**, which
+ * review caught: every other surface in this epic got a counter and a
+ * conditional `doctor` row, and the one that can BLOCK THE USER'S WORK got
+ * neither. `doctor`'s `guard-matcher` row checks that the wiring exists, never
+ * that it acts — and that is precisely the distinction AD-12 draws. Without
+ * this number, over-blocking (the worst outcome this guard can produce) and a
+ * route going dark (the second worst) are both invisible from every surface.
+ *
+ * REPORTED, never warned on. A denial is the design working: it means a
+ * subagent tried to retire earlier work and was stopped. What a reader needs is
+ * the rate, so an unexpected climb is visible — the same rule the refusal count
+ * carries, for the same reason.
+ */
+export const MEMORY_GUARD_DENIED_COUNT_KEY = 'memory_guard_denied_count';
+
+/** First denial, so a store predating the guard is not read as "never fires". */
+export const MEMORY_GUARD_KEY = 'memory_guard_first_seen';
+
+/** Record that the memory guard refused a call. Advisory; never costs the denial. */
+export function recordMemoryGuardDenial(store: CortexStore): void {
+  try {
+    if (store.getMeta(MEMORY_GUARD_KEY) === undefined) {
+      store.setMeta(MEMORY_GUARD_KEY, new Date().toISOString());
+    }
+    store.incrementMetaCounter(MEMORY_GUARD_DENIED_COUNT_KEY);
+  } catch {
+    // Advisory only.
+  }
+}
+
+/**
  * Record the outcome of one pairing audit (FR-19, Story 5.3).
  *
  * Both counters move together, so `mispaired / audited` is always a ratio over
