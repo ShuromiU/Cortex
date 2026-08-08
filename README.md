@@ -62,17 +62,85 @@ Cortex is retrieval-first and pull-based. It stores decisions, blockers, command
 
 ## Install
 
-From npm:
+> **Cortex is not published to npm, and the name is taken.** `npm install -g cortex-memory`
+> installs an unrelated package by a different author that happens to share the name. Install from
+> a checkout, as below. If this is ever published it will need a different name or a scope.
+
+### On a new machine, start to finish
+
+**Prerequisites.** Cortex's hooks are shell scripts, so two of these are not optional on any
+platform:
+
+| Requirement | Why | Check |
+|---|---|---|
+| Node.js ≥ 18 | the CLI, the MCP server, every hook that does real work | `node --version` |
+| git | Cortex scopes memory per repository and per branch | `git --version` |
+| **bash** | every hook script is bash. On Windows, Git Bash — installed with Git for Windows | `bash --version` |
+| **jq** | the hooks parse their JSON payload in shell, before Node | `jq --version` |
+| Claude Code | the host that fires the hooks | `claude --version` |
+
+On Windows, install jq with `winget install jqlang.jq`. On macOS, `brew install jq`. On Debian or
+Ubuntu, `sudo apt install jq`. Without jq every hook exits silently and Cortex captures nothing —
+`cortex doctor` reports it by name.
+
+**Then:**
 
 ```bash
-npm install -g cortex-memory
-```
-
-From a local checkout:
-
-```bash
+git clone https://github.com/ShuromiU/Cortex.git cortex
+cd cortex
+npm install
+npm run build
 npm install -g .
+cortex install
 ```
+
+`npm install -g .` links the global `cortex` command to this checkout — it does not copy it. That
+is deliberate and worth understanding: **the checkout is the live installation.** `npm run build`
+there changes the behaviour of every project on the machine, and switching branches in it changes
+Cortex everywhere until you rebuild.
+
+`cortex install` writes the hook scripts with your Node and Cortex paths baked in, merges the
+wiring into `~/.claude/settings.json`, registers the MCP server, adds Cortex's runtime artifacts to
+the project's `.gitignore`, and finishes by running the diagnostic. It is idempotent — a second run
+produces byte-identical files and says `Nothing changed`.
+
+**Verify:**
+
+```bash
+cortex doctor
+```
+
+Every failing check names its own fix. Two failures are expected on a brand-new install and say so:
+the store and engagement state are created by your first session, or immediately by
+`cortex inject-header --quiet`.
+
+**Restart Claude Code** after installing, so it picks up the new hook wiring and the MCP server.
+
+### Upgrading an existing machine
+
+```bash
+cd <your cortex checkout>
+git pull
+npm install
+npm run build
+cortex install
+cortex doctor
+```
+
+`cortex install` is what refreshes hook scripts whose templates changed; `cortex doctor` reports a
+stale script as a hook-currency failure rather than letting it run silently out of date. Your memory
+stores live outside the repository at `~/.cortex/projects/`, so nothing here touches them, and
+schema migrations run automatically the first time each store is opened.
+
+### Uninstalling
+
+```bash
+npm uninstall -g cortex-memory
+```
+
+That removes the command and stops the hooks resolving. Your memory is not deleted — the stores stay
+at `~/.cortex/projects/` until you remove them yourself, and the hook entries stay in
+`~/.claude/settings.json` until you delete them there.
 
 ## Claude Code Setup
 
@@ -855,6 +923,46 @@ A checkpoint can report `busy`, which is normal rather than a failure: another C
 
 Kept for readers upgrading from an earlier build. Nothing below is required
 to use Cortex today.
+
+### R1 — trust, operability, economy, subagents (2026-04 → 2026-08)
+
+Six epics, 27 stories. V3 made Cortex pull-based; R1 made it something you can trust, operate,
+afford and delegate through. Each epic is one sentence, and what it does *not* do is stated with it.
+
+- **Epic 0 — Session identity.** A session is `(scope_key, agent_id)`, so a subagent's reads, edits
+  and commands land in its own session instead of being merged into the timeline of the agent that
+  dispatched it.
+- **Epic 1 — Trust.** A remembered item now carries whether it is still *agreed*: contradictions are
+  detected at write time by an offline lexical rule, both sides render `[contested]`, superseded
+  decisions demote without closing an open contest, rejected alternatives survive at recall, and
+  retrieval quality is locked in CI against reference baselines. *Measured caveat: contradiction
+  detection is deliberately strict and has not fired in production use — see below.*
+- **Epic 2 — Operability.** `cortex doctor` diagnoses the whole installation and every failing check
+  names its fix; `cortex install` sets it up idempotently; memory can be listed, inspected, corrected
+  and deleted; the store moved out of the project root to `~/.cortex/projects/`; the write-ahead log
+  is bounded.
+- **Epic 3 — Read ledger and token P&L.** Cortex hashes file content on read, so it can answer
+  "have I already read this, and has it changed?" by re-hashing rather than by mtime — and it
+  accounts for what every retrieval channel costs. **The credit side is evidence-only: `Saved: 0` is
+  the honest state, and the report says why.**
+- **Epic 4 — Economy.** Searches that found nothing are remembered so they are not repeated;
+  command pass/fail is captured from the session transcript, because the hook payload carries no
+  exit code and a host-failed command fires no hook at all; verified read substitution can refund a
+  provably-unchanged re-read (opt-in, off by default); derived data is garbage-collected on a bound.
+  **Four requirements were withdrawn across R1 rather than shipped weakly** — file cards (4.1/4.2),
+  the "would this still pass?" cache (FR-15), and FR-10/FR-11 — each with the measurement that
+  killed it recorded in its story.
+- **Epic 5 — Subagent memory.** A subagent gets its own session at dispatch, is briefed
+  automatically from its dispatch description, and **its conclusion survives it** — recorded
+  automatically, then offered to the parent as a suggestion rather than written as memory nobody
+  agreed to. A subagent is refused if it tries to retire memory from earlier work on the branch.
+
+**What R1 did not achieve, stated because the alternative is a claim nobody checked.** Across ten
+real projects and 732 authored notes, contradiction detection has fired **zero** times. That is not
+evidence it is broken — two genuinely opposing decisions on one subject are rare, and the detector
+is built strict on purpose because one that cries wolf gets ignored — but `[contested]` and its
+demotion rules have never run on real data outside tests. The memory layer is used; the trust layer
+is not yet exercised.
 
 ### What Changed In V2
 
