@@ -10,6 +10,17 @@ dist/
 .cortex.agent-used
 .claude/
 .codex/
-.refcertify/
+
+# Cortex runtime artifacts
+.cortex.db-wal
+.cortex.db-shm
 .cortex.index
 .cortex.index.tmp-*
+
+# Cortex runtime artifacts
+.cortex.substitution
+.cortex.turn-reads
+
+# Local tooling state, never part of the package
+.refcertify/
+.serena/

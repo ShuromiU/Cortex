@@ -289,7 +289,7 @@ export function writeSessionSummary(
  * Story 5.3 is the only story that would ever have given this function a
  * caller, and giving it one would have contradicted the AC it sits next to.
  * It had zero runtime callers at deletion — `find_referencing_symbols` returned
- * only the `src/index.ts` barrel, and `certify_refs` added only
+ * only the `src/index.ts` barrel, and text search added only
  * `tests/consolidate.test.ts` (`lspOnly: 0`, every text-only hit a doc or that
  * test), so nothing on the live hook path changes.
  *

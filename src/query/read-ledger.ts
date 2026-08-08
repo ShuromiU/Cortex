@@ -691,7 +691,7 @@ function collapse(value: string): string {
   // The class is written with ESCAPES, never literal control bytes.
   // Authoring it literally put a raw NUL into this file - which is exactly
   // how `src/transports/hook-entry.ts` became invisible to ripgrep, grep and
-  // `certify_refs`'s text pass, hiding one of four copies of `findDbPath`.
+  // every text search, hiding one of four copies of `findDbPath`.
   // A literal control character is also unreviewable in a diff and does not
   // survive a copy-paste. Replaced with a space rather than deleted, so two
   // words separated only by a control character do not silently fuse.

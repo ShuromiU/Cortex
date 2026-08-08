@@ -319,7 +319,7 @@ describe('no ECONOMICS surface can emit a permission decision (AC #7, AD-7)', ()
 
 describe('no shipped source file carries a raw control byte', () => {
   it('is greppable — every source file, no exceptions', () => {
-    // `grep`, `ripgrep` and `certify_refs`'s text pass all classify a file
+    // `grep` and `ripgrep` both classify a file
     // containing a NUL as binary and skip it **silently**. That is how one of
     // four copies of `findDbPath` stayed invisible while a grep-only
     // enumeration returned a confident, complete-looking, wrong answer — the
