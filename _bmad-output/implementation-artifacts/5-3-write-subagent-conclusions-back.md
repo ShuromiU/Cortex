@@ -4,7 +4,7 @@ baseline_commit: 0c60aa42999fa87ca1d79222a002f63d11afc8a3
 
 # Story 5.3: Write subagent conclusions back
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
