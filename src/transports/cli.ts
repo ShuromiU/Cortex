@@ -330,6 +330,35 @@ const INSTALL_BADGE: Record<InstallAction['outcome'], string> = {
  * red report and a non-zero status with nothing wrong, which aborts a scripted
  * or Dockerfile install at its first step.
  */
+/**
+ * The version `cortex --version` reports, read from `package.json` at runtime.
+ *
+ * It was a hardcoded `'0.1.0'` literal, which is a duplicated constant with no
+ * pin, and it drifted the first time it could: 0.1.1 was published, installed
+ * from the registry, and reported itself as 0.1.0. A tool whose whole claim is
+ * that it will not assert something untrue does not get to be wrong about its
+ * own version.
+ *
+ * `../../package.json` resolves to the package root from `dist/transports/`
+ * when installed and from `src/transports/` under vitest, so one path serves
+ * both. npm always includes `package.json` in a tarball regardless of `files`,
+ * so it is present in an installed copy.
+ *
+ * Returns `unknown` rather than a plausible-looking number if it cannot be
+ * read: an honest absence beats an invented version.
+ */
+export function packageVersion(): string {
+  try {
+    const raw = fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8');
+    const parsed = JSON.parse(raw) as { version?: unknown };
+    return typeof parsed.version === 'string' && parsed.version.length > 0
+      ? parsed.version
+      : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 export function installExitCode(report: DoctorReport): 0 | 1 {
   return !report.ok && !onlyUnusedProject(report) ? 1 : 0;
 }
@@ -754,7 +783,7 @@ export function createProgram(): Command {
   program
     .name('cortex')
     .description('Cortex working memory for AI agents')
-    .version('0.1.0');
+    .version(packageVersion());
 
   const log = program.command('log').description('Log events to the working memory');
 

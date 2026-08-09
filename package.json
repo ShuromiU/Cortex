@@ -1,6 +1,6 @@
 {
   "name": "@flowstatepm/cortex",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Working memory for AI agents — persistent cognitive state per project",
   "type": "module",
   "main": "dist/index.js",

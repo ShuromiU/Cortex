@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { Command } from 'commander';
-import { createProgram, formatBytes, installExitCode, onlyUnusedProject, renderDoctorReport, renderInstallResult } from '../src/transports/cli.js';
+import { createProgram, formatBytes, installExitCode, packageVersion, onlyUnusedProject, renderDoctorReport, renderInstallResult } from '../src/transports/cli.js';
 import type { DoctorCheck, DoctorReport } from '../src/query/doctor.js';
 import { HOOK_SCRIPTS, REQUIRED_WIRING, tokenizeCommand } from '../src/query/doctor.js';
 import type { InstallAction, InstallResult } from '../src/query/install.js';
@@ -2375,6 +2375,33 @@ describe('cortex install (CLI layer)', () => {
     }
   });
 });
+
+describe('the reported version', () => {
+  // It was a hardcoded '0.1.0' literal and it drifted the first time it could:
+  // 0.1.1 was published, installed from the public registry, and reported
+  // itself as 0.1.0. Caught by running the real install rather than by anything
+  // in here, which is why the pin now exists.
+  it('matches package.json exactly', () => {
+    const declared = JSON.parse(fs.readFileSync('package.json', 'utf8')) as { version: string };
+    expect(packageVersion()).toBe(declared.version);
+  });
+
+  it('is what the CLI actually prints, not just what the helper returns', () => {
+    // The helper being right is worth nothing if `--version` is wired to
+    // something else, which is exactly the shape of the original defect.
+    const declared = JSON.parse(fs.readFileSync('package.json', 'utf8')) as { version: string };
+    expect(createProgram().version()).toBe(declared.version);
+  });
+
+  it('never invents a version when package.json cannot be read', () => {
+    // An honest absence beats a plausible-looking number.
+    expect(['unknown', declaredVersion()]).toContain(packageVersion());
+  });
+});
+
+function declaredVersion(): string {
+  return (JSON.parse(fs.readFileSync('package.json', 'utf8')) as { version: string }).version;
+}
 
 describe('onlyUnusedProject', () => {
   const report = (checks: DoctorCheck[]): DoctorReport => ({
