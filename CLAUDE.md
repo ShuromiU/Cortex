@@ -41,7 +41,7 @@ A trust, freshness, and economy layer for coding-agent memory, not a transcript 
 - `src/memory/items.ts` — memory-item text/state shaping
 - `src/memory/hotness.ts` — decay/reinforcement scoring
 - `src/memory/kind-weights.ts` — single source of truth for kind weighting (retrieval vs working-set profiles)
-- `src/memory/references.ts` — file/path reference extraction from memory text; keeps the tilde on home-relative paths (see the home-relative invariant in `docs/invariants.md`)
+- `src/memory/references.ts` — file/path reference extraction from memory text; keeps the tilde on home-relative paths, and extracts nothing at all from a span whose root is not a checkable filesystem root — a URL authority, a `<placeholder>`, a concatenation fragment, a glob (see the home-relative and unrooted-span invariants in `docs/invariants.md`)
 - `src/memory/text.ts` — `TOKEN_PATTERN` + `stemLite`, the text primitives shared by the write path and the rerank layer
 - `src/memory/conflict.ts` — deterministic contradiction detection over note content
 - `src/query/tokenize.ts` — topic tokenization for the rerank layer; re-exports the `memory/text.ts` primitives

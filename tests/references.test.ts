@@ -206,6 +206,193 @@ describe('memory references', () => {
     expect(repaired).toEqual(['~/.claude/CLAUDE.md']);
   });
 
+  it('extracts nothing from a placeholder-rooted path, in either pass', () => {
+    const refs = extractMemoryReferences(
+      'parent .nexus/index.db opened read-only, plus <worktree>/.nexus/overlay.db with diverged files only.',
+    );
+
+    // Regression: `>` fell outside the posix lookbehind, so the match started
+    // at the `/` and stored `/.nexus/overlay.db` — an absolute-looking path
+    // resolving against nothing. Suppressing only that pass is not enough:
+    // the relative pass would then store `.nexus/overlay.db`, equally absent
+    // from the scope's app graph and equally `[stale: missing …]`.
+    expect(refs.map(ref => ref.normalizedPath)).toEqual(['.nexus/index.db']);
+  });
+
+  it('extracts nothing from any placeholder root flavour', () => {
+    for (const text of [
+      'writes <worktree>/.nexus/overlay.db now',
+      'writes <project>/.claude/settings.json now',
+      'writes ${HOME}/.codex/history.jsonl now',
+      'writes {root}/.nexus/telemetry.db now',
+      'writes %APPDATA%/npm/config.json now',
+    ]) {
+      expect(extractMemoryReferences(text)).toEqual([]);
+    }
+  });
+
+  it('extracts nothing from a URL, which is not a path on any filesystem', () => {
+    const refs = extractMemoryReferences(
+      'cloned https://github.com/obra/superpowers.git after reading https://www.sqlite.org/wal.html',
+    );
+
+    // `//` is not in the lookbehind set either, so the second slash started a
+    // match and stored `/github.com/obra/superpowers.git`. 157 rows machine-wide.
+    expect(refs).toEqual([]);
+  });
+
+  it('extracts nothing from a glob root or a concatenation fragment', () => {
+    expect(
+      extractMemoryReferences("rg -g '!**/.codex/history.jsonl' 'C:/Claude Code'"),
+    ).toEqual([]);
+    expect(
+      extractMemoryReferences("const s = fs.readFileSync(homedir()+'/.claude/settings.json')"),
+    ).toEqual([]);
+  });
+
+  it('still extracts a quoted absolute path that is not being concatenated', () => {
+    const refs = extractMemoryReferences("open('/tmp/_allow.sql','w').write(allow)");
+
+    // The fragment rule keys on the `+`, never on the quote: this shape is
+    // behind the only quote-preceded references measured to actually resolve.
+    expect(refs.map(ref => ref.normalizedPath)).toEqual(['/tmp/_allow.sql']);
+  });
+
+  it('masks only the unrooted span, leaving real references around it intact', () => {
+    const refs = extractMemoryReferences(
+      'see https://example.com/docs/readme.md and <worktree>/.nexus/overlay.db, then src/query/state.ts and /etc/cortex/config.json',
+    );
+
+    expect(refs.map(ref => ref.normalizedPath)).toEqual([
+      '/etc/cortex/config.json',
+      'src/query/state.ts',
+    ]);
+  });
+
+  it('does not mistake a bracketed real path for a placeholder root', () => {
+    // `<docs/readme.md>` is a delimited path, not a `<placeholder>/` root —
+    // the closing bracket has to precede the separator for the root to count.
+    const refs = extractMemoryReferences('the file <docs/readme.md> is the entry point');
+
+    expect(refs.map(ref => ref.normalizedPath)).toEqual(['docs/readme.md']);
+  });
+
+  it('leaves a memory carrying only placeholder paths unlabelled and in the working set', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-unrooted-'));
+    const store = new CortexStore(createTestDb(root));
+    const session = store.createSession({
+      worktreePath: root,
+      scopeType: 'project',
+      scopeKey: `project:${root}`,
+    });
+    const item = store.upsertMemoryItem({
+      id: 'memory-unrooted',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: session.scope_key!,
+      kind: 'note:decision',
+      sourceTable: 'notes',
+      sourceId: 'memory-unrooted',
+      subject: 'worktree overlay',
+      text: 'decision: open <worktree>/.nexus/overlay.db with diverged files only.',
+      state: 'hot',
+      importance: 2,
+    });
+
+    const validation = validateMemoryReferences(store, item);
+
+    expect(validation.references).toEqual([]);
+    expect(validation.missing).toBe(0);
+    // The false `[stale: missing /.nexus/overlay.db]` this test exists to kill,
+    // and with it the state.ts `.stale` filter that dropped the note entirely.
+    expect(validation.stale).toBe(false);
+    expect(validation.label).toBeNull();
+  });
+
+  it('repairs unrooted references already stored before the fix', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-unrooted-repair-'));
+    const db = createTestDb(root);
+    const store = new CortexStore(db);
+    const session = store.createSession({
+      worktreePath: root,
+      scopeType: 'project',
+      scopeKey: `project:${root}`,
+    });
+    const item = store.upsertMemoryItem({
+      id: 'memory-legacy-unrooted',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: session.scope_key!,
+      kind: 'note:decision',
+      sourceTable: 'notes',
+      sourceId: 'memory-legacy-unrooted',
+      subject: 'worktree overlay',
+      text: 'decision: open <worktree>/.nexus/overlay.db, cloned from https://github.com/obra/superpowers.git, alongside src/query/state.ts.',
+      state: 'hot',
+      importance: 2,
+    });
+
+    // Reproduce what the old extractor wrote: the placeholder and the URL
+    // authority both stored as absolute paths rooted at nothing.
+    db.prepare('DELETE FROM memory_references WHERE memory_item_id = ?').run(item.id);
+    const insert = db.prepare(
+      `INSERT INTO memory_references (
+         id, memory_item_id, reference_type, raw_reference, normalized_path, status, checked_at
+       ) VALUES (?, ?, ?, ?, ?, 'missing', NULL)`,
+    );
+    insert.run('legacy-a', item.id, 'absolute_path', '/.nexus/overlay.db', '/.nexus/overlay.db');
+    insert.run(
+      'legacy-b',
+      item.id,
+      'absolute_path',
+      '/github.com/obra/superpowers.git',
+      '/github.com/obra/superpowers.git',
+    );
+
+    ensureCortexSchema(db, root);
+
+    expect(store.getMemoryReferences(item.id).map(ref => ref.normalized_path)).toEqual([
+      'src/query/state.ts',
+    ]);
+  });
+
+  it('repairs an item whose references were all unrooted, leaving none behind', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-unrooted-empty-'));
+    const db = createTestDb(root);
+    const store = new CortexStore(db);
+    const session = store.createSession({
+      worktreePath: root,
+      scopeType: 'project',
+      scopeKey: `project:${root}`,
+    });
+    const item = store.upsertMemoryItem({
+      id: 'memory-legacy-all-unrooted',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: session.scope_key!,
+      kind: 'note:insight',
+      sourceTable: 'notes',
+      sourceId: 'memory-legacy-all-unrooted',
+      subject: 'telemetry',
+      text: 'insight: telemetry lands in {root}/.nexus/telemetry.db.',
+      state: 'warm',
+      importance: 1,
+    });
+
+    db.prepare('DELETE FROM memory_references WHERE memory_item_id = ?').run(item.id);
+    db.prepare(
+      `INSERT INTO memory_references (
+         id, memory_item_id, reference_type, raw_reference, normalized_path, status, checked_at
+       ) VALUES ('legacy-only', ?, 'absolute_path', '/.nexus/telemetry.db', '/.nexus/telemetry.db', 'missing', NULL)`,
+    ).run(item.id);
+
+    ensureCortexSchema(db, root);
+
+    // An item that now extracts to nothing must have its rows deleted, not
+    // skipped — otherwise the repair leaves exactly the rows it exists to clear.
+    expect(store.getMemoryReferences(item.id)).toEqual([]);
+  });
+
   it('refreshes a current app graph from the current checkout without ignored build folders', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-graph-'));
     fs.mkdirSync(path.join(root, 'src'), { recursive: true });

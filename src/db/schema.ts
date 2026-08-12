@@ -998,6 +998,7 @@ export function ensureCortexSchema(
 
   backfillV2Artifacts(db, rootPath);
   repairHomeRelativeReferences(db);
+  repairUnrootedReferences(db);
 
   // Upgrade-only. This was `!==`, which fires in both directions and silently
   // rewrote a newer store *down* to this build's version — destroying the only
@@ -1703,25 +1704,22 @@ function backfillMemoryReferences(db: Database.Database): void {
  */
 const HOME_REFERENCE_REPAIR_KEY = 'home_reference_repair_at';
 
-function repairHomeRelativeReferences(db: Database.Database): void {
-  if (!tableExists(db, 'memory_items') || !tableExists(db, 'memory_references')) {
-    return;
-  }
-  if (getMetaValue(db, HOME_REFERENCE_REPAIR_KEY)) {
-    return;
-  }
-
-  // Only an item whose own text carries a tilde can hold a mangled row.
-  const rows = db
-    .prepare(
-      `SELECT id, subject, text
-       FROM memory_items
-       WHERE text LIKE '%~/%' OR text LIKE '%~\\%'
-          OR subject LIKE '%~/%' OR subject LIKE '%~\\%'
-       ORDER BY created_at ASC, rowid ASC`,
-    )
-    .all() as MemoryItemReferenceBackfillRow[];
-
+/**
+ * Re-extract the given items and rewrite only those whose stored paths
+ * disagree with current extraction, so an item that merely matched a
+ * repair's candidate query keeps its cached statuses.
+ *
+ * An item that now extracts to nothing has its rows deleted rather than
+ * skipped: a span that should never have produced a reference at all is
+ * precisely what `repairUnrootedReferences` exists to clear.
+ *
+ * Callers supply their own candidate rows and their own transaction; this is
+ * only the compare-and-rewrite, shared so the repairs cannot drift apart.
+ */
+function reextractMemoryReferences(
+  db: Database.Database,
+  rows: MemoryItemReferenceBackfillRow[],
+): void {
   const selectExisting = db.prepare(
     'SELECT normalized_path FROM memory_references WHERE memory_item_id = ? ORDER BY rowid',
   );
@@ -1741,34 +1739,101 @@ function repairHomeRelativeReferences(db: Database.Database): void {
      VALUES (?, ?, ?, ?, ?, 'unknown', NULL)`,
   );
 
-  const tx = db.transaction(() => {
-    for (const row of rows) {
-      const extracted = extractMemoryReferences(row.subject, row.text);
-      if (extracted.length === 0) {
-        continue;
-      }
-
-      const stored = (selectExisting.all(row.id) as Array<{ normalized_path: string }>)
-        .map(ref => ref.normalized_path)
-        .sort();
-      const fresh = extracted.map(ref => ref.normalizedPath).sort();
-      if (stored.length === fresh.length && stored.every((p, i) => p === fresh[i])) {
-        continue;
-      }
-
-      deleteExisting.run(row.id);
-      for (const ref of extracted) {
-        insert.run(
-          crypto.randomUUID(),
-          row.id,
-          ref.referenceType,
-          ref.rawReference,
-          ref.normalizedPath,
-        );
-      }
+  for (const row of rows) {
+    const extracted = extractMemoryReferences(row.subject, row.text);
+    const stored = (selectExisting.all(row.id) as Array<{ normalized_path: string }>)
+      .map(ref => ref.normalized_path)
+      .sort();
+    const fresh = extracted.map(ref => ref.normalizedPath).sort();
+    if (stored.length === fresh.length && stored.every((p, i) => p === fresh[i])) {
+      continue;
     }
 
+    deleteExisting.run(row.id);
+    for (const ref of extracted) {
+      insert.run(
+        crypto.randomUUID(),
+        row.id,
+        ref.referenceType,
+        ref.rawReference,
+        ref.normalizedPath,
+      );
+    }
+  }
+}
+
+function repairHomeRelativeReferences(db: Database.Database): void {
+  if (!tableExists(db, 'memory_items') || !tableExists(db, 'memory_references')) {
+    return;
+  }
+  if (getMetaValue(db, HOME_REFERENCE_REPAIR_KEY)) {
+    return;
+  }
+
+  // Only an item whose own text carries a tilde can hold a mangled row.
+  const rows = db
+    .prepare(
+      `SELECT id, subject, text
+       FROM memory_items
+       WHERE text LIKE '%~/%' OR text LIKE '%~\\%'
+          OR subject LIKE '%~/%' OR subject LIKE '%~\\%'
+       ORDER BY created_at ASC, rowid ASC`,
+    )
+    .all() as MemoryItemReferenceBackfillRow[];
+
+  const tx = db.transaction(() => {
+    reextractMemoryReferences(db, rows);
     setMetaValue(db, HOME_REFERENCE_REPAIR_KEY, new Date().toISOString());
+  });
+
+  tx();
+}
+
+/**
+ * Repair references extracted from spans that were never rooted anywhere
+ * checkable — a URL authority, a placeholder root, a concatenation fragment,
+ * or a glob (see `UNROOTED_SPAN_PATTERN` in `memory/references.ts`).
+ *
+ * Each of those producers emits a leading-slash path, so an item holding one
+ * is exactly an item with an `absolute_path` row that starts with `/`. That
+ * is the candidate query: cheap, and it cannot miss a harmed item. Items
+ * whose leading-slash paths are genuine re-extract identically and are left
+ * alone.
+ *
+ * References are extracted only at write time, so rows already in a store stay
+ * wrong until re-extracted, and `backfillMemoryReferences` cannot do it — it
+ * only fills items that have no references at all. Guarded by its own meta key
+ * rather than a `SCHEMA_VERSION` bump (AD-11 spends one increment per release)
+ * and by a separate key from the home-relative repair, which has already run
+ * on every live store and would never revisit these rows.
+ */
+const UNROOTED_REFERENCE_REPAIR_KEY = 'unrooted_reference_repair_at';
+
+function repairUnrootedReferences(db: Database.Database): void {
+  if (!tableExists(db, 'memory_items') || !tableExists(db, 'memory_references')) {
+    return;
+  }
+  if (getMetaValue(db, UNROOTED_REFERENCE_REPAIR_KEY)) {
+    return;
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT mi.id, mi.subject, mi.text
+       FROM memory_items mi
+       WHERE EXISTS (
+         SELECT 1
+         FROM memory_references mr
+         WHERE mr.memory_item_id = mi.id
+           AND mr.normalized_path LIKE '/%'
+       )
+       ORDER BY mi.created_at ASC, mi.rowid ASC`,
+    )
+    .all() as MemoryItemReferenceBackfillRow[];
+
+  const tx = db.transaction(() => {
+    reextractMemoryReferences(db, rows);
+    setMetaValue(db, UNROOTED_REFERENCE_REPAIR_KEY, new Date().toISOString());
   });
 
   tx();
