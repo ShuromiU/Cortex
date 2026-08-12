@@ -41,13 +41,13 @@ A trust, freshness, and economy layer for coding-agent memory, not a transcript 
 - `src/memory/items.ts` — memory-item text/state shaping
 - `src/memory/hotness.ts` — decay/reinforcement scoring
 - `src/memory/kind-weights.ts` — single source of truth for kind weighting (retrieval vs working-set profiles)
-- `src/memory/references.ts` — file/path reference extraction from memory text
+- `src/memory/references.ts` — file/path reference extraction from memory text; keeps the tilde on home-relative paths (see the home-relative invariant in `docs/invariants.md`)
 - `src/memory/text.ts` — `TOKEN_PATTERN` + `stemLite`, the text primitives shared by the write path and the rerank layer
 - `src/memory/conflict.ts` — deterministic contradiction detection over note content
 - `src/query/tokenize.ts` — topic tokenization for the rerank layer; re-exports the `memory/text.ts` primitives
 - `src/query/render.ts` — shared memory-line rendering; owns the `[contested]` marker, contested-pair grouping, and the `already rejected:` alternatives line
 - `src/query/retrieval.ts` — retrieval/reranking
-- `src/query/reference-validation.ts` — `ReferenceValidator` (memoized, batched), rename/moved resolution, graduated stale scoring
+- `src/query/reference-validation.ts` — `ReferenceValidator` (memoized, batched), rename/moved resolution, graduated stale scoring, and home-relative (`~/…`) expansion at the one branch that touches disk
 - `src/query/validate-memory.ts` — diagnostic memory validation reports
 - `src/query/inspect.ts` — `list-memory` / `inspect-memory` (FR-21); owns the page-size cap and the only read of `notes.conflict` that does not go through projected text
 - `src/query/correct.ts` — `edit-memory` / `delete-memory` (FR-22); preview-before-delete and the contested-pair clearing rule

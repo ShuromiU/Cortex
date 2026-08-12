@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
   CortexStore,
@@ -41,8 +42,44 @@ function emptyValidation(): MemoryReferenceValidation {
   };
 }
 
+function isHomeRelativePath(normalizedPath: string): boolean {
+  return (
+    normalizedPath === '~' ||
+    normalizedPath.startsWith('~/') ||
+    normalizedPath.startsWith('~\\')
+  );
+}
+
+/** Home-relative paths are root-anchored, so they take the filesystem branch
+ * rather than being looked up in a scope's app graph. */
 function isAbsolutePath(normalizedPath: string): boolean {
-  return /^[A-Za-z]:\//.test(normalizedPath) || normalizedPath.startsWith('/');
+  return (
+    /^[A-Za-z]:\//.test(normalizedPath) ||
+    normalizedPath.startsWith('/') ||
+    isHomeRelativePath(normalizedPath)
+  );
+}
+
+/**
+ * `~` is a shell convention Node does not resolve — `fs.existsSync('~/x')` is
+ * always false — which is the same false-negative `expandHookPath` exists to
+ * prevent in `doctor.ts`, where skipping it "reports every configured script
+ * as missing". Here it labelled correct memory `[stale: missing …]`, and
+ * `~/.claude/CLAUDE.md` is among the most-referenced paths there is.
+ *
+ * Returns null when no home directory is available, so the caller reports
+ * `unknown` rather than asserting a file is gone that it never managed to
+ * check. Expansion lives here, at the one place that touches the filesystem,
+ * so the stored path keeps the tilde the note was written with.
+ */
+function expandHomePath(normalizedPath: string, homeDir: string | null): string | null {
+  if (!isHomeRelativePath(normalizedPath)) {
+    return normalizedPath;
+  }
+  if (!homeDir) {
+    return null;
+  }
+  return normalizedPath === '~' ? homeDir : path.join(homeDir, normalizedPath.slice(2));
 }
 
 function pathExistsRaw(filePath: string): boolean {
@@ -84,6 +121,11 @@ interface ResolvedStatus {
   movedTo: string | null;
 }
 
+export interface ReferenceValidatorOptions {
+  /** Overrides `os.homedir()` when expanding home-relative references. */
+  homeDir?: string | null;
+}
+
 interface ScopeGraphEntry {
   graph: ParsedCurrentAppGraph | undefined;
   files: Set<string> | null;
@@ -110,8 +152,17 @@ export class ReferenceValidator {
     movedTo: string | null;
   }> = [];
   private readonly checkedAt = new Date().toISOString();
+  private readonly homeDir: string | null;
 
-  constructor(private readonly store: CortexStore) {}
+  constructor(
+    private readonly store: CortexStore,
+    options: ReferenceValidatorOptions = {},
+  ) {
+    // `??` would conflate "not supplied" with an explicit `null`, which means
+    // "there is no home directory" and must not fall back to the real one.
+    this.homeDir =
+      options.homeDir === undefined ? os.homedir() || null : options.homeDir;
+  }
 
   validate(item: ParsedMemoryItem): MemoryReferenceValidation {
     const cached = this.itemCache.get(item.id);
@@ -182,8 +233,14 @@ export class ReferenceValidator {
     const normalizedPath = ref.normalized_path;
 
     if (isAbsolutePath(normalizedPath)) {
+      const resolved = expandHomePath(normalizedPath, this.homeDir);
+      if (resolved === null) {
+        // No home directory to expand against: we could not check, so we must
+        // not claim the file is gone.
+        return { status: 'unknown', movedTo: null };
+      }
       return {
-        status: this.pathExists(normalizedPath) ? 'exists' : 'missing',
+        status: this.pathExists(resolved) ? 'exists' : 'missing',
         movedTo: null,
       };
     }
@@ -300,8 +357,9 @@ export class ReferenceValidator {
 export function validateMemoryReferences(
   store: CortexStore,
   item: ParsedMemoryItem,
+  options: ReferenceValidatorOptions = {},
 ): MemoryReferenceValidation {
-  const validator = new ReferenceValidator(store);
+  const validator = new ReferenceValidator(store, options);
   const validation = validator.validate(item);
   validator.flush();
   return validation;

@@ -7,7 +7,24 @@ export interface ExtractedMemoryReference {
 }
 
 const WINDOWS_ABSOLUTE_START_PATTERN = /[A-Za-z]:[\\/]/g;
-const POSIX_ABSOLUTE_PATTERN = /(?<![A-Za-z0-9_.@-])\/(?:[A-Za-z0-9_.@-]+\/)+[A-Za-z0-9_.@-]+\.[A-Za-z0-9]{1,10}/g;
+/**
+ * `~` belongs in the excluded lookbehind set. Without it the leading tilde of
+ * `~/.claude/CLAUDE.md` fell outside the match and the reference was stored as
+ * `/.claude/CLAUDE.md` — an absolute-looking path that resolves against
+ * nothing, so a correct memory rendered as `[stale: missing …]` and was
+ * dropped from the working set by `state.ts`. See HOME_RELATIVE_PATTERN.
+ */
+const POSIX_ABSOLUTE_PATTERN = /(?<![A-Za-z0-9_.@~-])\/(?:[A-Za-z0-9_.@-]+\/)+[A-Za-z0-9_.@-]+\.[A-Za-z0-9]{1,10}/g;
+/**
+ * Home-relative references (`~/.claude/settings.json`) are root-anchored like
+ * an absolute path, just at a root only the shell knows — so they are typed
+ * `absolute_path` and never looked up in a scope's app graph. The tilde is
+ * kept in the stored path so memory reads back what the note actually said;
+ * expansion happens once, at the filesystem boundary in
+ * `query/reference-validation.ts`.
+ */
+const HOME_RELATIVE_PATTERN =
+  /(?<![A-Za-z0-9_.@-])~[\\/](?:[A-Za-z0-9_.@-]+[\\/])*[A-Za-z0-9_.@-]+\.[A-Za-z0-9]{1,10}/g;
 const RELATIVE_PATH_PATTERN =
   /(?:\.{1,2}[\\/])?(?:[A-Za-z0-9_.@-]+[\\/])+(?:[A-Za-z0-9_.@-]+\.[A-Za-z0-9]{1,10})/g;
 const FILE_EXTENSION_PATTERN = /\.[A-Za-z0-9]{1,10}(?::\d+(?::\d+)?)?/g;
@@ -28,7 +45,11 @@ function normalizeReference(raw: string): string {
 }
 
 function isAbsoluteReference(normalized: string): boolean {
-  return /^[A-Za-z]:\//.test(normalized) || normalized.startsWith('/');
+  return (
+    /^[A-Za-z]:\//.test(normalized) ||
+    normalized.startsWith('/') ||
+    normalized.startsWith('~/')
+  );
 }
 
 function collectMatches(text: string, pattern: RegExp): string[] {
@@ -64,8 +85,12 @@ function collectWindowsAbsoluteReferences(text: string): string[] {
 
 export function extractMemoryReferences(...parts: Array<string | null | undefined>): ExtractedMemoryReference[] {
   const text = parts.filter((part): part is string => typeof part === 'string').join('\n');
+  // Home-relative before relative: `~/.claude/CLAUDE.md` must reach
+  // `absolutePaths` first so the relative pass's `.claude/CLAUDE.md` is
+  // suppressed as the duplicate it is.
   const rawMatches = [
     ...collectWindowsAbsoluteReferences(text),
+    ...collectMatches(text, HOME_RELATIVE_PATTERN),
     ...collectMatches(text, POSIX_ABSOLUTE_PATTERN),
     ...collectMatches(text, RELATIVE_PATH_PATTERN),
   ];

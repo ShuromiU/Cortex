@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
-import { applySchema, initializeMeta } from '../src/db/schema.js';
+import { applySchema, ensureCortexSchema, initializeMeta } from '../src/db/schema.js';
 import { CortexStore } from '../src/db/store.js';
 import { extractMemoryReferences } from '../src/memory/references.js';
 import { detectGitRenames, refreshCurrentAppGraph } from '../src/scope/app-graph.js';
@@ -44,6 +44,166 @@ describe('memory references', () => {
       'C:/Claude Code/cortex/src/query/state.ts',
       'C:/repo/src/plain.ts',
     ]);
+  });
+
+  it('keeps the tilde on home-relative references instead of stripping it', () => {
+    const refs = extractMemoryReferences(
+      'Hook wiring lives in ~/.claude/settings.json and the rule is in ~/.claude/CLAUDE.md.',
+    );
+
+    // Regression: the tilde used to fall outside the match, storing
+    // `/.claude/CLAUDE.md` — an absolute path resolving against nothing.
+    expect(refs.map(ref => ref.normalizedPath)).toEqual([
+      '~/.claude/settings.json',
+      '~/.claude/CLAUDE.md',
+    ]);
+    expect(refs.every(ref => ref.referenceType === 'absolute_path')).toBe(true);
+    // The relative pass must not also emit a bare `.claude/CLAUDE.md` twin.
+    expect(refs.map(ref => ref.normalizedPath)).not.toContain('.claude/CLAUDE.md');
+  });
+
+  it('still extracts genuine posix absolute paths that follow a word character', () => {
+    const refs = extractMemoryReferences(
+      'Config at /etc/cortex/config.json and the log in /var/log/cortex.log.',
+    );
+
+    expect(refs.map(ref => ref.normalizedPath)).toEqual([
+      '/etc/cortex/config.json',
+      '/var/log/cortex.log',
+    ]);
+  });
+
+  it('resolves home-relative references against the home directory', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-home-'));
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'CLAUDE.md'), '# rules\n');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-home-root-'));
+    const store = new CortexStore(createTestDb(root));
+    const session = store.createSession({
+      worktreePath: root,
+      scopeType: 'project',
+      scopeKey: `project:${root}`,
+    });
+    const item = store.upsertMemoryItem({
+      id: 'memory-home-ref',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: session.scope_key!,
+      kind: 'note:decision',
+      sourceTable: 'notes',
+      sourceId: 'memory-home-ref',
+      subject: 'guidance',
+      text: 'decision: the consult policy lives in ~/.claude/CLAUDE.md.',
+      state: 'hot',
+      importance: 2,
+    });
+
+    const validation = validateMemoryReferences(store, item, { homeDir: home });
+
+    expect(validation.references.map(ref => [ref.normalized_path, ref.status])).toEqual([
+      ['~/.claude/CLAUDE.md', 'exists'],
+    ]);
+    expect(validation.stale).toBe(false);
+    // The false `[stale: missing /.claude/CLAUDE.md]` this test exists to kill.
+    expect(validation.label).toBeNull();
+  });
+
+  it('still reports a home-relative reference that is genuinely gone', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-home-gone-'));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-home-gone-root-'));
+    const store = new CortexStore(createTestDb(root));
+    const session = store.createSession({
+      worktreePath: root,
+      scopeType: 'project',
+      scopeKey: `project:${root}`,
+    });
+    const item = store.upsertMemoryItem({
+      id: 'memory-home-missing',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: session.scope_key!,
+      kind: 'note:decision',
+      sourceTable: 'notes',
+      sourceId: 'memory-home-missing',
+      subject: 'hooks',
+      text: 'decision: capture runs from ~/.claude/hooks/deleted.sh.',
+      state: 'hot',
+      importance: 2,
+    });
+
+    const validation = validateMemoryReferences(store, item, { homeDir: home });
+
+    // Expanding rather than excluding keeps the signal: a deleted home file
+    // is still reported, which is the whole point of the label.
+    expect(validation.missing).toBe(1);
+    expect(validation.stale).toBe(true);
+    expect(validation.label).toBe('stale: missing ~/.claude/hooks/deleted.sh');
+  });
+
+  it('reports unknown, not missing, when there is no home directory to expand against', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-home-none-'));
+    const store = new CortexStore(createTestDb(root));
+    const session = store.createSession({
+      worktreePath: root,
+      scopeType: 'project',
+      scopeKey: `project:${root}`,
+    });
+    const item = store.upsertMemoryItem({
+      id: 'memory-home-unknown',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: session.scope_key!,
+      kind: 'note:insight',
+      sourceTable: 'notes',
+      sourceId: 'memory-home-unknown',
+      subject: 'guidance',
+      text: 'insight: ~/.claude/CLAUDE.md carries the consult policy.',
+      state: 'warm',
+      importance: 1,
+    });
+
+    const validation = validateMemoryReferences(store, item, { homeDir: null });
+
+    expect(validation.unknown).toBe(1);
+    expect(validation.missing).toBe(0);
+    expect(validation.stale).toBe(false);
+  });
+
+  it('repairs tilde-stripped references already stored before the fix', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-home-repair-'));
+    const db = createTestDb(root);
+    const store = new CortexStore(db);
+    const session = store.createSession({
+      worktreePath: root,
+      scopeType: 'project',
+      scopeKey: `project:${root}`,
+    });
+    const item = store.upsertMemoryItem({
+      id: 'memory-legacy-home-ref',
+      sessionId: session.id,
+      scopeType: 'project',
+      scopeKey: session.scope_key!,
+      kind: 'note:decision',
+      sourceTable: 'notes',
+      sourceId: 'memory-legacy-home-ref',
+      subject: 'guidance',
+      text: 'decision: the consult policy lives in ~/.claude/CLAUDE.md.',
+      state: 'hot',
+      importance: 2,
+    });
+
+    // Reproduce what the old extractor wrote: the tilde stripped off.
+    db.prepare('DELETE FROM memory_references WHERE memory_item_id = ?').run(item.id);
+    db.prepare(
+      `INSERT INTO memory_references (
+         id, memory_item_id, reference_type, raw_reference, normalized_path, status, checked_at
+       ) VALUES ('legacy-ref', ?, 'absolute_path', '/.claude/CLAUDE.md', '/.claude/CLAUDE.md', 'missing', NULL)`,
+    ).run(item.id);
+
+    ensureCortexSchema(db, root);
+
+    const repaired = store.getMemoryReferences(item.id).map(ref => ref.normalized_path);
+    expect(repaired).toEqual(['~/.claude/CLAUDE.md']);
   });
 
   it('refreshes a current app graph from the current checkout without ignored build folders', () => {

@@ -997,6 +997,7 @@ export function ensureCortexSchema(
   }
 
   backfillV2Artifacts(db, rootPath);
+  repairHomeRelativeReferences(db);
 
   // Upgrade-only. This was `!==`, which fires in both directions and silently
   // rewrote a newer store *down* to this build's version — destroying the only
@@ -1679,6 +1680,95 @@ function backfillMemoryReferences(db: Database.Database): void {
         );
       }
     }
+  });
+
+  tx();
+}
+
+/**
+ * Repair references mangled before home-relative paths were understood.
+ *
+ * `~/.claude/CLAUDE.md` was stored with the tilde stripped, as
+ * `/.claude/CLAUDE.md` — an absolute-looking path resolving against nothing,
+ * so the memory rendered `[stale: missing …]` and `state.ts` dropped it from
+ * the working set entirely. References are extracted only at write time, so
+ * every row already in a store stays wrong until re-extracted, and
+ * `backfillMemoryReferences` cannot do it: it only fills items that have no
+ * references at all.
+ *
+ * Guarded by a meta key rather than a `SCHEMA_VERSION` bump — AD-11 allows one
+ * increment per release and this release has spent it. Rewrites only items
+ * whose stored paths actually disagree with current extraction, so an item
+ * that merely mentions a tilde keeps its cached statuses.
+ */
+const HOME_REFERENCE_REPAIR_KEY = 'home_reference_repair_at';
+
+function repairHomeRelativeReferences(db: Database.Database): void {
+  if (!tableExists(db, 'memory_items') || !tableExists(db, 'memory_references')) {
+    return;
+  }
+  if (getMetaValue(db, HOME_REFERENCE_REPAIR_KEY)) {
+    return;
+  }
+
+  // Only an item whose own text carries a tilde can hold a mangled row.
+  const rows = db
+    .prepare(
+      `SELECT id, subject, text
+       FROM memory_items
+       WHERE text LIKE '%~/%' OR text LIKE '%~\\%'
+          OR subject LIKE '%~/%' OR subject LIKE '%~\\%'
+       ORDER BY created_at ASC, rowid ASC`,
+    )
+    .all() as MemoryItemReferenceBackfillRow[];
+
+  const selectExisting = db.prepare(
+    'SELECT normalized_path FROM memory_references WHERE memory_item_id = ? ORDER BY rowid',
+  );
+  const deleteExisting = db.prepare(
+    'DELETE FROM memory_references WHERE memory_item_id = ?',
+  );
+  const insert = db.prepare(
+    `INSERT INTO memory_references (
+       id,
+       memory_item_id,
+       reference_type,
+       raw_reference,
+       normalized_path,
+       status,
+       checked_at
+     )
+     VALUES (?, ?, ?, ?, ?, 'unknown', NULL)`,
+  );
+
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      const extracted = extractMemoryReferences(row.subject, row.text);
+      if (extracted.length === 0) {
+        continue;
+      }
+
+      const stored = (selectExisting.all(row.id) as Array<{ normalized_path: string }>)
+        .map(ref => ref.normalized_path)
+        .sort();
+      const fresh = extracted.map(ref => ref.normalizedPath).sort();
+      if (stored.length === fresh.length && stored.every((p, i) => p === fresh[i])) {
+        continue;
+      }
+
+      deleteExisting.run(row.id);
+      for (const ref of extracted) {
+        insert.run(
+          crypto.randomUUID(),
+          row.id,
+          ref.referenceType,
+          ref.rawReference,
+          ref.normalizedPath,
+        );
+      }
+    }
+
+    setMetaValue(db, HOME_REFERENCE_REPAIR_KEY, new Date().toISOString());
   });
 
   tx();
