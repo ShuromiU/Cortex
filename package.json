@@ -1,6 +1,6 @@
 {
   "name": "@flowstatepm/cortex",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Working memory for AI agents — persistent cognitive state per project",
   "type": "module",
   "main": "dist/index.js",
@@ -14,7 +14,12 @@
   "bin": {
     "cortex": "dist/transports/cli.js"
   },
-  "files": ["dist", "hooks", "LICENSE", "README.md"],
+  "files": [
+    "dist",
+    "hooks",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -32,12 +37,28 @@
     "url": "https://github.com/ShuromiU/Cortex/issues"
   },
   "homepage": "https://github.com/ShuromiU/Cortex#readme",
-  "keywords": ["ai", "memory", "mcp", "context", "cognitive-state", "claude-code", "working-memory"],
+  "keywords": [
+    "ai",
+    "memory",
+    "mcp",
+    "context",
+    "cognitive-state",
+    "claude-code",
+    "working-memory"
+  ],
   "author": "ShuromiU",
   "license": "MIT",
-  "engines": { "node": ">=18" },
-  "os": ["darwin", "linux", "win32"],
-  "publishConfig": { "access": "public" },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.8.0",
